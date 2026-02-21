@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hive-cli"
+version = "0.1.0"
+description = "Plan and coordinate the work — quests, coordinator, context."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Apiari" }
+]
+dependencies = [
+    "typer>=0.9.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+    "claude-agent-sdk>=0.1.30",
+]
+
+[project.scripts]
+hive = "hive.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hive"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/hive/cli.py" = ["E402", "I001"]
