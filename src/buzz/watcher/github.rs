@@ -14,8 +14,8 @@ use crate::signal::{Severity, Signal};
 use async_trait::async_trait;
 use color_eyre::Result;
 
-use crate::buzz::config::GithubConfig;
 use super::Watcher;
+use crate::buzz::config::GithubConfig;
 
 /// Watches GitHub repositories for new events (issues, PRs, CI failures)
 /// by shelling out to the `gh api` CLI.
@@ -205,10 +205,7 @@ impl GithubWatcher {
         let number = issue.get("number")?.as_u64()?;
         let title = issue.get("title")?.as_str()?;
         let html_url = issue.get("html_url")?.as_str()?;
-        let body = issue
-            .get("body")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let body = issue.get("body").and_then(|v| v.as_str()).unwrap_or("");
 
         let is_pr = issue.get("pull_request").is_some();
         let kind = if is_pr { "pr" } else { "issue" };
@@ -235,11 +232,7 @@ impl GithubWatcher {
     }
 
     /// Convert a PR review request (from search API) to a Signal.
-    fn review_request_to_signal(
-        &self,
-        repo: &str,
-        item: &serde_json::Value,
-    ) -> Option<Signal> {
+    fn review_request_to_signal(&self, repo: &str, item: &serde_json::Value) -> Option<Signal> {
         let number = item.get("number")?.as_u64()?;
         let title = item.get("title")?.as_str()?;
         let html_url = item.get("html_url")?.as_str()?;

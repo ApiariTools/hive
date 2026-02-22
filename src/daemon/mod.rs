@@ -8,15 +8,15 @@
 pub mod config;
 pub mod session_store;
 
-use crate::channel::{Channel, ChannelEvent, OutboundMessage};
 use crate::channel::telegram::TelegramChannel;
+use crate::channel::{Channel, ChannelEvent, OutboundMessage};
 use crate::coordinator::Coordinator;
 use crate::quest::{QuestStore, default_store_path};
+use crate::signal::{Severity, Signal};
 use crate::workspace::load_workspace;
 use apiari_claude_sdk::types::ContentBlock;
 use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use apiari_common::ipc::JsonlReader;
-use crate::signal::{Severity, Signal};
 use color_eyre::eyre::{Result, WrapErr};
 use config::DaemonConfig;
 use session_store::SessionStore;
@@ -236,9 +236,12 @@ impl DaemonRunner {
         let coord = Coordinator::new(workspace, store);
         let mut coordinator_prompt = coord.build_system_prompt()?;
         coordinator_prompt.push_str("\n## Daemon Mode Constraints\n");
-        coordinator_prompt.push_str("You are running as a bot in daemon mode (not an interactive terminal).\n");
+        coordinator_prompt
+            .push_str("You are running as a bot in daemon mode (not an interactive terminal).\n");
         coordinator_prompt.push_str("Keep responses conversational and concise.\n");
-        coordinator_prompt.push_str("Do NOT modify files directly — no Write, Edit, or file-writing shell commands.\n");
+        coordinator_prompt.push_str(
+            "Do NOT modify files directly — no Write, Edit, or file-writing shell commands.\n",
+        );
         coordinator_prompt.push_str("Dispatch coding work to swarm agents via `swarm create`.\n");
         coordinator_prompt.push_str("Only use Bash for: swarm commands, git status/log, cargo check, and other read-only operations.\n");
 
@@ -285,8 +288,7 @@ impl DaemonRunner {
             channel_clone.run(tx, poll_cancel).await;
         });
 
-        let buzz_interval =
-            std::time::Duration::from_secs(self.config.buzz_poll_interval_secs);
+        let buzz_interval = std::time::Duration::from_secs(self.config.buzz_poll_interval_secs);
         let mut buzz_timer = tokio::time::interval(buzz_interval);
         buzz_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Skip the first immediate tick.
@@ -376,21 +378,24 @@ impl DaemonRunner {
     }
 
     /// Handle a slash command.
-    async fn handle_command(
-        &mut self,
-        chat_id: i64,
-        command: &str,
-        args: &str,
-    ) -> Result<()> {
+    async fn handle_command(&mut self, chat_id: i64, command: &str, args: &str) -> Result<()> {
         match command {
             "start" => {
-                self.send(chat_id, "Hive daemon is running. Send me a message to chat with the coordinator.").await
+                self.send(
+                    chat_id,
+                    "Hive daemon is running. Send me a message to chat with the coordinator.",
+                )
+                .await
             }
             "reset" => {
                 let had_session = self.sessions.reset_session(chat_id);
                 self.sessions.save()?;
                 if had_session {
-                    self.send(chat_id, "Session reset. Next message starts a fresh conversation.").await
+                    self.send(
+                        chat_id,
+                        "Session reset. Next message starts a fresh conversation.",
+                    )
+                    .await
                 } else {
                     self.send(chat_id, "No active session to reset.").await
                 }
@@ -414,17 +419,24 @@ impl DaemonRunner {
             }
             "resume" => {
                 if args.is_empty() {
-                    return self.send(chat_id, "Usage: /resume <session-id-prefix>").await;
+                    return self
+                        .send(chat_id, "Usage: /resume <session-id-prefix>")
+                        .await;
                 }
                 match self.sessions.find_archived(chat_id, args) {
                     Some(session_id) => {
                         self.sessions.resume_session(chat_id, &session_id);
                         self.sessions.save()?;
                         let short = &session_id[..8.min(session_id.len())];
-                        self.send(chat_id, &format!("Resumed session `{short}`. Send a message to continue.")).await
+                        self.send(
+                            chat_id,
+                            &format!("Resumed session `{short}`. Send a message to continue."),
+                        )
+                        .await
                     }
                     None => {
-                        self.send(chat_id, "No unique session found matching that prefix.").await
+                        self.send(chat_id, "No unique session found matching that prefix.")
+                            .await
                     }
                 }
             }
@@ -456,7 +468,11 @@ impl DaemonRunner {
                 .await
             }
             _ => {
-                self.send(chat_id, &format!("Unknown command: /{command}\nSend /help for available commands.")).await
+                self.send(
+                    chat_id,
+                    &format!("Unknown command: /{command}\nSend /help for available commands."),
+                )
+                .await
             }
         }
     }
@@ -556,25 +572,28 @@ impl DaemonRunner {
         };
 
         let client = ClaudeClient::new();
-        let mut session = client.spawn(opts).await.map_err(|e| {
-            color_eyre::eyre::eyre!("failed to spawn Claude session: {e}")
-        })?;
+        let mut session = client
+            .spawn(opts)
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("failed to spawn Claude session: {e}"))?;
 
         // Send the user message immediately — do NOT wait for system event first.
         // Claude CLI with --input-format stream-json doesn't emit system event until
         // it receives input, so waiting would deadlock.
-        session.send_message(text).await.map_err(|e| {
-            color_eyre::eyre::eyre!("failed to send message: {e}")
-        })?;
+        session
+            .send_message(text)
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("failed to send message: {e}"))?;
 
         // Collect the response.
         let mut response_text = String::new();
         let mut session_id = String::new();
 
         loop {
-            let event = session.next_event().await.map_err(|e| {
-                color_eyre::eyre::eyre!("error reading event: {e}")
-            })?;
+            let event = session
+                .next_event()
+                .await
+                .map_err(|e| color_eyre::eyre::eyre!("error reading event: {e}"))?;
 
             match event {
                 Some(Event::Assistant { message, .. }) => {
@@ -592,10 +611,10 @@ impl DaemonRunner {
                 }
                 Some(Event::Result(result)) => {
                     session_id = result.session_id;
-                    if let Some(text) = &result.result {
-                        if response_text.is_empty() {
-                            response_text = text.clone();
-                        }
+                    if let Some(text) = &result.result
+                        && response_text.is_empty()
+                    {
+                        response_text = text.clone();
                     }
                     break;
                 }
@@ -634,10 +653,7 @@ impl DaemonRunner {
             return Ok(());
         }
 
-        eprintln!(
-            "[daemon] {} new buzz signal(s) to triage",
-            important.len()
-        );
+        eprintln!("[daemon] {} new buzz signal(s) to triage", important.len());
 
         for signal in important {
             let assessment = self.triage_signal(signal).await;
@@ -706,16 +722,18 @@ impl DaemonRunner {
         prompt: &str,
     ) -> Result<String> {
         // Send message immediately — don't wait for system event (same deadlock issue).
-        session.send_message(prompt).await.map_err(|e| {
-            color_eyre::eyre::eyre!("{e}")
-        })?;
+        session
+            .send_message(prompt)
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
         session.close_stdin();
 
         let mut text = String::new();
         loop {
-            let event = session.next_event().await.map_err(|e| {
-                color_eyre::eyre::eyre!("{e}")
-            })?;
+            let event = session
+                .next_event()
+                .await
+                .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
             match event {
                 Some(Event::Assistant { message, .. }) => {
                     for block in &message.message.content {
@@ -728,10 +746,10 @@ impl DaemonRunner {
                     }
                 }
                 Some(Event::Result(r)) => {
-                    if let Some(result_text) = &r.result {
-                        if text.is_empty() {
-                            text = result_text.clone();
-                        }
+                    if let Some(result_text) = &r.result
+                        && text.is_empty()
+                    {
+                        text = result_text.clone();
                     }
                     break;
                 }
@@ -780,9 +798,5 @@ fn format_triage_alert(signal: &Signal, assessment: &str) -> String {
 
 /// Truncate a string for display.
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
+    if s.len() <= max { s } else { &s[..max] }
 }

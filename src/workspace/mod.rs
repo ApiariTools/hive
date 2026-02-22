@@ -113,8 +113,7 @@ fn load_from_file(path: &Path, root: &Path) -> Result<Workspace> {
 /// Writes `.hive/workspace.yaml` in the given directory.
 pub fn init_workspace(dir: &Path) -> Result<PathBuf> {
     let hive_dir = dir.join(".hive");
-    std::fs::create_dir_all(&hive_dir)
-        .wrap_err("failed to create .hive directory")?;
+    std::fs::create_dir_all(&hive_dir).wrap_err("failed to create .hive directory")?;
 
     let config_path = hive_dir.join("workspace.yaml");
     if config_path.exists() {
@@ -132,15 +131,13 @@ pub fn init_workspace(dir: &Path) -> Result<PathBuf> {
         ..Workspace::default()
     };
 
-    let yaml = serde_yaml::to_string(&default)
-        .wrap_err("failed to serialize default workspace config")?;
-    std::fs::write(&config_path, yaml)
-        .wrap_err("failed to write workspace config")?;
+    let yaml =
+        serde_yaml::to_string(&default).wrap_err("failed to serialize default workspace config")?;
+    std::fs::write(&config_path, yaml).wrap_err("failed to write workspace config")?;
 
     // Also create the quests directory.
     let quests_dir = hive_dir.join("quests");
-    std::fs::create_dir_all(&quests_dir)
-        .wrap_err("failed to create quests directory")?;
+    std::fs::create_dir_all(&quests_dir).wrap_err("failed to create quests directory")?;
 
     Ok(config_path)
 }
@@ -171,7 +168,8 @@ mod tests {
     #[test]
     fn load_workspace_finds_workspace_yaml() {
         let dir = TempDir::new().unwrap();
-        let yaml = "name: myproject\nrepos:\n  - owner/repo1\n  - owner/repo2\ndefault_agent: codex\n";
+        let yaml =
+            "name: myproject\nrepos:\n  - owner/repo1\n  - owner/repo2\ndefault_agent: codex\n";
         std::fs::write(dir.path().join("workspace.yaml"), yaml).unwrap();
         let ws = load_workspace(dir.path()).unwrap();
         assert_eq!(ws.name, "myproject");

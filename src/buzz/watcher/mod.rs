@@ -61,7 +61,9 @@ pub fn create_watchers(config: &BuzzConfig) -> Vec<Box<dyn Watcher>> {
     }
 
     if let Some(webhook_config) = &config.webhook {
-        watchers.push(Box::new(webhook::WebhookWatcher::new(webhook_config.clone())));
+        watchers.push(Box::new(webhook::WebhookWatcher::new(
+            webhook_config.clone(),
+        )));
     }
 
     // Restore persisted cursors.
@@ -103,9 +105,7 @@ pub fn save_cursors(watchers: &[Box<dyn Watcher>]) {
 
     for watcher in watchers {
         if let Some(cursor) = watcher.cursor() {
-            state
-                .cursors
-                .insert(watcher.name().to_string(), cursor);
+            state.cursors.insert(watcher.name().to_string(), cursor);
         }
     }
 

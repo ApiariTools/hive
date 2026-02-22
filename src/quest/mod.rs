@@ -203,8 +203,7 @@ impl QuestStore {
         }
 
         let mut quests = Vec::new();
-        let entries = std::fs::read_dir(&self.dir)
-            .wrap_err("failed to read quests directory")?;
+        let entries = std::fs::read_dir(&self.dir).wrap_err("failed to read quests directory")?;
 
         for entry in entries {
             let entry = entry?;

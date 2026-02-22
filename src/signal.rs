@@ -106,7 +106,12 @@ mod tests {
 
     #[test]
     fn test_signal_new() {
-        let sig = Signal::new("sentry", Severity::Critical, "Server down", "prod-1 is unreachable");
+        let sig = Signal::new(
+            "sentry",
+            Severity::Critical,
+            "Server down",
+            "prod-1 is unreachable",
+        );
         assert_eq!(sig.source, "sentry");
         assert_eq!(sig.severity, Severity::Critical);
         assert_eq!(sig.title, "Server down");
@@ -123,7 +128,10 @@ mod tests {
             .with_dedup_key("gh-pr-42")
             .with_tags(["pr", "review"]);
 
-        assert_eq!(sig.url.as_deref(), Some("https://github.com/org/repo/pull/42"));
+        assert_eq!(
+            sig.url.as_deref(),
+            Some("https://github.com/org/repo/pull/42")
+        );
         assert_eq!(sig.dedup_key.as_deref(), Some("gh-pr-42"));
         assert_eq!(sig.tags, vec!["pr", "review"]);
     }

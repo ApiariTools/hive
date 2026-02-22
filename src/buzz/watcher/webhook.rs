@@ -11,8 +11,8 @@ use crate::signal::Signal;
 use async_trait::async_trait;
 use color_eyre::Result;
 
-use crate::buzz::config::WebhookConfig;
 use super::Watcher;
+use crate::buzz::config::WebhookConfig;
 
 /// A webhook receiver that listens for inbound HTTP POSTs.
 ///

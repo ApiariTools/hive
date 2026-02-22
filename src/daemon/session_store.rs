@@ -53,8 +53,7 @@ impl SessionStore {
     /// Load or create a session store at the given path.
     pub fn load(workspace_root: &Path) -> Self {
         let path = workspace_root.join(".hive/sessions.json");
-        let state: SessionStoreState =
-            apiari_common::state::load_state(&path).unwrap_or_default();
+        let state: SessionStoreState = apiari_common::state::load_state(&path).unwrap_or_default();
         Self { path, state }
     }
 
@@ -164,9 +163,7 @@ impl SessionStore {
             None => return false,
         };
 
-        let idx = archives
-            .iter()
-            .position(|a| a.session_id == session_id);
+        let idx = archives.iter().position(|a| a.session_id == session_id);
 
         let Some(idx) = idx else { return false };
 
@@ -292,14 +289,8 @@ mod tests {
         store.start_session(100, "xyz-789-ghi".into());
         store.reset_session(100);
 
-        assert_eq!(
-            store.find_archived(100, "abc"),
-            Some("abc-123-def".into())
-        );
-        assert_eq!(
-            store.find_archived(100, "xyz"),
-            Some("xyz-789-ghi".into())
-        );
+        assert_eq!(store.find_archived(100, "abc"), Some("abc-123-def".into()));
+        assert_eq!(store.find_archived(100, "xyz"), Some("xyz-789-ghi".into()));
         assert_eq!(store.find_archived(100, "nope"), None);
     }
 
@@ -374,14 +365,8 @@ mod tests {
         assert_eq!(store.find_archived(100, "abc"), None);
 
         // Exact-enough prefix should still work.
-        assert_eq!(
-            store.find_archived(100, "abc-111"),
-            Some("abc-111".into())
-        );
-        assert_eq!(
-            store.find_archived(100, "abc-222"),
-            Some("abc-222".into())
-        );
+        assert_eq!(store.find_archived(100, "abc-111"), Some("abc-111".into()));
+        assert_eq!(store.find_archived(100, "abc-222"), Some("abc-222".into()));
     }
 
     #[test]
@@ -536,5 +521,219 @@ mod tests {
         assert!(state.active.is_empty());
         assert!(state.archived.is_empty());
         assert_eq!(state.buzz_reader_offset, 0);
+    }
+
+    // ---- additional edge cases ----
+
+    #[test]
+    fn test_resume_with_no_current_active_session() {
+        let mut store = empty_store();
+        // Create and archive a session.
+        store.start_session(100, "sess-1".into());
+        store.record_turn(100, 100);
+        store.record_turn(100, 100);
+        store.reset_session(100);
+        assert!(store.get_active(100).is_none());
+
+        // Resume when there is no active session — should work fine.
+        assert!(store.resume_session(100, "sess-1"));
+        let active = store.get_active(100).unwrap();
+        assert_eq!(active.session_id, "sess-1");
+        assert_eq!(active.turn_count, 2);
+        // No archived sessions should remain (it was the only one and it got resumed).
+        assert!(store.history(100).is_empty());
+    }
+
+    #[test]
+    fn test_nudge_threshold_zero() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+        // Threshold of 0: turn_count starts at 0, after increment to 1 it is >= 0,
+        // so nudge should fire on the very first turn.
+        assert!(store.record_turn(100, 0));
+        // Second turn should not re-nudge.
+        assert!(!store.record_turn(100, 0));
+    }
+
+    #[test]
+    fn test_start_session_with_empty_id() {
+        let mut store = empty_store();
+        store.start_session(100, String::new());
+        let active = store.get_active(100).unwrap();
+        assert_eq!(active.session_id, "");
+        assert_eq!(active.turn_count, 0);
+    }
+
+    #[test]
+    fn test_buzz_offset_max_value() {
+        let mut store = empty_store();
+        store.set_buzz_offset(u64::MAX);
+        assert_eq!(store.buzz_offset(), u64::MAX);
+    }
+
+    #[test]
+    fn test_save_and_load_with_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".hive")).unwrap();
+
+        let mut store = SessionStore::load(root);
+        store.start_session(100, "sess-1".into());
+        store.record_turn(100, 100);
+        store.reset_session(100);
+        store.start_session(100, "sess-2".into());
+        store.save().unwrap();
+
+        let store2 = SessionStore::load(root);
+        // Active session should be sess-2.
+        assert_eq!(store2.get_active(100).unwrap().session_id, "sess-2");
+        // Archive should contain sess-1.
+        let history = store2.history(100);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].session_id, "sess-1");
+        assert_eq!(history[0].turn_count, 1);
+    }
+
+    #[test]
+    fn test_remove_active_preserves_archives() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+        store.reset_session(100);
+        store.start_session(100, "sess-2".into());
+
+        // Remove active without archiving.
+        store.remove_active(100);
+        assert!(store.get_active(100).is_none());
+        // The previously archived session should still be there.
+        assert_eq!(store.history(100).len(), 1);
+        assert_eq!(store.history(100)[0].session_id, "sess-1");
+    }
+
+    #[test]
+    fn test_find_archived_with_empty_prefix() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+        store.reset_session(100);
+        store.start_session(100, "sess-2".into());
+        store.reset_session(100);
+
+        // Empty prefix matches all — ambiguous when >1 archived.
+        assert_eq!(store.find_archived(100, ""), None);
+    }
+
+    #[test]
+    fn test_find_archived_empty_prefix_single_session() {
+        let mut store = empty_store();
+        store.start_session(100, "only-one".into());
+        store.reset_session(100);
+
+        // Empty prefix with exactly one archived session — should match.
+        assert_eq!(store.find_archived(100, ""), Some("only-one".into()));
+    }
+
+    #[test]
+    fn test_resume_archives_current_active_in_order() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+        store.reset_session(100); // archived: [sess-1]
+        store.start_session(100, "sess-2".into());
+        store.reset_session(100); // archived: [sess-1, sess-2]
+        store.start_session(100, "sess-3".into()); // active: sess-3
+
+        // Resume sess-1: archives sess-3, removes sess-1 from archive, activates sess-1.
+        store.resume_session(100, "sess-1");
+
+        let history = store.history(100);
+        // Should have sess-2 and sess-3 in archives (sess-1 is now active).
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].session_id, "sess-2");
+        assert_eq!(history[1].session_id, "sess-3");
+    }
+
+    #[test]
+    fn test_resume_across_chats_isolated() {
+        let mut store = empty_store();
+        store.start_session(100, "a-sess-1".into());
+        store.reset_session(100);
+        store.start_session(200, "b-sess-1".into());
+        store.reset_session(200);
+
+        // Resume in chat 100 should not affect chat 200.
+        assert!(store.resume_session(100, "a-sess-1"));
+        assert_eq!(store.get_active(100).unwrap().session_id, "a-sess-1");
+        assert!(store.get_active(200).is_none());
+        // Chat 200's archive is still intact.
+        assert_eq!(store.history(200).len(), 1);
+    }
+
+    #[test]
+    fn test_record_turn_updates_last_active() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+        let created = store.get_active(100).unwrap().last_active;
+
+        // Small sleep to ensure timestamp difference.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        store.record_turn(100, 100);
+
+        let updated = store.get_active(100).unwrap().last_active;
+        assert!(updated >= created);
+    }
+
+    #[test]
+    fn test_save_load_preserves_buzz_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".hive")).unwrap();
+
+        let mut store = SessionStore::load(root);
+        store.set_buzz_offset(9999);
+        store.save().unwrap();
+
+        let store2 = SessionStore::load(root);
+        assert_eq!(store2.buzz_offset(), 9999);
+    }
+
+    #[test]
+    fn test_state_serde_roundtrip() {
+        let mut state = SessionStoreState::default();
+        state.buzz_reader_offset = 42;
+        state.active.insert(
+            100,
+            ChatSession {
+                session_id: "test-id".into(),
+                turn_count: 7,
+                created_at: Utc::now(),
+                last_active: Utc::now(),
+                nudge_sent: true,
+            },
+        );
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: SessionStoreState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.buzz_reader_offset, 42);
+        assert_eq!(restored.active.get(&100).unwrap().session_id, "test-id");
+        assert_eq!(restored.active.get(&100).unwrap().turn_count, 7);
+        assert!(restored.active.get(&100).unwrap().nudge_sent);
+    }
+
+    #[test]
+    fn test_reset_then_start_fresh_session() {
+        let mut store = empty_store();
+        store.start_session(100, "old".into());
+        for _ in 0..10 {
+            store.record_turn(100, 5);
+        }
+        store.reset_session(100);
+        store.start_session(100, "fresh".into());
+
+        let active = store.get_active(100).unwrap();
+        assert_eq!(active.session_id, "fresh");
+        assert_eq!(active.turn_count, 0);
+        assert!(!active.nudge_sent);
+
+        // Old session is in history.
+        assert_eq!(store.history(100)[0].session_id, "old");
+        assert_eq!(store.history(100)[0].turn_count, 10);
     }
 }

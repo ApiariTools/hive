@@ -10,8 +10,8 @@ use crate::signal::{Severity, Signal};
 use async_trait::async_trait;
 use color_eyre::Result;
 
-use crate::buzz::config::SentryConfig;
 use super::Watcher;
+use crate::buzz::config::SentryConfig;
 
 /// Watches Sentry for new unresolved issues via the Sentry REST API.
 pub struct SentryWatcher {
@@ -84,25 +84,17 @@ impl SentryWatcher {
     fn issue_to_signal(&self, issue: &serde_json::Value) -> Option<Signal> {
         let id = issue.get("id")?.as_str()?;
         let title = issue.get("title")?.as_str()?;
-        let culprit = issue
-            .get("culprit")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let culprit = issue.get("culprit").and_then(|v| v.as_str()).unwrap_or("");
         let level = issue
             .get("level")
             .and_then(|v| v.as_str())
             .unwrap_or("error");
         let permalink = issue.get("permalink").and_then(|v| v.as_str());
-        let count = issue
-            .get("count")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0");
+        let count = issue.get("count").and_then(|v| v.as_str()).unwrap_or("0");
 
         let severity = Self::map_severity(level);
 
-        let body = format!(
-            "{culprit}\nLevel: {level} | Events: {count}",
-        );
+        let body = format!("{culprit}\nLevel: {level} | Events: {count}",);
 
         let mut signal = Signal::new(
             "sentry",

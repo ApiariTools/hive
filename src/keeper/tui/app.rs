@@ -84,10 +84,7 @@ impl App {
 
             // Try to re-select the same session.
             if let Some(name) = prev_name
-                && let Some(idx) = self
-                    .sessions
-                    .iter()
-                    .position(|s| s.session_name == name)
+                && let Some(idx) = self.sessions.iter().position(|s| s.session_name == name)
             {
                 self.selected_session = idx;
             }
@@ -110,8 +107,7 @@ impl App {
         match self.panel {
             Panel::Sessions => {
                 if !self.sessions.is_empty() {
-                    self.selected_session =
-                        (self.selected_session + 1) % self.sessions.len();
+                    self.selected_session = (self.selected_session + 1) % self.sessions.len();
                     self.selected_worktree = 0;
                 }
             }
@@ -119,8 +115,7 @@ impl App {
                 if let Some(session) = self.sessions.get(self.selected_session)
                     && !session.worktrees.is_empty()
                 {
-                    self.selected_worktree =
-                        (self.selected_worktree + 1) % session.worktrees.len();
+                    self.selected_worktree = (self.selected_worktree + 1) % session.worktrees.len();
                 }
             }
         }

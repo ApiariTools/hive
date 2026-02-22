@@ -15,10 +15,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     // Background fill
-    frame.render_widget(
-        Block::default().style(theme::overlay_bg()),
-        area,
-    );
+    frame.render_widget(Block::default().style(theme::overlay_bg()), area);
 
     // Overall layout: header (3 rows) + body + buzz bar (if signals) + footer (1 row).
     let has_buzz = app.buzz.as_ref().is_some_and(|b| !b.signals.is_empty());
@@ -27,10 +24,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),          // header
-            Constraint::Min(0),             // body
+            Constraint::Length(3),           // header
+            Constraint::Min(0),              // body
             Constraint::Length(buzz_height), // buzz signals bar
-            Constraint::Length(1),          // footer
+            Constraint::Length(1),           // footer
         ])
         .split(area);
 
@@ -147,10 +144,7 @@ fn draw_empty(frame: &mut Frame, area: Rect) {
             "  Start a swarm to see it here:",
             theme::subtitle(),
         )),
-        Line::from(Span::styled(
-            "  $ swarm",
-            theme::accent(),
-        )),
+        Line::from(Span::styled("  $ swarm", theme::accent())),
         Line::from(""),
         Line::from(Span::styled(
             "  Sessions refresh automatically every 5s.",
@@ -216,13 +210,13 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &App) {
 
             // Agent count with color coding
             let count_style = if alive_count > 0 && dead_count == 0 {
-                theme::status_running()  // all alive = green
+                theme::status_running() // all alive = green
             } else if alive_count > 0 {
-                theme::status_pending()  // mixed = yellow
+                theme::status_pending() // mixed = yellow
             } else if wt_count > 0 {
-                theme::status_dead()     // all dead = red
+                theme::status_dead() // all dead = red
             } else {
-                theme::status_idle()     // no worktrees = gray
+                theme::status_idle() // no worktrees = gray
             };
 
             // Line 1: project name + agent count
@@ -236,10 +230,7 @@ fn draw_session_list(frame: &mut Frame, area: Rect, app: &App) {
                         theme::text()
                     },
                 ),
-                Span::styled(
-                    format!(" {}/{}", alive_count, wt_count),
-                    count_style,
-                ),
+                Span::styled(format!(" {}/{}", alive_count, wt_count), count_style),
             ]);
 
             // Line 2: project directory (muted, truncated)
@@ -351,10 +342,7 @@ fn draw_detail_panel(frame: &mut Frame, area: Rect, app: &App) {
                     truncate(&wt.branch, inner_width.saturating_sub(25)),
                     branch_style,
                 ),
-                Span::styled(
-                    format!(" [{}]", wt.agent_kind),
-                    theme::agent_color(),
-                ),
+                Span::styled(format!(" [{}]", wt.agent_kind), theme::agent_color()),
                 Span::styled(format!(" {}", status_label), status_style),
             ];
 
@@ -382,10 +370,7 @@ fn draw_detail_panel(frame: &mut Frame, area: Rect, app: &App) {
                 let summary_display = truncate(summary, inner_width.saturating_sub(9));
                 lines.push(Line::from(vec![
                     Span::raw("      "),
-                    Span::styled(
-                        format!("\u{2192} {}", summary_display),
-                        theme::subtitle(),
-                    ),
+                    Span::styled(format!("\u{2192} {}", summary_display), theme::subtitle()),
                 ]));
             }
 
@@ -492,10 +477,7 @@ fn draw_buzz_bar(frame: &mut Frame, area: Rect, app: &App) {
             format!("[{}] ", latest.source),
             theme::muted(),
         ));
-        summary_spans.push(Span::styled(
-            truncate(&latest.title, max_title),
-            sev_style,
-        ));
+        summary_spans.push(Span::styled(truncate(&latest.title, max_title), sev_style));
     }
 
     let line = Line::from(summary_spans);
@@ -534,10 +516,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
 
     let mut lines: Vec<Line> = vec![
         Line::from(""),
-        Line::from(Span::styled(
-            "  keeper -- swarm dashboard",
-            theme::accent(),
-        )),
+        Line::from(Span::styled("  keeper -- swarm dashboard", theme::accent())),
         Line::from(""),
         Line::from(Span::styled("  Keybindings:", theme::text())),
         Line::from(""),

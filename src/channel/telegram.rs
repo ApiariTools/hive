@@ -251,21 +251,21 @@ impl Channel for TelegramChannel {
                 };
 
                 // Check user authorization.
-                if let Some(user) = &msg.from {
-                    if !self.is_user_allowed(user.id) {
-                        eprintln!(
-                            "[telegram] Ignoring message from unauthorized user {}",
-                            user.id
-                        );
-                        continue;
-                    }
+                if let Some(user) = &msg.from
+                    && !self.is_user_allowed(user.id)
+                {
+                    eprintln!(
+                        "[telegram] Ignoring message from unauthorized user {}",
+                        user.id
+                    );
+                    continue;
                 }
 
-                if let Some(event) = Self::parse_message(&msg) {
-                    if tx.send(event).await.is_err() {
-                        // Receiver dropped — shut down.
-                        return;
-                    }
+                if let Some(event) = Self::parse_message(&msg)
+                    && tx.send(event).await.is_err()
+                {
+                    // Receiver dropped — shut down.
+                    return;
                 }
             }
         }
@@ -319,7 +319,10 @@ mod tests {
     fn test_chunk_message_long() {
         let line = "x".repeat(100);
         // 50 lines of 100 chars = 5000 chars + newlines
-        let text: String = (0..50).map(|_| line.as_str()).collect::<Vec<_>>().join("\n");
+        let text: String = (0..50)
+            .map(|_| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         let chunks = chunk_message(&text);
         assert!(chunks.len() > 1);
         for chunk in &chunks {
@@ -341,9 +344,7 @@ mod tests {
         };
         let event = TelegramChannel::parse_message(&msg).unwrap();
         match event {
-            ChannelEvent::Command {
-                command, args, ..
-            } => {
+            ChannelEvent::Command { command, args, .. } => {
                 assert_eq!(command, "reset");
                 assert_eq!(args, "now");
             }

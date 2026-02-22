@@ -7,6 +7,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 /// An event received from a channel.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
     /// A regular text message from a user.
@@ -43,6 +44,7 @@ pub struct OutboundMessage {
 #[async_trait]
 pub trait Channel: Send + Sync {
     /// Human-readable name for logging.
+    #[allow(dead_code)]
     fn name(&self) -> &str;
 
     /// Run the channel's receive loop, sending events to `tx`.

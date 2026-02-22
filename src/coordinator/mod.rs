@@ -7,8 +7,8 @@
 use crate::quest::{Quest, QuestStore, TaskStatus};
 use crate::worker::Worker;
 use crate::workspace::Workspace;
-use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use apiari_claude_sdk::types::ContentBlock;
+use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use color_eyre::eyre::{Result, bail};
 use std::io::{self, BufRead, Write};
 
@@ -51,7 +51,9 @@ impl Coordinator {
             prompt.push_str(soul);
             prompt.push('\n');
         } else {
-            prompt.push_str("You are the Hive coordinator — the orchestration brain of the Apiari project.\n\n");
+            prompt.push_str(
+                "You are the Hive coordinator — the orchestration brain of the Apiari project.\n\n",
+            );
         }
 
         prompt.push_str("## Identity\n");
@@ -102,13 +104,17 @@ impl Coordinator {
             "  swarm -d '{}' close <worktree-id>        — close and clean up a worktree\n",
             self.workspace.root.display()
         ));
-        prompt.push_str("IMPORTANT: Always use the -d flag with swarm commands to target the workspace root.\n");
+        prompt.push_str(
+            "IMPORTANT: Always use the -d flag with swarm commands to target the workspace root.\n",
+        );
         prompt.push_str("When the user asks you to do work, use swarm create to dispatch it.\n\n");
 
         // Daemon setup help — give the coordinator full context so it doesn't need to read files.
         let daemon_config_path = self.workspace.root.join(".hive/daemon.toml");
         prompt.push_str("\n## Daemon Mode (hive daemon)\n");
-        prompt.push_str("Hive has a fully built Telegram bot daemon. Run `hive daemon` to start it.\n");
+        prompt.push_str(
+            "Hive has a fully built Telegram bot daemon. Run `hive daemon` to start it.\n",
+        );
         prompt.push_str("It connects to Telegram via long-polling, routes messages to Claude coordinator sessions,\n");
         prompt.push_str("and auto-triages buzz signals (Critical/Warning) by sending them to an ephemeral Claude\n");
         prompt.push_str("session and forwarding the assessment to Telegram.\n\n");
@@ -120,10 +126,14 @@ impl Coordinator {
         prompt.push_str("- Turn nudge: after 50+ turns suggests /reset for better performance\n");
         prompt.push_str("- Works in DMs and groups (one bot, multiple chats)\n");
         prompt.push_str("- Security: allowed_user_ids and allowed_chat_ids filtering\n");
-        prompt.push_str("- For groups: must disable privacy mode via @BotFather → /setprivacy → Disable\n\n");
+        prompt.push_str(
+            "- For groups: must disable privacy mode via @BotFather → /setprivacy → Disable\n\n",
+        );
 
         if daemon_config_path.exists() {
-            prompt.push_str("Status: CONFIGURED — .hive/daemon.toml exists. Run `hive daemon` to start.\n\n");
+            prompt.push_str(
+                "Status: CONFIGURED — .hive/daemon.toml exists. Run `hive daemon` to start.\n\n",
+            );
         } else {
             prompt.push_str("Status: NOT YET CONFIGURED — .hive/daemon.toml does not exist.\n\n");
         }
@@ -131,12 +141,18 @@ impl Coordinator {
         prompt.push_str("### Setup Steps (walk the user through these)\n");
         prompt.push_str("1. Open Telegram, message @BotFather\n");
         prompt.push_str("2. Send /newbot, choose a display name (e.g. 'Hive Coordinator'), choose a username ending in 'bot'\n");
-        prompt.push_str("3. BotFather replies with a bot token like 7000000000:AAxxxxxxxxxxxxxxxxx — copy it\n");
-        prompt.push_str("4. Message the new bot (send it anything like 'hello'), or add it to a group\n");
+        prompt.push_str(
+            "3. BotFather replies with a bot token like 7000000000:AAxxxxxxxxxxxxxxxxx — copy it\n",
+        );
+        prompt.push_str(
+            "4. Message the new bot (send it anything like 'hello'), or add it to a group\n",
+        );
         prompt.push_str("5. Get the chat ID by running:\n");
         prompt.push_str("   curl -s \"https://api.telegram.org/bot<TOKEN>/getUpdates\" | jq '.result[0].message.chat.id'\n");
         prompt.push_str("   (Group IDs are negative numbers starting with -100)\n");
-        prompt.push_str("6. For groups: message @BotFather, /setprivacy, select bot, choose Disable\n");
+        prompt.push_str(
+            "6. For groups: message @BotFather, /setprivacy, select bot, choose Disable\n",
+        );
         prompt.push_str("7. Give the token and chat ID to this coordinator and it will write the config file\n\n");
 
         prompt.push_str("### Config File (.hive/daemon.toml)\n");
@@ -148,8 +164,12 @@ impl Coordinator {
         prompt.push_str("allowed_chat_ids = []                       # empty = allow all chats\n");
         prompt.push_str("allowed_user_ids = []                       # empty = allow all users\n");
         prompt.push_str("\n[telegram]\n");
-        prompt.push_str("bot_token = \"7000000000:AAxxxxxxxxxxxxxxxxx\" # REQUIRED from @BotFather\n");
-        prompt.push_str("alert_chat_id = 123456789                   # REQUIRED: where buzz alerts go\n");
+        prompt.push_str(
+            "bot_token = \"7000000000:AAxxxxxxxxxxxxxxxxx\" # REQUIRED from @BotFather\n",
+        );
+        prompt.push_str(
+            "alert_chat_id = 123456789                   # REQUIRED: where buzz alerts go\n",
+        );
         prompt.push_str("```\n\n");
         prompt.push_str("IMPORTANT: When the user gives you a bot token and chat ID, write .hive/daemon.toml for them.\n");
         prompt.push_str("Do NOT search the codebase for this info — you already have everything you need above.\n\n");
@@ -192,12 +212,8 @@ impl Coordinator {
         match client.spawn(opts).await {
             Ok(session) => Ok(Some(session)),
             Err(apiari_claude_sdk::SdkError::ProcessSpawn(e)) => {
-                eprintln!(
-                    "[coordinator] Could not spawn Claude CLI: {e}"
-                );
-                eprintln!(
-                    "[coordinator] Make sure `claude` is installed and on your PATH."
-                );
+                eprintln!("[coordinator] Could not spawn Claude CLI: {e}");
+                eprintln!("[coordinator] Make sure `claude` is installed and on your PATH.");
                 Ok(None)
             }
             Err(e) => Err(color_eyre::eyre::eyre!(e).wrap_err("failed to spawn Claude session")),
@@ -242,10 +258,7 @@ impl Coordinator {
     ///
     /// The `--print` mode is single-turn, so we spawn a fresh session for each
     /// user message and resume the previous conversation by session ID.
-    async fn run_chat_with_session(
-        &self,
-        mut session: apiari_claude_sdk::Session,
-    ) -> Result<()> {
+    async fn run_chat_with_session(&self, mut session: apiari_claude_sdk::Session) -> Result<()> {
         eprintln!("\x1b[33mHive Coordinator\x1b[0m — Ctrl-D to exit\n");
 
         let stdin = io::stdin();
@@ -392,8 +405,10 @@ impl Coordinator {
                     result_session_id = Some(result.session_id);
                     break;
                 }
-                Some(Event::RateLimit(_)) | Some(Event::Stream { .. })
-                | Some(Event::User(_)) | Some(Event::System(_)) => {
+                Some(Event::RateLimit(_))
+                | Some(Event::Stream { .. })
+                | Some(Event::User(_))
+                | Some(Event::System(_)) => {
                     // Informational — keep reading.
                 }
                 None => {
@@ -479,13 +494,12 @@ impl Coordinator {
         mut session: apiari_claude_sdk::Session,
         description: &str,
     ) -> Result<Vec<String>> {
-        let prompt = format!(
-            "Plan the following quest and list the tasks:\n\n{description}"
-        );
+        let prompt = format!("Plan the following quest and list the tasks:\n\n{description}");
 
-        session.send_message(&prompt).await.map_err(|e| {
-            color_eyre::eyre::eyre!(e).wrap_err("failed to send planning message")
-        })?;
+        session
+            .send_message(&prompt)
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!(e).wrap_err("failed to send planning message"))?;
 
         // Close stdin so Claude knows we're done sending.
         session.close_stdin();
@@ -531,9 +545,7 @@ impl Coordinator {
         let tasks = self.parse_task_list(&response_text);
 
         if tasks.is_empty() {
-            eprintln!(
-                "[coordinator] Claude did not return parseable tasks. Using stub tasks."
-            );
+            eprintln!("[coordinator] Claude did not return parseable tasks. Using stub tasks.");
             Ok(self.stub_tasks())
         } else {
             Ok(tasks)
@@ -556,10 +568,7 @@ impl Coordinator {
                 } else {
                     // Try numbered list: "1. ", "2. ", "10. ", etc.
                     // Find the first non-digit character.
-                    let digit_end = trimmed
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit())
-                        .count();
+                    let digit_end = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
                     if digit_end > 0 {
                         let after_digits = &trimmed[digit_end..];
                         after_digits
@@ -571,21 +580,19 @@ impl Coordinator {
                     }
                 };
 
-                title
-                    .filter(|t| !t.is_empty() && t.len() < 200)
-                    .map(|t| {
-                        // Strip any leading bold markdown like **task**
-                        let t = t.trim_start_matches("**");
-                        let t = if let Some(idx) = t.find("**") {
-                            // Take just what's between the markers, or the
-                            // whole string if only opening markers.
-                            let inside = &t[..idx];
-                            if inside.is_empty() { t } else { inside }
-                        } else {
-                            t
-                        };
-                        t.trim().to_owned()
-                    })
+                title.filter(|t| !t.is_empty() && t.len() < 200).map(|t| {
+                    // Strip any leading bold markdown like **task**
+                    let t = t.trim_start_matches("**");
+                    let t = if let Some(idx) = t.find("**") {
+                        // Take just what's between the markers, or the
+                        // whole string if only opening markers.
+                        let inside = &t[..idx];
+                        if inside.is_empty() { t } else { inside }
+                    } else {
+                        t
+                    };
+                    t.trim().to_owned()
+                })
             })
             .collect()
     }
@@ -727,6 +734,9 @@ mod tests {
         let c = make_coordinator();
         let text = "Intro text\n\n- Task from dash\n* Task from asterisk\n1. Numbered task\n\nConclusion\n";
         let tasks = c.parse_task_list(text);
-        assert_eq!(tasks, vec!["Task from dash", "Task from asterisk", "Numbered task"]);
+        assert_eq!(
+            tasks,
+            vec!["Task from dash", "Task from asterisk", "Numbered task"]
+        );
     }
 }

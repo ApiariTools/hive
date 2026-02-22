@@ -23,7 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
-        run: cargo fmt -p hive -- --check
+        run: cargo fmt --check
 
       - name: Clippy
         run: cargo clippy -p hive -- -D warnings

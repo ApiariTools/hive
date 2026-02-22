@@ -1,7 +1,7 @@
 //! Output modes — emit signals as JSONL to various destinations.
 
-use apiari_common::ipc::JsonlWriter;
 use crate::signal::Signal;
+use apiari_common::ipc::JsonlWriter;
 use color_eyre::Result;
 use std::path::PathBuf;
 
@@ -28,8 +28,8 @@ impl OutputMode {
                 Ok(Self::File(path))
             }
             "webhook" => {
-                let url = url
-                    .ok_or_else(|| color_eyre::eyre::eyre!("webhook output requires a url"))?;
+                let url =
+                    url.ok_or_else(|| color_eyre::eyre::eyre!("webhook output requires a url"))?;
                 Ok(Self::Webhook(url.to_string()))
             }
             other => Err(color_eyre::eyre::eyre!("unknown output mode: {other}")),
@@ -58,7 +58,10 @@ pub fn emit(signals: &[Signal], mode: &OutputMode) -> Result<()> {
         }
         OutputMode::Webhook(url) => {
             // Stub: in a real implementation this would POST to the URL.
-            eprintln!("webhook output to {url} not yet implemented, {n} signals dropped", n = signals.len());
+            eprintln!(
+                "webhook output to {url} not yet implemented, {n} signals dropped",
+                n = signals.len()
+            );
         }
     }
 

@@ -26,13 +26,22 @@ use self::watcher::{Watcher, create_watchers, save_cursors};
 /// - `daemon`: run continuously, polling on interval
 /// - `once`: single poll then exit (also the default)
 /// - `output_override`: CLI override for output mode (None = use config)
-pub async fn run(config_path: &Path, daemon: bool, once: bool, output_override: Option<&str>) -> Result<()> {
+pub async fn run(
+    config_path: &Path,
+    daemon: bool,
+    once: bool,
+    output_override: Option<&str>,
+) -> Result<()> {
     let config = BuzzConfig::load(config_path)?;
 
     let output_mode = if let Some(mode_str) = output_override
         && mode_str != "stdout"
     {
-        OutputMode::from_config(mode_str, config.output.path.as_ref(), config.output.url.as_deref())?
+        OutputMode::from_config(
+            mode_str,
+            config.output.path.as_ref(),
+            config.output.url.as_deref(),
+        )?
     } else {
         OutputMode::from_config(
             &config.output.mode,
@@ -42,11 +51,7 @@ pub async fn run(config_path: &Path, daemon: bool, once: bool, output_override: 
     };
 
     let mut watchers = create_watchers(&config);
-    let mut reminders: Vec<Reminder> = config
-        .reminders
-        .iter()
-        .map(Reminder::from_config)
-        .collect();
+    let mut reminders: Vec<Reminder> = config.reminders.iter().map(Reminder::from_config).collect();
 
     if once || !daemon {
         // Single poll mode (also the default when neither flag is given).
@@ -81,7 +86,11 @@ async fn run_once(
     for watcher in watchers.iter_mut() {
         match watcher.poll().await {
             Ok(signals) => {
-                eprintln!("[buzz] {} returned {} signal(s)", watcher.name(), signals.len());
+                eprintln!(
+                    "[buzz] {} returned {} signal(s)",
+                    watcher.name(),
+                    signals.len()
+                );
                 all_signals.extend(signals);
             }
             Err(e) => {

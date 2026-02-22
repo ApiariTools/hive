@@ -205,11 +205,15 @@ impl BuzzConfig {
         }
 
         if self.output.mode == "file" && self.output.path.is_none() {
-            eprintln!("[buzz] note: output.mode is 'file' but output.path is not set, will use .buzz/signals.jsonl");
+            eprintln!(
+                "[buzz] note: output.mode is 'file' but output.path is not set, will use .buzz/signals.jsonl"
+            );
         }
 
         if self.poll_interval_secs == 0 {
-            eprintln!("[buzz] warning: poll_interval_secs is 0, this will poll as fast as possible");
+            eprintln!(
+                "[buzz] warning: poll_interval_secs is 0, this will poll as fast as possible"
+            );
         }
 
         let num_sources = self.sentry.is_some() as u8

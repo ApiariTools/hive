@@ -143,7 +143,10 @@ async fn main() -> Result<()> {
 fn cmd_init(cwd: &Path) -> Result<()> {
     let config_path = init_workspace(cwd)?;
     println!("Workspace initialized: {}", config_path.display());
-    println!("Edit {} to configure your workspace.", config_path.display());
+    println!(
+        "Edit {} to configure your workspace.",
+        config_path.display()
+    );
     Ok(())
 }
 
@@ -211,10 +214,7 @@ async fn cmd_start(cwd: &Path, quest_id: Option<&str>) -> Result<()> {
         Some(id) => {
             // Find the quest — support prefix matching.
             let quests = store.list()?;
-            let matching: Vec<_> = quests
-                .iter()
-                .filter(|q| q.id.starts_with(id))
-                .collect();
+            let matching: Vec<_> = quests.iter().filter(|q| q.id.starts_with(id)).collect();
 
             match matching.len() {
                 0 => {

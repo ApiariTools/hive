@@ -66,10 +66,14 @@ impl GitHubCli {
     pub async fn list_issues(&self, repo: &str) -> Result<Vec<Issue>> {
         let output = tokio::process::Command::new(&self.gh_bin)
             .args([
-                "issue", "list",
-                "--repo", repo,
-                "--json", "number,title,body,state,labels,url",
-                "--limit", "50",
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--json",
+                "number,title,body,state,labels,url",
+                "--limit",
+                "50",
             ])
             .output()
             .await
@@ -92,10 +96,13 @@ impl GitHubCli {
     pub async fn get_issue(&self, repo: &str, number: u32) -> Result<Issue> {
         let output = tokio::process::Command::new(&self.gh_bin)
             .args([
-                "issue", "view",
+                "issue",
+                "view",
                 &number.to_string(),
-                "--repo", repo,
-                "--json", "number,title,body,state,labels,url",
+                "--repo",
+                repo,
+                "--json",
+                "number,title,body,state,labels,url",
             ])
             .output()
             .await
@@ -124,12 +131,18 @@ impl GitHubCli {
     ) -> Result<PrInfo> {
         let output = tokio::process::Command::new(&self.gh_bin)
             .args([
-                "pr", "create",
-                "--repo", repo,
-                "--title", title,
-                "--body", body,
-                "--head", branch,
-                "--json", "number,title,url,state",
+                "pr",
+                "create",
+                "--repo",
+                repo,
+                "--title",
+                title,
+                "--body",
+                body,
+                "--head",
+                branch,
+                "--json",
+                "number,title,url,state",
             ])
             .output()
             .await
@@ -150,10 +163,13 @@ impl GitHubCli {
     pub async fn get_pr(&self, repo: &str, number: u32) -> Result<PrInfo> {
         let output = tokio::process::Command::new(&self.gh_bin)
             .args([
-                "pr", "view",
+                "pr",
+                "view",
                 &number.to_string(),
-                "--repo", repo,
-                "--json", "number,title,url,state",
+                "--repo",
+                repo,
+                "--json",
+                "number,title,url,state",
             ])
             .output()
             .await
@@ -164,8 +180,8 @@ impl GitHubCli {
             color_eyre::eyre::bail!("gh pr view failed: {stderr}");
         }
 
-        let pr: PrInfo = serde_json::from_slice(&output.stdout)
-            .wrap_err("failed to parse gh pr view output")?;
+        let pr: PrInfo =
+            serde_json::from_slice(&output.stdout).wrap_err("failed to parse gh pr view output")?;
 
         Ok(pr)
     }

@@ -107,9 +107,7 @@ pub fn logo() -> Style {
 }
 
 pub fn severity_critical() -> Style {
-    Style::default()
-        .fg(EMBER)
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(EMBER).add_modifier(Modifier::BOLD)
 }
 
 pub fn severity_warning() -> Style {

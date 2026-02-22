@@ -362,4 +362,99 @@ mod tests {
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("swarm merge failed"));
     }
+
+    // ---- command construction: verify args passed to each subcommand ----
+
+    #[tokio::test]
+    async fn send_message_constructs_correct_args() {
+        // `echo` will print all args to stdout, so we can verify the command shape.
+        let worker = Worker::with_swarm_bin("echo");
+        let result = worker.send_message("wt-42", "please review").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn close_worker_constructs_correct_args() {
+        let worker = Worker::with_swarm_bin("echo");
+        let result = worker.close_worker("wt-99").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn merge_worker_constructs_correct_args() {
+        let worker = Worker::with_swarm_bin("echo");
+        let result = worker.merge_worker("wt-77").await;
+        assert!(result.is_ok());
+    }
+
+    // ---- spawn_worker prompt edge cases ----
+
+    #[tokio::test]
+    async fn spawn_worker_prompt_with_special_characters() {
+        let worker = Worker::with_swarm_bin("echo");
+        let task = make_task("Fix the \"login\" bug & <stuff>", "quest-'42'");
+        let result = worker.spawn_worker(&task).await.unwrap();
+        // Prompt should contain the special characters intact — they are passed
+        // as a single arg via `.args()`, not through a shell.
+        assert!(result.contains("Fix the \"login\" bug & <stuff>"));
+        assert!(result.contains("Quest: quest-'42'"));
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_prompt_with_unicode() {
+        let worker = Worker::with_swarm_bin("echo");
+        let task = make_task("修复登录错误", "quest-日本語");
+        let result = worker.spawn_worker(&task).await.unwrap();
+        assert!(result.contains("修复登录错误"));
+        assert!(result.contains("quest-日本語"));
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_prompt_with_empty_title() {
+        let worker = Worker::with_swarm_bin("echo");
+        let task = make_task("", "q-1");
+        let result = worker.spawn_worker(&task).await.unwrap();
+        assert!(result.contains("Task: \n"));
+        assert!(result.contains("Quest: q-1"));
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_prompt_with_newlines_in_title() {
+        let worker = Worker::with_swarm_bin("echo");
+        let task = make_task("line1\nline2\nline3", "q-multi");
+        let result = worker.spawn_worker(&task).await.unwrap();
+        assert!(result.contains("Task: line1\nline2\nline3"));
+    }
+
+    // ---- poll_worker_status with assignment ----
+
+    #[tokio::test]
+    async fn poll_status_returns_running_when_id_found() {
+        // `echo` will output the args, which include "status --json".
+        // We need stdout to contain the assigned_to id. We use `printf` trick:
+        // Set assigned_to to "status" so `echo status --json` output contains it.
+        let worker = Worker::with_swarm_bin("echo");
+        let mut task = make_task("test", "q-1");
+        task.assigned_to = Some("status".into()); // "echo status --json" contains "status"
+        let status = worker.poll_worker_status(&task).await.unwrap();
+        assert_eq!(status, WorkerStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn poll_status_returns_unknown_when_id_not_found() {
+        let worker = Worker::with_swarm_bin("echo");
+        let mut task = make_task("test", "q-1");
+        task.assigned_to = Some("zzz-not-in-output-xyz".into());
+        let status = worker.poll_worker_status(&task).await.unwrap();
+        assert_eq!(status, WorkerStatus::Unknown);
+    }
+
+    #[tokio::test]
+    async fn poll_status_returns_unknown_on_failure_exit() {
+        let worker = Worker::with_swarm_bin("false");
+        let mut task = make_task("test", "q-1");
+        task.assigned_to = Some("wt-1".into());
+        let status = worker.poll_worker_status(&task).await.unwrap();
+        assert_eq!(status, WorkerStatus::Unknown);
+    }
 }

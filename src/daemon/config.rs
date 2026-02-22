@@ -91,9 +91,8 @@ impl DaemonConfig {
                 color_eyre::eyre::eyre!("failed to read {}: {e}", path.display())
             }
         })?;
-        let config: DaemonConfig = toml::from_str(&content).map_err(|e| {
-            color_eyre::eyre::eyre!("failed to parse {}: {e}", path.display())
-        })?;
+        let config: DaemonConfig = toml::from_str(&content)
+            .map_err(|e| color_eyre::eyre::eyre!("failed to parse {}: {e}", path.display()))?;
         Ok(config)
     }
 
@@ -107,6 +106,7 @@ impl DaemonConfig {
     }
 
     /// Check if a user ID is allowed to interact with the bot.
+    #[allow(dead_code)]
     pub fn is_user_allowed(&self, user_id: i64) -> bool {
         self.allowed_user_ids.is_empty() || self.allowed_user_ids.contains(&user_id)
     }

@@ -36,8 +36,13 @@ pub fn check_reminders(reminders: &mut [Reminder]) -> Vec<Signal> {
 
     for reminder in reminders.iter_mut() {
         if now >= reminder.next_fire {
-            let signal = Signal::new("reminder", Severity::Info, &reminder.message, &reminder.message)
-                .with_dedup_key(format!("reminder:{}", reminder.message));
+            let signal = Signal::new(
+                "reminder",
+                Severity::Info,
+                &reminder.message,
+                &reminder.message,
+            )
+            .with_dedup_key(format!("reminder:{}", reminder.message));
             signals.push(signal);
 
             // Advance to the next firing time. If we missed multiple intervals,

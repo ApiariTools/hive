@@ -227,9 +227,18 @@ fn read_buzz_signals(path: &std::path::Path) -> Option<BuzzSummary> {
     signals.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     signals.truncate(50);
 
-    let critical_count = signals.iter().filter(|s| s.severity == Severity::Critical).count();
-    let warning_count = signals.iter().filter(|s| s.severity == Severity::Warning).count();
-    let info_count = signals.iter().filter(|s| s.severity == Severity::Info).count();
+    let critical_count = signals
+        .iter()
+        .filter(|s| s.severity == Severity::Critical)
+        .count();
+    let warning_count = signals
+        .iter()
+        .filter(|s| s.severity == Severity::Warning)
+        .count();
+    let info_count = signals
+        .iter()
+        .filter(|s| s.severity == Severity::Info)
+        .count();
 
     Some(BuzzSummary {
         signals,
@@ -243,10 +252,7 @@ fn read_buzz_signals(path: &std::path::Path) -> Option<BuzzSummary> {
 /// Returns None on any failure -- this is best-effort.
 fn query_pr_for_branch(project_dir: &std::path::Path, branch: &str) -> Option<PrInfo> {
     let output = Command::new("gh")
-        .args([
-            "pr", "view", branch,
-            "--json", "number,title,state,url",
-        ])
+        .args(["pr", "view", branch, "--json", "number,title,state,url"])
         .current_dir(project_dir)
         .output()
         .ok()?;
@@ -423,14 +429,7 @@ fn session_project_dir(session_name: &str) -> Option<PathBuf> {
 /// List all pane IDs (e.g. `%0`, `%3`) in a tmux session.
 fn list_session_pane_ids(session_name: &str) -> Vec<String> {
     let output = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-s",
-            "-t",
-            session_name,
-            "-F",
-            "#{pane_id}",
-        ])
+        .args(["list-panes", "-s", "-t", session_name, "-F", "#{pane_id}"])
         .output();
 
     let Ok(output) = output else {
