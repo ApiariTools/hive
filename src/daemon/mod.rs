@@ -520,6 +520,11 @@ impl DaemonRunner {
         // Stop typing indicator before sending the response.
         typing_cancel.cancel();
 
+        eprintln!(
+            "[daemon] Responding ({} chars): {}",
+            response.len(),
+            truncate(&response, 80)
+        );
         self.send(chat_id, &response).await
     }
 
@@ -594,8 +599,10 @@ impl DaemonRunner {
                     }
                     break;
                 }
-                Some(Event::RateLimit(_)) => {
-                    eprintln!("[daemon] Rate limited, waiting...");
+                Some(Event::RateLimit(rl)) => {
+                    if let Some(info) = &rl.rate_limit_info {
+                        eprintln!("[daemon] Rate limit status: {info}");
+                    }
                 }
                 Some(_) => {}
                 None => break,

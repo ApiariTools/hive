@@ -82,11 +82,27 @@ impl Coordinator {
         prompt.push_str("\n## Tools\n");
         prompt.push_str("You have access to Bash, Read, Glob, and Grep.\n");
         prompt.push_str("You can dispatch work to swarm agents using these commands:\n");
-        prompt.push_str("  swarm create \"task description\"  — spin up a new agent in its own worktree\n");
-        prompt.push_str("  swarm status --json              — check status of all worktrees\n");
-        prompt.push_str("  swarm send <worktree-id> \"msg\"   — send a message to a running agent\n");
-        prompt.push_str("  swarm merge <worktree-id>        — merge a worktree's branch into base\n");
-        prompt.push_str("  swarm close <worktree-id>        — close and clean up a worktree\n");
+        prompt.push_str(&format!(
+            "  swarm -d '{}' create \"task description\"  — spin up a new agent in its own worktree\n",
+            self.workspace.root.display()
+        ));
+        prompt.push_str(&format!(
+            "  swarm -d '{}' status --json              — check status of all worktrees\n",
+            self.workspace.root.display()
+        ));
+        prompt.push_str(&format!(
+            "  swarm -d '{}' send <worktree-id> \"msg\"   — send a message to a running agent\n",
+            self.workspace.root.display()
+        ));
+        prompt.push_str(&format!(
+            "  swarm -d '{}' merge <worktree-id>        — merge a worktree's branch into base\n",
+            self.workspace.root.display()
+        ));
+        prompt.push_str(&format!(
+            "  swarm -d '{}' close <worktree-id>        — close and clean up a worktree\n",
+            self.workspace.root.display()
+        ));
+        prompt.push_str("IMPORTANT: Always use the -d flag with swarm commands to target the workspace root.\n");
         prompt.push_str("When the user asks you to do work, use swarm create to dispatch it.\n\n");
 
         // Daemon setup help — give the coordinator full context so it doesn't need to read files.
