@@ -16,7 +16,7 @@ use crate::workspace::load_workspace;
 use apiari_claude_sdk::types::ContentBlock;
 use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use apiari_common::ipc::JsonlReader;
-use apiari_common::signal::{Severity, Signal};
+use crate::signal::{Severity, Signal};
 use color_eyre::eyre::{Result, WrapErr};
 use config::DaemonConfig;
 use session_store::SessionStore;

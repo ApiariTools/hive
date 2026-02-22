@@ -3,12 +3,15 @@
 //! Hive uses `apiari-claude-sdk` to run Claude agent sessions (coordinator +
 //! workers) and calls the `swarm` CLI for execution in isolated worktrees.
 
+mod buzz;
 mod channel;
 mod coordinator;
 mod daemon;
 #[allow(dead_code)]
 mod github;
+mod keeper;
 mod quest;
+pub(crate) mod signal;
 mod worker;
 mod workspace;
 
@@ -60,6 +63,32 @@ enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+
+    /// Run the signal aggregator (poll Sentry, GitHub, webhooks, reminders).
+    Buzz {
+        /// Run continuously, polling on interval.
+        #[arg(long, conflicts_with = "once")]
+        daemon: bool,
+
+        /// Single poll, then exit.
+        #[arg(long)]
+        once: bool,
+
+        /// Path to config file.
+        #[arg(long, default_value = ".buzz/config.toml")]
+        config: PathBuf,
+
+        /// Output mode: stdout, file, webhook.
+        #[arg(long)]
+        output: Option<String>,
+    },
+
+    /// Launch the read-only dashboard TUI.
+    Dashboard {
+        /// Print status once and exit (no TUI).
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -100,6 +129,13 @@ async fn main() -> Result<()> {
                 daemon::start(&cwd, false).await
             }
         },
+        Command::Buzz {
+            daemon,
+            once,
+            config,
+            output,
+        } => buzz::run(&config, daemon, once, output.as_deref()).await,
+        Command::Dashboard { once } => keeper::run(once).await,
     }
 }
 

@@ -1,17 +1,22 @@
 # Hive
 
-Orchestration brain — plans quests, dispatches tasks to swarm agents.
+Orchestration brain — plans quests, dispatches tasks to swarm agents, aggregates signals, and provides a dashboard.
 
 ## Quick Reference
 
 ```bash
-cargo build -p hive             # Build
-cargo test -p hive              # Run tests (none yet)
-cargo run -p hive -- init       # Initialize workspace
-cargo run -p hive -- chat       # Interactive coordinator chat
-cargo run -p hive -- plan "..." # Plan a quest
-cargo run -p hive -- status     # Show quest status
-cargo run -p hive -- start ID   # Dispatch quest tasks to swarm
+cargo build -p hive                      # Build
+cargo test -p hive                       # Run tests (101 unit tests)
+cargo run -p hive -- init                # Initialize workspace
+cargo run -p hive -- chat                # Interactive coordinator chat
+cargo run -p hive -- plan "..."          # Plan a quest
+cargo run -p hive -- status              # Show quest status
+cargo run -p hive -- start ID            # Dispatch quest tasks to swarm
+cargo run -p hive -- daemon start        # Start Telegram bot daemon
+cargo run -p hive -- buzz --once         # Single signal poll
+cargo run -p hive -- buzz --daemon       # Continuous signal polling
+cargo run -p hive -- dashboard           # Launch TUI dashboard
+cargo run -p hive -- dashboard --once    # Print status and exit
 ```
 
 ## Git Workflow
@@ -25,7 +30,8 @@ cargo run -p hive -- start ID   # Dispatch quest tasks to swarm
 
 ```
 src/
-  main.rs               # CLI (clap) with 5 subcommands
+  main.rs               # CLI (clap) with subcommands
+  signal.rs             # Signal/Severity types (shared across buzz and daemon)
   workspace/
     mod.rs              # Workspace config (YAML), load/init, config search
   quest/
@@ -36,6 +42,32 @@ src/
     mod.rs              # Subprocess calls to swarm CLI
   github/
     mod.rs              # gh CLI wrapper (issues, PRs)
+  channel/
+    mod.rs              # Channel trait + ChannelEvent types
+    telegram.rs         # Telegram Bot API client
+  daemon/
+    mod.rs              # Telegram bot + buzz auto-triage event loop
+    config.rs           # Daemon config (daemon.toml)
+    session_store.rs    # Per-chat Claude session tracking
+  buzz/
+    mod.rs              # Signal aggregator entry point (run logic)
+    config.rs           # BuzzConfig TOML schema + validation
+    output.rs           # OutputMode (stdout, file, webhook)
+    reminder.rs         # Scheduled reminder signals
+    signal.rs           # deduplicate(), prioritize() functions
+    watcher/
+      mod.rs            # Watcher trait, state persistence, registry
+      github.rs         # GitHub watcher (gh CLI)
+      sentry.rs         # Sentry watcher (HTTP API)
+      webhook.rs        # Webhook receiver (stub)
+  keeper/
+    mod.rs              # Dashboard entry point (run logic)
+    discovery.rs        # Tmux session discovery, buzz signal reading, PR queries
+    tui/
+      mod.rs            # TUI event loop (crossterm key handling)
+      app.rs            # App state (sessions, selection, panels, overlays)
+      render.rs         # Ratatui rendering
+      theme.rs          # Honey/amber bee color palette
 ```
 
 ## Key Concepts
@@ -45,6 +77,9 @@ src/
 - **Coordinator**: Uses `apiari-claude-sdk` to run Claude sessions for chat and planning. Falls back to offline mode if `claude` CLI is unavailable.
 - **Worker**: Calls `swarm create`, `swarm status`, `swarm send`, `swarm close`, `swarm merge` as subprocesses.
 - **QuestStore**: CRUD over `.hive/quests/` directory using `apiari_common::state` for atomic writes.
+- **Signal**: Event from external sources (Sentry, GitHub, reminders). Defined in `signal.rs`, produced by buzz watchers, consumed by daemon for triage.
+- **Watcher**: Pluggable source that polls for new signals. Trait in `buzz::watcher`.
+- **Keeper**: Read-only TUI dashboard that discovers swarm tmux sessions and displays their status.
 
 ## CLI Subcommands
 
@@ -55,6 +90,11 @@ src/
 | `chat` | Interactive Claude session with workspace context |
 | `plan <desc>` | Claude generates task list, saves as quest |
 | `start [id]` | Activates quest, spawns swarm worktree per task |
+| `daemon start` | Start persistent Telegram bot + buzz auto-triage |
+| `daemon stop` | Stop the running daemon |
+| `daemon restart` | Restart the daemon |
+| `buzz` | Poll signal sources (Sentry, GitHub, webhooks, reminders) |
+| `dashboard` | Launch read-only TUI for monitoring swarm sessions |
 
 ## Workspace Config (`.hive/workspace.yaml`)
 
@@ -70,16 +110,6 @@ conventions: |               # Coding standards
 ```
 
 Config search walks upward from cwd looking for `workspace.yaml`, `workspace.yml`, `.hive/workspace.yaml`, or `.hive/workspace.yml`.
-
-## Coordinator Details
-
-- **System prompt**: The `soul` field from workspace.yaml is used as the coordinator's personality. If no soul is set, falls back to a minimal default. The prompt also includes workspace context, available tools, and active quest summaries.
-- **Tools**: Chat sessions have Bash, Read, Glob, Grep, WebSearch, and WebFetch. The coordinator can run `swarm create`, search the codebase, and look things up on the web.
-- **Planning prompt**: Instructs Claude to output task titles as `- ` prefixed bullet points.
-- **Task parsing**: Handles `- `, `* `, numbered lists (`1. `), strips bold markdown (`**...**`).
-- **Thinking indicator**: Shows `thinking...` on stdout while waiting for Claude's response, clears when response arrives.
-- **Graceful fallback**: If `claude` CLI spawn fails (ProcessSpawn error), prints warning and enters offline mode (chat echoes, plan creates stub tasks).
-- **Async stdin**: Uses `tokio::spawn_blocking` with mpsc channel to read user input without blocking the event loop.
 
 ## Integration Map
 
@@ -99,18 +129,40 @@ swarm create "task prompt"    # One per task
   |
   v
 .swarm/inbox.jsonl -> swarm TUI -> agent in tmux pane
+
+hive buzz --daemon
+  |
+  v (writes)
+.buzz/signals.jsonl
+  |
+  +---> hive daemon (reads for auto-triage)
+  +---> hive dashboard (reads for display)
+
+hive dashboard
+  |
+  v (reads)
+.swarm/state.json + tmux queries + .buzz/signals.jsonl
 ```
 
-- **Uses**: `apiari-common` (state persistence), `apiari-claude-sdk` (coordinator/planning/chat)
+- **Uses**: `apiari-common` (IPC, state persistence), `apiari-claude-sdk` (coordinator/planning/chat)
 - **Calls**: `swarm` CLI via Claude's Bash tool (create, status, send, close, merge)
-- **Reads**: buzz signals (planned, not yet wired)
-- **GitHub**: `gh` CLI wrapper for issues/PRs (available but not yet called from coordinator)
+- **Reads**: buzz signals (daemon auto-triage + dashboard display)
+- **GitHub**: `gh` CLI wrapper for issues/PRs
 
 ## Files on Disk
 
 ```
 .hive/
   workspace.yaml              # Workspace configuration
+  daemon.toml                 # Daemon configuration
+  daemon.pid                  # Daemon PID file
+  daemon.log                  # Daemon log output
+  sessions.json               # Per-chat session state
   quests/
     <quest-uuid>.json          # Quest with embedded tasks
+
+.buzz/
+  config.toml                 # Buzz watcher configuration
+  state.json                  # Watcher cursors (auto-managed)
+  signals.jsonl               # Signal output (when mode = "file")
 ```

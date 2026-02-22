@@ -1,0 +1,111 @@
+//! Buzz — pluggable signal aggregator.
+//!
+//! Polls external sources (Sentry, GitHub, webhooks, reminders), normalizes
+//! events into `Signal` structs, deduplicates them, and outputs JSONL.
+
+pub mod config;
+pub mod output;
+pub mod reminder;
+pub mod signal;
+pub mod watcher;
+
+use std::path::Path;
+
+use color_eyre::Result;
+use tokio::time::{Duration, sleep};
+
+use self::config::BuzzConfig;
+use self::output::OutputMode;
+use self::reminder::Reminder;
+use self::signal::{deduplicate, prioritize};
+use self::watcher::{Watcher, create_watchers, save_cursors};
+
+/// Run buzz with the given options.
+///
+/// - `config_path`: path to `.buzz/config.toml`
+/// - `daemon`: run continuously, polling on interval
+/// - `once`: single poll then exit (also the default)
+/// - `output_override`: CLI override for output mode (None = use config)
+pub async fn run(config_path: &Path, daemon: bool, once: bool, output_override: Option<&str>) -> Result<()> {
+    let config = BuzzConfig::load(config_path)?;
+
+    let output_mode = if let Some(mode_str) = output_override
+        && mode_str != "stdout"
+    {
+        OutputMode::from_config(mode_str, config.output.path.as_ref(), config.output.url.as_deref())?
+    } else {
+        OutputMode::from_config(
+            &config.output.mode,
+            config.output.path.as_ref(),
+            config.output.url.as_deref(),
+        )?
+    };
+
+    let mut watchers = create_watchers(&config);
+    let mut reminders: Vec<Reminder> = config
+        .reminders
+        .iter()
+        .map(Reminder::from_config)
+        .collect();
+
+    if once || !daemon {
+        // Single poll mode (also the default when neither flag is given).
+        run_once(&mut watchers, &mut reminders, &output_mode).await?;
+    } else {
+        // Daemon mode — poll on interval.
+        let interval = Duration::from_secs(config.poll_interval_secs);
+        eprintln!(
+            "[buzz] daemon mode — polling every {}s with {} watcher(s)",
+            config.poll_interval_secs,
+            watchers.len()
+        );
+
+        loop {
+            run_once(&mut watchers, &mut reminders, &output_mode).await?;
+            sleep(interval).await;
+        }
+    }
+
+    Ok(())
+}
+
+/// Execute a single poll cycle across all watchers and reminders.
+async fn run_once(
+    watchers: &mut [Box<dyn Watcher>],
+    reminders: &mut [Reminder],
+    output_mode: &OutputMode,
+) -> Result<()> {
+    let mut all_signals = Vec::new();
+
+    // Poll each watcher.
+    for watcher in watchers.iter_mut() {
+        match watcher.poll().await {
+            Ok(signals) => {
+                eprintln!("[buzz] {} returned {} signal(s)", watcher.name(), signals.len());
+                all_signals.extend(signals);
+            }
+            Err(e) => {
+                eprintln!("[buzz] {} error: {e}", watcher.name());
+            }
+        }
+    }
+
+    // Check reminders.
+    let reminder_signals = reminder::check_reminders(reminders);
+    if !reminder_signals.is_empty() {
+        eprintln!("[buzz] {} reminder(s) fired", reminder_signals.len());
+        all_signals.extend(reminder_signals);
+    }
+
+    // Deduplicate and prioritize.
+    let mut signals = deduplicate(&all_signals);
+    prioritize(&mut signals);
+
+    // Emit.
+    output::emit(&signals, output_mode)?;
+
+    // Persist watcher cursors so the next run picks up where we left off.
+    save_cursors(watchers);
+
+    Ok(())
+}
