@@ -1,14 +1,21 @@
 //! Daemon mode — persistent Telegram bot + buzz auto-triage.
 //!
-//! The daemon runs a `tokio::select!` loop over three sources:
+//! The daemon runs a `tokio::select!` loop over multiple sources:
 //! 1. Telegram messages (via mpsc channel from background long-poll)
-//! 2. Buzz signals (periodic timer + JsonlReader poll)
-//! 3. Shutdown signals (SIGTERM/SIGINT)
+//! 2. Buzz signals (inline watchers when enabled, else JSONL file poll)
+//! 3. Swarm agent completion notifications (when enabled)
+//! 4. Shutdown signals (SIGTERM/SIGINT)
 
 pub mod config;
 pub mod session_store;
+pub mod swarm_watcher;
 
-use crate::channel::telegram::TelegramChannel;
+use crate::buzz::config::BuzzConfig;
+use crate::buzz::output::{self, OutputMode};
+use crate::buzz::reminder::{self, Reminder};
+use crate::buzz::signal::{deduplicate, prioritize};
+use crate::buzz::watcher::{Watcher, create_watchers, save_cursors};
+use crate::channel::telegram::{self, TelegramChannel};
 use crate::channel::{Channel, ChannelEvent, OutboundMessage};
 use crate::coordinator::Coordinator;
 use crate::quest::{QuestStore, default_store_path};
@@ -104,6 +111,20 @@ pub async fn start(cwd: &Path, foreground: bool) -> Result<()> {
         "[daemon] Buzz poll interval: {}s",
         config.buzz_poll_interval_secs
     );
+    if config
+        .buzz
+        .as_ref()
+        .is_some_and(|b| b.enabled)
+    {
+        eprintln!("[daemon] Inline buzz watchers: enabled");
+    }
+    if config
+        .swarm_watch
+        .as_ref()
+        .is_some_and(|sw| sw.enabled)
+    {
+        eprintln!("[daemon] Swarm watcher: enabled");
+    }
 
     let mut runner = DaemonRunner::new(root.to_path_buf(), config)?;
     let result = runner.run().await;
@@ -205,6 +226,14 @@ struct DaemonRunner {
     sessions: SessionStore,
     buzz_reader: JsonlReader<Signal>,
     coordinator_prompt: String,
+    /// Inline buzz watchers (when [buzz] enabled = true).
+    inline_watchers: Option<Vec<Box<dyn Watcher>>>,
+    /// Inline buzz reminders (when [buzz] enabled = true).
+    inline_reminders: Option<Vec<Reminder>>,
+    /// Buzz output mode for writing signals to JSONL (when inline watchers are active).
+    buzz_output: Option<OutputMode>,
+    /// Swarm agent completion watcher.
+    swarm_watcher: Option<swarm_watcher::SwarmWatcher>,
 }
 
 impl DaemonRunner {
@@ -245,6 +274,54 @@ impl DaemonRunner {
         coordinator_prompt.push_str("Dispatch coding work to swarm agents via `swarm create`.\n");
         coordinator_prompt.push_str("Only use Bash for: swarm commands, git status/log, cargo check, and other read-only operations.\n");
 
+        // Conditionally init inline buzz watchers.
+        let (inline_watchers, inline_reminders, buzz_output) =
+            if let Some(buzz_config_path) = config.resolved_buzz_config_path(&workspace_root) {
+                match BuzzConfig::load(&buzz_config_path) {
+                    Ok(buzz_config) => {
+                        let watchers = create_watchers(&buzz_config);
+                        let reminders: Vec<Reminder> = buzz_config
+                            .reminders
+                            .iter()
+                            .map(Reminder::from_config)
+                            .collect();
+                        // Always write to JSONL so the dashboard can still read signals.
+                        let output = OutputMode::File(
+                            buzz_config
+                                .output
+                                .path
+                                .clone()
+                                .unwrap_or_else(|| PathBuf::from(".buzz/signals.jsonl")),
+                        );
+                        eprintln!(
+                            "[daemon] Inline buzz watchers enabled ({} watcher(s), {} reminder(s))",
+                            watchers.len(),
+                            reminders.len()
+                        );
+                        (Some(watchers), Some(reminders), Some(output))
+                    }
+                    Err(e) => {
+                        eprintln!("[daemon] Failed to load buzz config: {e}");
+                        eprintln!("[daemon] Falling back to JSONL file polling");
+                        (None, None, None)
+                    }
+                }
+            } else {
+                (None, None, None)
+            };
+
+        // Conditionally init swarm watcher.
+        let swarm_watcher_instance =
+            if let Some(state_path) = config.resolved_swarm_state_path(&workspace_root) {
+                eprintln!(
+                    "[daemon] Swarm watcher enabled (state: {})",
+                    state_path.display()
+                );
+                Some(swarm_watcher::SwarmWatcher::new(state_path))
+            } else {
+                None
+            };
+
         Ok(Self {
             workspace_root,
             config,
@@ -252,6 +329,10 @@ impl DaemonRunner {
             sessions,
             buzz_reader,
             coordinator_prompt,
+            inline_watchers,
+            inline_reminders,
+            buzz_output,
+            swarm_watcher: swarm_watcher_instance,
         })
     }
 
@@ -294,6 +375,20 @@ impl DaemonRunner {
         // Skip the first immediate tick.
         buzz_timer.tick().await;
 
+        // Swarm watcher timer (only if configured).
+        let swarm_interval = self
+            .config
+            .swarm_watch
+            .as_ref()
+            .filter(|sw| sw.enabled)
+            .map(|sw| std::time::Duration::from_secs(sw.poll_interval_secs));
+        let mut swarm_timer = tokio::time::interval(
+            swarm_interval.unwrap_or(std::time::Duration::from_secs(3600)),
+        );
+        swarm_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the first immediate tick.
+        swarm_timer.tick().await;
+
         eprintln!("[daemon] Ready. Listening for Telegram messages and buzz signals.");
 
         loop {
@@ -320,6 +415,12 @@ impl DaemonRunner {
                 _ = buzz_timer.tick() => {
                     if let Err(e) = self.poll_buzz().await {
                         eprintln!("[daemon] Buzz poll error: {e}");
+                    }
+                }
+
+                _ = swarm_timer.tick(), if self.swarm_watcher.is_some() => {
+                    if let Err(e) = self.poll_swarm().await {
+                        eprintln!("[daemon] Swarm poll error: {e}");
                     }
                 }
             }
@@ -639,9 +740,15 @@ impl DaemonRunner {
     }
 
     /// Poll buzz signals and auto-triage critical/warning ones.
+    ///
+    /// When inline watchers are enabled, polls them directly and writes to JSONL
+    /// for the dashboard. Otherwise, reads new signals from the JSONL file.
     async fn poll_buzz(&mut self) -> Result<()> {
-        let signals = self.buzz_reader.poll().unwrap_or_default();
-        self.sessions.set_buzz_offset(self.buzz_reader.offset());
+        let signals = if self.inline_watchers.is_some() {
+            self.poll_inline_watchers().await
+        } else {
+            self.poll_buzz_jsonl()
+        };
 
         // Filter for important signals.
         let important: Vec<&Signal> = signals
@@ -663,6 +770,87 @@ impl DaemonRunner {
         }
 
         self.sessions.save()?;
+        Ok(())
+    }
+
+    /// Poll inline buzz watchers directly, dedup + prioritize, emit to JSONL.
+    async fn poll_inline_watchers(&mut self) -> Vec<Signal> {
+        let watchers = match self.inline_watchers.as_mut() {
+            Some(w) => w,
+            None => return Vec::new(),
+        };
+
+        let mut all_signals = Vec::new();
+
+        // Poll each watcher.
+        for watcher in watchers.iter_mut() {
+            match watcher.poll().await {
+                Ok(signals) => {
+                    if !signals.is_empty() {
+                        eprintln!(
+                            "[daemon] {} returned {} signal(s)",
+                            watcher.name(),
+                            signals.len()
+                        );
+                    }
+                    all_signals.extend(signals);
+                }
+                Err(e) => {
+                    eprintln!("[daemon] {} error: {e}", watcher.name());
+                }
+            }
+        }
+
+        // Check reminders.
+        if let Some(reminders) = self.inline_reminders.as_mut() {
+            let reminder_signals = reminder::check_reminders(reminders);
+            if !reminder_signals.is_empty() {
+                eprintln!("[daemon] {} reminder(s) fired", reminder_signals.len());
+                all_signals.extend(reminder_signals);
+            }
+        }
+
+        // Dedup + prioritize.
+        let mut signals = deduplicate(&all_signals);
+        prioritize(&mut signals);
+
+        // Emit to JSONL so the dashboard can read them.
+        if let Some(output_mode) = &self.buzz_output {
+            if let Err(e) = output::emit(&signals, output_mode) {
+                eprintln!("[daemon] Failed to write buzz signals: {e}");
+            }
+        }
+
+        // Save watcher cursors.
+        save_cursors(watchers);
+
+        signals
+    }
+
+    /// Poll buzz signals from the JSONL file (fallback when inline watchers are disabled).
+    fn poll_buzz_jsonl(&mut self) -> Vec<Signal> {
+        let signals = self.buzz_reader.poll().unwrap_or_default();
+        self.sessions.set_buzz_offset(self.buzz_reader.offset());
+        signals
+    }
+
+    /// Poll swarm state for agent completion notifications.
+    async fn poll_swarm(&mut self) -> Result<()> {
+        let watcher = match self.swarm_watcher.as_mut() {
+            Some(w) => w,
+            None => return Ok(()),
+        };
+
+        let notifications = watcher.poll();
+        if notifications.is_empty() {
+            return Ok(());
+        }
+
+        let alert_chat_id = self.config.telegram.alert_chat_id;
+        for notification in &notifications {
+            self.send(alert_chat_id, notification).await?;
+        }
+
         Ok(())
     }
 
@@ -780,13 +968,15 @@ fn format_triage_alert(signal: &Signal, assessment: &str) -> String {
         Severity::Info => "🔵",
     };
 
+    let esc_title = telegram::escape_markdown(&signal.title);
+    let esc_source = telegram::escape_markdown(&signal.source);
+    let esc_assessment = telegram::escape_markdown(assessment);
+
     let mut alert = format!(
-        "{severity_emoji} *{severity}* — {title}\n\
-         Source: {source}\n\n\
-         {assessment}",
+        "{severity_emoji} *{severity}* — {esc_title}\n\
+         Source: {esc_source}\n\n\
+         {esc_assessment}",
         severity = signal.severity,
-        title = signal.title,
-        source = signal.source,
     );
 
     if let Some(url) = &signal.url {

@@ -276,6 +276,26 @@ impl Channel for TelegramChannel {
     }
 }
 
+/// Escape special characters for Telegram Markdown.
+///
+/// Use this on dynamic content (signal titles, external text) to prevent
+/// Telegram's Markdown parser from misinterpreting special characters.
+/// Do NOT use this on structural Markdown that we control (e.g. `*bold*` formatting).
+pub fn escape_markdown(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(
+            ch,
+            '_' | '*' | '`' | '[' | ']' | '(' | ')' | '~' | '>' | '#' | '+' | '-' | '=' | '|'
+                | '{' | '}' | '.' | '!'
+        ) {
+            result.push('\\');
+        }
+        result.push(ch);
+    }
+    result
+}
+
 /// Split a message into chunks that fit within Telegram's limit.
 fn chunk_message(text: &str) -> Vec<&str> {
     if text.len() <= MAX_MESSAGE_LEN {
@@ -392,6 +412,36 @@ mod tests {
             }
             _ => panic!("expected Message"),
         }
+    }
+
+    #[test]
+    fn test_escape_markdown_special_chars() {
+        assert_eq!(
+            escape_markdown("_underscores_ and *stars*"),
+            "\\_underscores\\_ and \\*stars\\*"
+        );
+    }
+
+    #[test]
+    fn test_escape_markdown_brackets() {
+        assert_eq!(
+            escape_markdown("[link](url) and `code`"),
+            "\\[link\\]\\(url\\) and \\`code\\`"
+        );
+    }
+
+    #[test]
+    fn test_escape_markdown_plain_text() {
+        assert_eq!(escape_markdown("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_escape_markdown_all_special() {
+        let input = "_*`[]()~>#+-=|{}.!";
+        let escaped = escape_markdown(input);
+        // Every character should be escaped.
+        assert_eq!(escaped.len(), input.len() * 2);
+        assert!(escaped.chars().filter(|&c| c == '\\').count() == input.len());
     }
 
     #[test]

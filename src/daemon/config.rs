@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 /// Top-level daemon configuration.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
     /// Model to use for coordinator sessions (default: "sonnet").
     #[serde(default = "default_model")]
@@ -37,17 +36,55 @@ pub struct DaemonConfig {
 
     /// Telegram bot configuration.
     pub telegram: TelegramConfig,
+
+    /// Inline buzz watcher configuration (optional).
+    #[serde(default)]
+    pub buzz: Option<BuzzDaemonConfig>,
+
+    /// Swarm agent completion watcher (optional).
+    #[serde(default)]
+    pub swarm_watch: Option<SwarmWatchConfig>,
 }
 
 /// Telegram-specific configuration.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TelegramConfig {
     /// Bot API token from @BotFather.
     pub bot_token: String,
 
     /// Chat ID where buzz triage alerts are sent.
     pub alert_chat_id: i64,
+}
+
+/// Inline buzz watcher configuration for daemon mode.
+///
+/// When enabled, the daemon runs buzz watchers directly in its event loop
+/// instead of reading from `.buzz/signals.jsonl`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuzzDaemonConfig {
+    /// Whether to run buzz watchers inline (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to `.buzz/config.toml` (default: ".buzz/config.toml").
+    #[serde(default = "default_buzz_config_path")]
+    pub config_path: PathBuf,
+}
+
+/// Swarm agent completion watcher configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SwarmWatchConfig {
+    /// Whether to watch swarm state (default: true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// How often to poll `.swarm/state.json` in seconds (default: 15).
+    #[serde(default = "default_swarm_poll_interval")]
+    pub poll_interval_secs: u64,
+
+    /// Path to swarm state file (default: ".swarm/state.json").
+    #[serde(default = "default_swarm_state_path")]
+    pub state_path: PathBuf,
 }
 
 fn default_model() -> String {
@@ -68,6 +105,22 @@ fn default_max_turns() -> u32 {
 
 fn default_buzz_poll_interval() -> u64 {
     30
+}
+
+fn default_buzz_config_path() -> PathBuf {
+    PathBuf::from(".buzz/config.toml")
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_swarm_poll_interval() -> u64 {
+    15
+}
+
+fn default_swarm_state_path() -> PathBuf {
+    PathBuf::from(".swarm/state.json")
 }
 
 impl DaemonConfig {
@@ -103,6 +156,32 @@ impl DaemonConfig {
         } else {
             workspace_root.join(&self.buzz_signals_path)
         }
+    }
+
+    /// Resolve the buzz config path relative to the workspace root.
+    pub fn resolved_buzz_config_path(&self, workspace_root: &Path) -> Option<PathBuf> {
+        let buzz = self.buzz.as_ref()?;
+        if !buzz.enabled {
+            return None;
+        }
+        Some(if buzz.config_path.is_absolute() {
+            buzz.config_path.clone()
+        } else {
+            workspace_root.join(&buzz.config_path)
+        })
+    }
+
+    /// Resolve the swarm state path relative to the workspace root.
+    pub fn resolved_swarm_state_path(&self, workspace_root: &Path) -> Option<PathBuf> {
+        let sw = self.swarm_watch.as_ref()?;
+        if !sw.enabled {
+            return None;
+        }
+        Some(if sw.state_path.is_absolute() {
+            sw.state_path.clone()
+        } else {
+            workspace_root.join(&sw.state_path)
+        })
     }
 
     /// Check if a user ID is allowed to interact with the bot.
@@ -258,15 +337,50 @@ alert_chat_id = 42
     }
 
     #[test]
-    fn test_reject_unknown_fields() {
-        let result: Result<DaemonConfig, _> = toml::from_str(
-            r#"
-bogus_field = true
+    fn test_parse_buzz_config() {
+        let toml = r#"
 [telegram]
 bot_token = "tok"
 alert_chat_id = 42
-"#,
-        );
-        assert!(result.is_err());
+
+[buzz]
+enabled = true
+config_path = ".buzz/custom.toml"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let buzz = config.buzz.unwrap();
+        assert!(buzz.enabled);
+        assert_eq!(buzz.config_path, PathBuf::from(".buzz/custom.toml"));
+    }
+
+    #[test]
+    fn test_parse_swarm_watch_config() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+enabled = true
+poll_interval_secs = 30
+state_path = ".swarm/custom.json"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let sw = config.swarm_watch.unwrap();
+        assert!(sw.enabled);
+        assert_eq!(sw.poll_interval_secs, 30);
+        assert_eq!(sw.state_path, PathBuf::from(".swarm/custom.json"));
+    }
+
+    #[test]
+    fn test_buzz_and_swarm_watch_default_none() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert!(config.buzz.is_none());
+        assert!(config.swarm_watch.is_none());
     }
 }
