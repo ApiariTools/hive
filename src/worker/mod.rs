@@ -176,3 +176,190 @@ impl Default for Worker {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quest::{Task, TaskStatus};
+
+    // ---- WorkerStatus Display ----
+
+    #[test]
+    fn worker_status_display() {
+        assert_eq!(WorkerStatus::Starting.to_string(), "starting");
+        assert_eq!(WorkerStatus::Running.to_string(), "running");
+        assert_eq!(WorkerStatus::Complete.to_string(), "complete");
+        assert_eq!(WorkerStatus::Failed.to_string(), "failed");
+        assert_eq!(WorkerStatus::Unknown.to_string(), "unknown");
+    }
+
+    // ---- WorkerStatus serde ----
+
+    #[test]
+    fn worker_status_json_roundtrip() {
+        let statuses = vec![
+            WorkerStatus::Starting,
+            WorkerStatus::Running,
+            WorkerStatus::Complete,
+            WorkerStatus::Failed,
+            WorkerStatus::Unknown,
+        ];
+        for status in &statuses {
+            let json = serde_json::to_string(status).unwrap();
+            let back: WorkerStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, status);
+        }
+    }
+
+    #[test]
+    fn worker_status_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&WorkerStatus::Starting).unwrap(),
+            "\"starting\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkerStatus::Failed).unwrap(),
+            "\"failed\""
+        );
+    }
+
+    #[test]
+    fn worker_status_rejects_unknown_variant() {
+        let result = serde_json::from_str::<WorkerStatus>("\"paused\"");
+        assert!(result.is_err());
+    }
+
+    // ---- Worker construction ----
+
+    #[test]
+    fn worker_new_defaults_swarm_bin() {
+        let worker = Worker::new();
+        assert_eq!(worker.swarm_bin, "swarm");
+    }
+
+    #[test]
+    fn worker_default_same_as_new() {
+        let a = Worker::new();
+        let b = Worker::default();
+        assert_eq!(a.swarm_bin, b.swarm_bin);
+    }
+
+    #[test]
+    fn worker_with_custom_swarm_bin() {
+        let worker = Worker::with_swarm_bin("/usr/local/bin/swarm");
+        assert_eq!(worker.swarm_bin, "/usr/local/bin/swarm");
+    }
+
+    #[test]
+    fn worker_with_swarm_bin_accepts_string() {
+        let worker = Worker::with_swarm_bin(String::from("my-swarm"));
+        assert_eq!(worker.swarm_bin, "my-swarm");
+    }
+
+    // ---- spawn_worker prompt format ----
+
+    fn make_task(title: &str, quest_id: &str) -> Task {
+        Task {
+            id: "task-1".into(),
+            quest_id: quest_id.into(),
+            title: title.into(),
+            status: TaskStatus::Pending,
+            assigned_to: None,
+            branch: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_formats_prompt_correctly() {
+        // Use a dummy binary that just echoes stdin/args — we use `echo` to
+        // verify the command is built. The worker calls
+        //   swarm create "<prompt>"
+        // so we use `printf` as the "swarm" binary to capture the prompt arg.
+        let worker = Worker::with_swarm_bin("echo");
+        let task = make_task("Fix the login bug", "quest-42");
+        let result = worker.spawn_worker(&task).await.unwrap();
+        // `echo create "Task: Fix the login bug\nQuest: quest-42"` outputs:
+        assert!(result.contains("create"));
+        assert!(result.contains("Task: Fix the login bug"));
+        assert!(result.contains("Quest: quest-42"));
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_returns_error_on_bad_binary() {
+        let worker = Worker::with_swarm_bin("/nonexistent/binary");
+        let task = make_task("test", "q-1");
+        let result = worker.spawn_worker(&task).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_returns_error_on_failure_exit() {
+        let worker = Worker::with_swarm_bin("false");
+        let task = make_task("test", "q-1");
+        let result = worker.spawn_worker(&task).await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("swarm create failed"));
+    }
+
+    // ---- poll_worker_status ----
+
+    #[tokio::test]
+    async fn poll_status_returns_unknown_when_no_assignment() {
+        let worker = Worker::new();
+        let task = make_task("test", "q-1");
+        // task.assigned_to is None
+        let status = worker.poll_worker_status(&task).await.unwrap();
+        assert_eq!(status, WorkerStatus::Unknown);
+    }
+
+    // ---- send / close / merge error on bad binary ----
+
+    #[tokio::test]
+    async fn send_message_error_on_bad_binary() {
+        let worker = Worker::with_swarm_bin("/nonexistent/binary");
+        let result = worker.send_message("wt-1", "hello").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn close_worker_error_on_bad_binary() {
+        let worker = Worker::with_swarm_bin("/nonexistent/binary");
+        let result = worker.close_worker("wt-1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn merge_worker_error_on_bad_binary() {
+        let worker = Worker::with_swarm_bin("/nonexistent/binary");
+        let result = worker.merge_worker("wt-1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn send_message_error_on_failure_exit() {
+        let worker = Worker::with_swarm_bin("false");
+        let result = worker.send_message("wt-1", "hello").await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("swarm send failed"));
+    }
+
+    #[tokio::test]
+    async fn close_worker_error_on_failure_exit() {
+        let worker = Worker::with_swarm_bin("false");
+        let result = worker.close_worker("wt-1").await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("swarm close failed"));
+    }
+
+    #[tokio::test]
+    async fn merge_worker_error_on_failure_exit() {
+        let worker = Worker::with_swarm_bin("false");
+        let result = worker.merge_worker("wt-1").await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("swarm merge failed"));
+    }
+}

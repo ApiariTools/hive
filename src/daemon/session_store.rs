@@ -345,4 +345,196 @@ mod tests {
         store.remove_active(100);
         assert!(store.get_active(100).is_none());
     }
+
+    #[test]
+    fn test_remove_active_noop_on_missing() {
+        let mut store = empty_store();
+        // Should not panic when removing from a chat with no session.
+        store.remove_active(999);
+        assert!(store.get_active(999).is_none());
+    }
+
+    #[test]
+    fn test_record_turn_noop_on_missing_session() {
+        let mut store = empty_store();
+        // No active session for this chat — should return false, not panic.
+        assert!(!store.record_turn(999, 5));
+    }
+
+    #[test]
+    fn test_find_archived_ambiguous_prefix() {
+        let mut store = empty_store();
+        // Two sessions that share a prefix.
+        store.start_session(100, "abc-111".into());
+        store.reset_session(100);
+        store.start_session(100, "abc-222".into());
+        store.reset_session(100);
+
+        // "abc" matches both — should return None (ambiguous).
+        assert_eq!(store.find_archived(100, "abc"), None);
+
+        // Exact-enough prefix should still work.
+        assert_eq!(
+            store.find_archived(100, "abc-111"),
+            Some("abc-111".into())
+        );
+        assert_eq!(
+            store.find_archived(100, "abc-222"),
+            Some("abc-222".into())
+        );
+    }
+
+    #[test]
+    fn test_find_archived_no_archives() {
+        let store = empty_store();
+        // No sessions at all for this chat.
+        assert_eq!(store.find_archived(100, "any"), None);
+    }
+
+    #[test]
+    fn test_resume_nonexistent_session() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+        store.reset_session(100);
+
+        // Try to resume a session that doesn't exist.
+        assert!(!store.resume_session(100, "nope"));
+        // Original archived session is untouched.
+        assert_eq!(store.history(100).len(), 1);
+    }
+
+    #[test]
+    fn test_resume_from_chat_with_no_archives() {
+        let mut store = empty_store();
+        assert!(!store.resume_session(100, "anything"));
+    }
+
+    #[test]
+    fn test_multiple_chats_isolated() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-a".into());
+        store.start_session(200, "sess-b".into());
+
+        let a = store.get_active(100).unwrap();
+        let b = store.get_active(200).unwrap();
+        assert_eq!(a.session_id, "sess-a");
+        assert_eq!(b.session_id, "sess-b");
+
+        // Resetting one chat doesn't affect the other.
+        store.reset_session(100);
+        assert!(store.get_active(100).is_none());
+        assert!(store.get_active(200).is_some());
+    }
+
+    #[test]
+    fn test_multiple_resets_build_history() {
+        let mut store = empty_store();
+        store.start_session(100, "s1".into());
+        store.reset_session(100);
+        store.start_session(100, "s2".into());
+        store.reset_session(100);
+        store.start_session(100, "s3".into());
+        store.reset_session(100);
+
+        let history = store.history(100);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].session_id, "s1");
+        assert_eq!(history[1].session_id, "s2");
+        assert_eq!(history[2].session_id, "s3");
+    }
+
+    #[test]
+    fn test_nudge_not_sent_below_threshold() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+
+        // Record 9 turns with threshold of 10 — no nudge.
+        for _ in 0..9 {
+            assert!(!store.record_turn(100, 10));
+        }
+        assert_eq!(store.get_active(100).unwrap().turn_count, 9);
+        assert!(!store.get_active(100).unwrap().nudge_sent);
+    }
+
+    #[test]
+    fn test_nudge_fires_exactly_at_threshold() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+
+        // Threshold of 1 means nudge on the very first turn.
+        assert!(store.record_turn(100, 1));
+        assert!(store.get_active(100).unwrap().nudge_sent);
+        assert_eq!(store.get_active(100).unwrap().turn_count, 1);
+
+        // Subsequent turns don't trigger again.
+        assert!(!store.record_turn(100, 1));
+    }
+
+    #[test]
+    fn test_start_session_resets_nudge_state() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+        store.record_turn(100, 1); // triggers nudge
+        assert!(store.get_active(100).unwrap().nudge_sent);
+
+        // Starting a new session should have fresh nudge state.
+        store.start_session(100, "sess-2".into());
+        assert!(!store.get_active(100).unwrap().nudge_sent);
+        assert_eq!(store.get_active(100).unwrap().turn_count, 0);
+    }
+
+    #[test]
+    fn test_resume_preserves_turn_count() {
+        let mut store = empty_store();
+        store.start_session(100, "sess-1".into());
+        for _ in 0..5 {
+            store.record_turn(100, 100);
+        }
+        store.reset_session(100);
+
+        // Archived session should have 5 turns.
+        assert_eq!(store.history(100)[0].turn_count, 5);
+
+        // Resume it — turn count should be preserved.
+        store.resume_session(100, "sess-1");
+        assert_eq!(store.get_active(100).unwrap().turn_count, 5);
+        // But nudge_sent should be reset on resume.
+        assert!(!store.get_active(100).unwrap().nudge_sent);
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".hive")).unwrap();
+
+        let mut store = SessionStore::load(root);
+        store.start_session(100, "sess-1".into());
+        store.record_turn(100, 50);
+        store.set_buzz_offset(42);
+        store.save().unwrap();
+
+        // Reload from disk.
+        let store2 = SessionStore::load(root);
+        let active = store2.get_active(100).unwrap();
+        assert_eq!(active.session_id, "sess-1");
+        assert_eq!(active.turn_count, 1);
+        assert_eq!(store2.buzz_offset(), 42);
+    }
+
+    #[test]
+    fn test_load_missing_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::load(dir.path());
+        assert!(store.get_active(100).is_none());
+        assert_eq!(store.buzz_offset(), 0);
+    }
+
+    #[test]
+    fn test_state_default_is_empty() {
+        let state = SessionStoreState::default();
+        assert!(state.active.is_empty());
+        assert!(state.archived.is_empty());
+        assert_eq!(state.buzz_reader_offset, 0);
+    }
 }
