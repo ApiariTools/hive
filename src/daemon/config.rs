@@ -85,6 +85,10 @@ pub struct SwarmWatchConfig {
     /// Path to swarm state file (default: ".swarm/state.json").
     #[serde(default = "default_swarm_state_path")]
     pub state_path: PathBuf,
+
+    /// Seconds of inactivity before an agent is considered stalled (default: 300, 0 = disabled).
+    #[serde(default = "default_stall_timeout")]
+    pub stall_timeout_secs: u64,
 }
 
 fn default_model() -> String {
@@ -121,6 +125,10 @@ fn default_swarm_poll_interval() -> u64 {
 
 fn default_swarm_state_path() -> PathBuf {
     PathBuf::from(".swarm/state.json")
+}
+
+fn default_stall_timeout() -> u64 {
+    300
 }
 
 impl DaemonConfig {
@@ -370,6 +378,22 @@ state_path = ".swarm/custom.json"
         assert!(sw.enabled);
         assert_eq!(sw.poll_interval_secs, 30);
         assert_eq!(sw.state_path, PathBuf::from(".swarm/custom.json"));
+        assert_eq!(sw.stall_timeout_secs, 300); // default
+    }
+
+    #[test]
+    fn test_stall_timeout_custom() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+stall_timeout_secs = 600
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let sw = config.swarm_watch.unwrap();
+        assert_eq!(sw.stall_timeout_secs, 600);
     }
 
     #[test]

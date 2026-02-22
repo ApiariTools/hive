@@ -7,6 +7,7 @@
 //! 4. Shutdown signals (SIGTERM/SIGINT)
 
 pub mod config;
+pub mod origin_map;
 pub mod session_store;
 pub mod swarm_watcher;
 
@@ -18,8 +19,9 @@ use crate::buzz::watcher::{Watcher, create_watchers, save_cursors};
 use crate::channel::telegram::{self, TelegramChannel};
 use crate::channel::{Channel, ChannelEvent, OutboundMessage};
 use crate::coordinator::Coordinator;
-use crate::quest::{QuestStore, default_store_path};
+use crate::quest::{QuestStore, TaskOrigin, default_store_path};
 use crate::signal::{Severity, Signal};
+use origin_map::{OriginEntry, OriginMap};
 use crate::workspace::load_workspace;
 use apiari_claude_sdk::types::ContentBlock;
 use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
@@ -218,6 +220,12 @@ pub fn stop(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A pending origin awaiting association with a spawned worktree.
+struct PendingOrigin {
+    origin: TaskOrigin,
+    created_at: std::time::Instant,
+}
+
 /// Main daemon event loop.
 struct DaemonRunner {
     workspace_root: std::path::PathBuf,
@@ -234,6 +242,10 @@ struct DaemonRunner {
     buzz_output: Option<OutputMode>,
     /// Swarm agent completion watcher.
     swarm_watcher: Option<swarm_watcher::SwarmWatcher>,
+    /// Maps worktree_id → who asked for it (for notification routing).
+    origin_map: OriginMap,
+    /// FIFO queue of origins waiting to be matched with newly spawned worktrees.
+    pending_origins: Vec<PendingOrigin>,
 }
 
 impl DaemonRunner {
@@ -313,14 +325,30 @@ impl DaemonRunner {
         // Conditionally init swarm watcher.
         let swarm_watcher_instance =
             if let Some(state_path) = config.resolved_swarm_state_path(&workspace_root) {
+                let stall_timeout = config
+                    .swarm_watch
+                    .as_ref()
+                    .map(|sw| sw.stall_timeout_secs)
+                    .unwrap_or(300);
                 eprintln!(
-                    "[daemon] Swarm watcher enabled (state: {})",
+                    "[daemon] Swarm watcher enabled (state: {}, stall_timeout: {stall_timeout}s)",
                     state_path.display()
                 );
-                Some(swarm_watcher::SwarmWatcher::new(state_path))
+                let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
+                watcher.set_stall_timeout(stall_timeout);
+                Some(watcher)
             } else {
                 None
             };
+
+        // Load origin map for notification routing.
+        let origin_map = OriginMap::load(&workspace_root);
+        if !origin_map.entries.is_empty() {
+            eprintln!(
+                "[daemon] Loaded {} origin mapping(s)",
+                origin_map.entries.len()
+            );
+        }
 
         Ok(Self {
             workspace_root,
@@ -333,6 +361,8 @@ impl DaemonRunner {
             inline_reminders,
             buzz_output,
             swarm_watcher: swarm_watcher_instance,
+            origin_map,
+            pending_origins: Vec::new(),
         })
     }
 
@@ -468,12 +498,14 @@ impl DaemonRunner {
             }
             ChannelEvent::Message {
                 chat_id,
+                user_id,
                 user_name,
                 text,
                 ..
             } => {
                 eprintln!("[daemon] Message from {user_name}: {}", truncate(&text, 80));
-                self.handle_message(chat_id, &text).await
+                self.handle_message(chat_id, user_id, &user_name, &text)
+                    .await
             }
         }
     }
@@ -579,7 +611,24 @@ impl DaemonRunner {
     }
 
     /// Handle a regular text message — route to Claude session.
-    async fn handle_message(&mut self, chat_id: i64, text: &str) -> Result<()> {
+    async fn handle_message(
+        &mut self,
+        chat_id: i64,
+        user_id: i64,
+        user_name: &str,
+        text: &str,
+    ) -> Result<()> {
+        // Push a pending origin so that if the coordinator spawns a swarm agent,
+        // we can associate it with this chat for notification routing.
+        self.pending_origins.push(PendingOrigin {
+            origin: TaskOrigin {
+                channel: "telegram".into(),
+                chat_id: Some(chat_id),
+                user_name: Some(user_name.to_owned()),
+                user_id: Some(user_id),
+            },
+            created_at: std::time::Instant::now(),
+        });
         // Start typing indicator loop (expires after 5s, so we resend every 4s).
         let channel = self.channel.clone();
         let typing_cancel = CancellationToken::new();
@@ -846,9 +895,64 @@ impl DaemonRunner {
             return Ok(());
         }
 
+        // Expire stale pending origins (older than 60 seconds).
+        self.pending_origins
+            .retain(|p| p.created_at.elapsed().as_secs() < 60);
+
         let alert_chat_id = self.config.telegram.alert_chat_id;
+        let mut origin_map_changed = false;
+
         for notification in &notifications {
-            self.send(alert_chat_id, notification).await?;
+            let wt_id = notification.worktree_id();
+
+            // For new agent spawns, pop a pending origin and record the mapping.
+            if let swarm_watcher::SwarmNotification::AgentSpawned {
+                worktree_id,
+                branch,
+                ..
+            } = notification
+            {
+                if let Some(pending) = self.pending_origins.pop() {
+                    self.origin_map.insert(
+                        worktree_id.clone(),
+                        OriginEntry {
+                            origin: pending.origin,
+                            quest_id: None,
+                            task_id: None,
+                            branch: Some(branch.clone()),
+                            created_at: chrono::Utc::now(),
+                        },
+                    );
+                    origin_map_changed = true;
+                }
+            }
+
+            // Route the notification to the originating chat, or fall back to alert_chat_id.
+            let target_chat_id = self
+                .origin_map
+                .route_target(wt_id)
+                .unwrap_or(alert_chat_id);
+
+            let text = notification.format_telegram();
+            self.send(target_chat_id, &text).await?;
+
+            // Clean up origin map entries for completed/closed agents.
+            match notification {
+                swarm_watcher::SwarmNotification::AgentCompleted { worktree_id, .. }
+                | swarm_watcher::SwarmNotification::AgentClosed { worktree_id, .. } => {
+                    if self.origin_map.remove(worktree_id).is_some() {
+                        origin_map_changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Persist origin map if it changed.
+        if origin_map_changed {
+            if let Err(e) = self.origin_map.save(&self.workspace_root) {
+                eprintln!("[daemon] Failed to save origin map: {e}");
+            }
         }
 
         Ok(())

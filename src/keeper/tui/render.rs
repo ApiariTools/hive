@@ -2,7 +2,7 @@
 
 use super::app::{App, Overlay, Panel};
 use super::theme;
-use crate::keeper::discovery::Severity;
+use crate::keeper::discovery::{AgentEventEntry, Severity};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -43,6 +43,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Overlays
     if app.overlay == Overlay::Help {
         draw_help_overlay(frame, area);
+    } else if app.overlay == Overlay::EventDetail {
+        draw_event_detail_overlay(frame, area, app);
     }
 }
 
@@ -90,6 +92,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, _app: &App) {
         Span::styled(" panel  ", theme::key_desc()),
         Span::styled("\u{21b5}", theme::key_hint()),
         Span::styled(" jump  ", theme::key_desc()),
+        Span::styled("e", theme::key_hint()),
+        Span::styled(" events  ", theme::key_desc()),
         Span::styled("r", theme::key_hint()),
         Span::styled(" refresh  ", theme::key_desc()),
         Span::styled("?", theme::key_hint()),
@@ -507,6 +511,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         ("\u{2191}/\u{2193}", "navigate up/down"),
         ("Tab", "switch panels"),
         ("\u{21b5}", "jump to tmux pane"),
+        ("e", "agent event detail"),
         ("r", "force refresh"),
         ("?", "toggle this help"),
         ("Esc", "back / dismiss"),
@@ -537,6 +542,135 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, inner);
+}
+
+// ── Event Detail Overlay ──────────────────────────────────
+
+fn draw_event_detail_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(ref detail) = app.event_detail else {
+        return;
+    };
+
+    // Use most of the screen.
+    let popup_width = (area.width - 4).min(100);
+    let popup_height = (area.height - 4).min(40);
+    let popup = centered_rect(popup_width, popup_height, area);
+    frame.render_widget(Clear, popup);
+
+    let short_branch = detail
+        .branch
+        .strip_prefix("swarm/")
+        .unwrap_or(&detail.branch);
+
+    let block = Block::default()
+        .title(Span::styled(
+            format!(" events — {} ", short_branch),
+            theme::title(),
+        ))
+        .borders(Borders::ALL)
+        .border_style(theme::border_active())
+        .style(theme::overlay_bg());
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if detail.events.is_empty() {
+        let msg = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  No events recorded for this agent.",
+                theme::muted(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Events appear when the agent uses the ClaudeTui protocol.",
+                theme::subtitle(),
+            )),
+        ]);
+        frame.render_widget(msg, inner);
+        return;
+    }
+
+    let inner_width = inner.width.saturating_sub(2) as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+    for event in &detail.events {
+        let line = format_event_line(event, inner_width);
+        lines.push(line);
+    }
+
+    // Show most recent events at the bottom (scroll to end).
+    let visible_height = inner.height as usize;
+    if lines.len() > visible_height {
+        lines.drain(..lines.len() - visible_height);
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
+}
+
+/// Format a single agent event as a colored Line.
+fn format_event_line(event: &AgentEventEntry, max_width: usize) -> Line<'static> {
+    let ts = event
+        .timestamp
+        .map(|t| t.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "        ".into());
+
+    let (icon, detail) = match event.r#type.as_str() {
+        "text" => {
+            let text = event
+                .text
+                .as_deref()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("");
+            let max = max_width.saturating_sub(14);
+            let display = if text.len() > max {
+                format!("{}...", &text[..max.saturating_sub(3)])
+            } else {
+                text.to_string()
+            };
+            ("\u{270e}", display) // ✎
+        }
+        "tool_use" => {
+            let tool = event.tool.as_deref().unwrap_or("?");
+            ("\u{2699}", format!("{tool}")) // ⚙
+        }
+        "tool_result" => {
+            let tool = event.tool.as_deref().unwrap_or("?");
+            ("\u{2714}", format!("{tool} done")) // ✔
+        }
+        "error" => {
+            let msg = event.error.as_deref().unwrap_or("unknown error");
+            let max = max_width.saturating_sub(14);
+            let display = if msg.len() > max {
+                format!("{}...", &msg[..max.saturating_sub(3)])
+            } else {
+                msg.to_string()
+            };
+            ("\u{2718}", display) // ✘
+        }
+        "cost" => {
+            let cost = event.cost.map(|c| format!("${c:.4}")).unwrap_or_default();
+            ("\u{25b3}", format!("cost: {cost}")) // △
+        }
+        other => ("·", other.to_string()),
+    };
+
+    let type_style = match event.r#type.as_str() {
+        "error" => theme::severity_critical(),
+        "tool_use" => theme::accent(),
+        "tool_result" => theme::status_running(),
+        "cost" => theme::severity_warning(),
+        _ => theme::text(),
+    };
+
+    Line::from(vec![
+        Span::styled(format!(" {ts} "), theme::muted()),
+        Span::styled(format!("{icon} "), type_style),
+        Span::styled(detail, type_style),
+    ])
 }
 
 // ── Helpers ───────────────────────────────────────────────

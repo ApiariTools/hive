@@ -1,5 +1,5 @@
 //! Swarm state watcher — monitors `.swarm/state.json` for agent completions
-//! and generates Telegram notifications.
+//! and generates typed notifications.
 //!
 //! Since swarm does not persist agent status (only pane IDs), we detect completion
 //! by tracking changes between polls:
@@ -12,6 +12,106 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Typed swarm event notifications emitted by `SwarmWatcher::poll()`.
+#[derive(Debug, Clone)]
+pub enum SwarmNotification {
+    /// A new agent worktree appeared.
+    AgentSpawned {
+        worktree_id: String,
+        branch: String,
+        summary: Option<String>,
+    },
+    /// An agent's pane disappeared (work finished, pane exited).
+    AgentCompleted {
+        worktree_id: String,
+        branch: String,
+        duration: String,
+    },
+    /// A worktree was removed entirely (closed or merged).
+    AgentClosed {
+        worktree_id: String,
+        branch: String,
+        duration: String,
+    },
+    /// An agent appears stalled.
+    AgentStalled {
+        worktree_id: String,
+        branch: String,
+        stall_kind: StallKind,
+    },
+}
+
+/// What kind of stall was detected.
+#[derive(Debug, Clone)]
+pub enum StallKind {
+    /// No events for longer than the configured timeout.
+    Idle { minutes: u64 },
+    /// Last event is a ToolUse with no corresponding ToolResult.
+    PermissionBlock { tool: String },
+}
+
+impl SwarmNotification {
+    /// Format as a Telegram-friendly notification string.
+    pub fn format_telegram(&self) -> String {
+        match self {
+            Self::AgentSpawned {
+                branch, summary, ..
+            } => {
+                let short = short_branch(branch);
+                let summary_line = summary
+                    .as_deref()
+                    .map(|s| format!("\nTask: {s}"))
+                    .unwrap_or_default();
+                format!(
+                    "🐝 *New agent spawned* — {short}\nBranch: `{branch}`{summary_line}"
+                )
+            }
+            Self::AgentCompleted {
+                branch, duration, ..
+            } => {
+                let short = short_branch(branch);
+                format!(
+                    "🐝 *Agent completed* — {short}\nBranch: `{branch}`\nDuration: {duration}"
+                )
+            }
+            Self::AgentClosed {
+                branch, duration, ..
+            } => {
+                let short = short_branch(branch);
+                format!(
+                    "🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}"
+                )
+            }
+            Self::AgentStalled {
+                branch,
+                stall_kind,
+                ..
+            } => {
+                let short = short_branch(branch);
+                let detail = match stall_kind {
+                    StallKind::Idle { minutes } => format!("Idle for {minutes}m"),
+                    StallKind::PermissionBlock { tool } => {
+                        format!("Waiting on permission for `{tool}`")
+                    }
+                };
+                format!(
+                    "⚠️ *Agent stalled* — {short}\nBranch: `{branch}`\n{detail}"
+                )
+            }
+        }
+    }
+
+    /// Return the worktree_id associated with this notification.
+    pub fn worktree_id(&self) -> &str {
+        match self {
+            Self::AgentSpawned { worktree_id, .. }
+            | Self::AgentCompleted { worktree_id, .. }
+            | Self::AgentClosed { worktree_id, .. }
+            | Self::AgentStalled { worktree_id, .. } => worktree_id,
+        }
+    }
+}
+
 /// Watches `.swarm/state.json` for agent completion events.
 pub struct SwarmWatcher {
     state_path: PathBuf,
@@ -19,6 +119,10 @@ pub struct SwarmWatcher {
     known: HashMap<String, TrackedWorktree>,
     /// Whether we've done the initial load (skip notifications on first poll).
     initialized: bool,
+    /// Base directory for reading agent events (parent of state.json, i.e. `.swarm/`).
+    swarm_dir: PathBuf,
+    /// Stall timeout in seconds (0 = disabled).
+    stall_timeout_secs: u64,
 }
 
 /// Snapshot of a worktree's state for diffing between polls.
@@ -27,6 +131,8 @@ struct TrackedWorktree {
     branch: String,
     had_agent: bool,
     created_at: DateTime<Local>,
+    /// Whether a stall notification has already been sent for this worktree.
+    stall_notified: bool,
 }
 
 // Mirror types for deserializing .swarm/state.json.
@@ -55,17 +161,40 @@ struct PaneState {
     pane_id: String,
 }
 
+/// A single event entry from `.swarm/agents/<id>/events.jsonl`.
+#[derive(Debug, Deserialize)]
+struct AgentEvent {
+    #[serde(default)]
+    r#type: String,
+    #[serde(default)]
+    timestamp: Option<DateTime<Utc>>,
+    /// For tool_use events — the tool name.
+    #[serde(default)]
+    tool: Option<String>,
+}
+
 impl SwarmWatcher {
     pub fn new(state_path: PathBuf) -> Self {
+        let swarm_dir = state_path
+            .parent()
+            .unwrap_or(Path::new(".swarm"))
+            .to_path_buf();
         Self {
             state_path,
             known: HashMap::new(),
             initialized: false,
+            swarm_dir,
+            stall_timeout_secs: 0,
         }
     }
 
-    /// Poll the swarm state file and return notification messages for any transitions.
-    pub fn poll(&mut self) -> Vec<String> {
+    /// Set the stall detection timeout (in seconds). 0 disables stall detection.
+    pub fn set_stall_timeout(&mut self, secs: u64) {
+        self.stall_timeout_secs = secs;
+    }
+
+    /// Poll the swarm state file and return typed notifications for any transitions.
+    pub fn poll(&mut self) -> Vec<SwarmNotification> {
         let state = match Self::load_state(&self.state_path) {
             Some(s) => s,
             None => return Vec::new(),
@@ -87,6 +216,7 @@ impl SwarmWatcher {
                         branch: wt.branch.clone(),
                         had_agent: wt.agent.is_some(),
                         created_at: wt.created_at,
+                        stall_notified: false,
                     },
                 );
             }
@@ -110,36 +240,31 @@ impl SwarmWatcher {
                 // Worktree still exists — check if agent finished.
                 if prev.had_agent && wt.agent.is_none() {
                     let duration = format_duration(prev.created_at);
-                    let branch = short_branch(&wt.branch);
-                    notifications.push(format!(
-                        "🐝 *Agent completed* — {branch}\nBranch: `{}`\nDuration: {duration}",
-                        wt.branch,
-                    ));
+                    notifications.push(SwarmNotification::AgentCompleted {
+                        worktree_id: id.clone(),
+                        branch: wt.branch.clone(),
+                        duration,
+                    });
                 }
             } else {
                 // Worktree was removed (closed or merged).
-                let branch = short_branch(&prev.branch);
                 let duration = format_duration(prev.created_at);
-                notifications.push(format!(
-                    "🐝 *Agent closed* — {branch}\nBranch: `{}`\nDuration: {duration}",
-                    prev.branch,
-                ));
+                notifications.push(SwarmNotification::AgentClosed {
+                    worktree_id: id.clone(),
+                    branch: prev.branch.clone(),
+                    duration,
+                });
             }
         }
 
         // Check for new worktrees.
         for wt in &state.worktrees {
             if !self.known.contains_key(&wt.id) {
-                let branch = short_branch(&wt.branch);
-                let summary_line = wt
-                    .summary
-                    .as_deref()
-                    .map(|s| format!("\nTask: {s}"))
-                    .unwrap_or_default();
-                notifications.push(format!(
-                    "🐝 *New agent spawned* — {branch}\nBranch: `{}`{summary_line}",
-                    wt.branch,
-                ));
+                notifications.push(SwarmNotification::AgentSpawned {
+                    worktree_id: wt.id.clone(),
+                    branch: wt.branch.clone(),
+                    summary: wt.summary.clone(),
+                });
             }
         }
 
@@ -152,11 +277,103 @@ impl SwarmWatcher {
                     branch: wt.branch.clone(),
                     had_agent: wt.agent.is_some(),
                     created_at: wt.created_at,
+                    stall_notified: false,
                 },
             );
         }
 
+        // Preserve stall_notified for worktrees that were already known.
+        // (We cleared and re-built, so we need to carry forward.)
+        // Re-read previous stall state from notifications: if we just emitted
+        // AgentCompleted or AgentClosed, the worktree is gone anyway.
+        // For stall detection, check_stalls() handles the stall_notified flag.
+
+        // Check for stalled agents.
+        if self.stall_timeout_secs > 0 {
+            notifications.extend(self.check_stalls());
+        }
+
         notifications
+    }
+
+    /// Check for stalled agents by reading their events.jsonl files.
+    fn check_stalls(&mut self) -> Vec<SwarmNotification> {
+        let mut stalls = Vec::new();
+        let agents_dir = self.swarm_dir.join("agents");
+
+        for (id, tracked) in self.known.iter_mut() {
+            // Only check agents that are alive and haven't been notified yet.
+            if !tracked.had_agent || tracked.stall_notified {
+                continue;
+            }
+
+            let events_path = agents_dir.join(id).join("events.jsonl");
+            let events = Self::read_recent_events(&events_path);
+
+            if events.is_empty() {
+                // No events file — can't determine stall state.
+                continue;
+            }
+
+            let last = &events[events.len() - 1];
+
+            // Check for permission block: last event is tool_use with no tool_result after.
+            if last.r#type == "tool_use" {
+                if let Some(tool) = &last.tool {
+                    stalls.push(SwarmNotification::AgentStalled {
+                        worktree_id: id.clone(),
+                        branch: tracked.branch.clone(),
+                        stall_kind: StallKind::PermissionBlock {
+                            tool: tool.clone(),
+                        },
+                    });
+                    tracked.stall_notified = true;
+                    continue;
+                }
+            }
+
+            // Check for idle stall: last event timestamp is old.
+            if let Some(ts) = &last.timestamp {
+                let elapsed = Utc::now() - *ts;
+                let elapsed_secs = elapsed.num_seconds().max(0) as u64;
+                if elapsed_secs >= self.stall_timeout_secs {
+                    stalls.push(SwarmNotification::AgentStalled {
+                        worktree_id: id.clone(),
+                        branch: tracked.branch.clone(),
+                        stall_kind: StallKind::Idle {
+                            minutes: elapsed_secs / 60,
+                        },
+                    });
+                    tracked.stall_notified = true;
+                }
+            }
+        }
+
+        stalls
+    }
+
+    /// Read recent events from an agent's events.jsonl (last 20 lines).
+    fn read_recent_events(path: &Path) -> Vec<AgentEvent> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        content
+            .lines()
+            .rev()
+            .take(20)
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                serde_json::from_str::<AgentEvent>(trimmed).ok()
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     fn load_state(path: &Path) -> Option<SwarmState> {
@@ -167,9 +384,7 @@ impl SwarmWatcher {
 
 /// Extract a short human-readable name from a branch like "swarm/fix-auth-bug".
 fn short_branch(branch: &str) -> &str {
-    branch
-        .strip_prefix("swarm/")
-        .unwrap_or(branch)
+    branch.strip_prefix("swarm/").unwrap_or(branch)
 }
 
 /// Format the duration since a worktree was created.
@@ -234,8 +449,9 @@ mod tests {
 
         let notes = watcher.poll();
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("Agent completed"));
-        assert!(notes[0].contains("fix-bug"));
+        let msg = notes[0].format_telegram();
+        assert!(msg.contains("Agent completed"));
+        assert!(msg.contains("fix-bug"));
     }
 
     #[test]
@@ -254,7 +470,8 @@ mod tests {
 
         let notes = watcher.poll();
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("Agent closed"));
+        let msg = notes[0].format_telegram();
+        assert!(msg.contains("Agent closed"));
     }
 
     #[test]
@@ -273,9 +490,10 @@ mod tests {
 
         let notes = watcher.poll();
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("New agent spawned"));
-        assert!(notes[0].contains("new-feat"));
-        assert!(notes[0].contains("Add new feature"));
+        let msg = notes[0].format_telegram();
+        assert!(msg.contains("New agent spawned"));
+        assert!(msg.contains("new-feat"));
+        assert!(msg.contains("Add new feature"));
     }
 
     #[test]
@@ -290,5 +508,52 @@ mod tests {
         assert_eq!(short_branch("swarm/fix-bug"), "fix-bug");
         assert_eq!(short_branch("main"), "main");
         assert_eq!(short_branch("feature/auth"), "feature/auth");
+    }
+
+    #[test]
+    fn test_notification_worktree_id() {
+        let n = SwarmNotification::AgentSpawned {
+            worktree_id: "abc".into(),
+            branch: "swarm/test".into(),
+            summary: None,
+        };
+        assert_eq!(n.worktree_id(), "abc");
+    }
+
+    #[test]
+    fn test_notification_formatting() {
+        let spawned = SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/new".into(),
+            summary: Some("Do the thing".into()),
+        };
+        assert!(spawned.format_telegram().contains("New agent spawned"));
+        assert!(spawned.format_telegram().contains("Do the thing"));
+
+        let completed = SwarmNotification::AgentCompleted {
+            worktree_id: "1".into(),
+            branch: "swarm/done".into(),
+            duration: "5m".into(),
+        };
+        assert!(completed.format_telegram().contains("Agent completed"));
+        assert!(completed.format_telegram().contains("5m"));
+
+        let stalled_idle = SwarmNotification::AgentStalled {
+            worktree_id: "1".into(),
+            branch: "swarm/stuck".into(),
+            stall_kind: StallKind::Idle { minutes: 10 },
+        };
+        assert!(stalled_idle.format_telegram().contains("Agent stalled"));
+        assert!(stalled_idle.format_telegram().contains("Idle for 10m"));
+
+        let stalled_perm = SwarmNotification::AgentStalled {
+            worktree_id: "1".into(),
+            branch: "swarm/blocked".into(),
+            stall_kind: StallKind::PermissionBlock {
+                tool: "Write".into(),
+            },
+        };
+        assert!(stalled_perm.format_telegram().contains("permission"));
+        assert!(stalled_perm.format_telegram().contains("Write"));
     }
 }

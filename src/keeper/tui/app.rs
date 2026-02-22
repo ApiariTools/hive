@@ -1,6 +1,6 @@
 //! Application state for the keeper dashboard.
 
-use crate::keeper::discovery::{self, BuzzSummary, DiscoveryResult, SwarmSession};
+use crate::keeper::discovery::{self, AgentEventEntry, BuzzSummary, DiscoveryResult, SwarmSession};
 use std::time::Instant;
 
 /// Which panel has focus.
@@ -15,6 +15,15 @@ pub enum Panel {
 pub enum Overlay {
     None,
     Help,
+    EventDetail,
+}
+
+/// Event detail state for a selected worktree.
+pub struct EventDetail {
+    pub worktree_id: String,
+    pub branch: String,
+    pub events: Vec<AgentEventEntry>,
+    pub last_refresh: Instant,
 }
 
 /// Top-level application state.
@@ -42,6 +51,9 @@ pub struct App {
 
     /// When we last refreshed PR info.
     last_pr_refresh: Instant,
+
+    /// Event detail panel state (when viewing agent events).
+    pub event_detail: Option<EventDetail>,
 }
 
 impl App {
@@ -55,6 +67,7 @@ impl App {
             overlay: Overlay::None,
             last_refresh: Instant::now(),
             last_pr_refresh: Instant::now(),
+            event_detail: None,
         }
     }
 
@@ -67,6 +80,13 @@ impl App {
         // PR refresh every 30 seconds (it shells out to `gh` per worktree).
         if self.last_pr_refresh.elapsed().as_secs() >= 30 {
             self.refresh_prs();
+        }
+
+        // Auto-refresh event detail every 3 seconds.
+        if let Some(ref detail) = self.event_detail
+            && detail.last_refresh.elapsed().as_secs() >= 3
+        {
+            self.refresh_event_detail();
         }
     }
 
@@ -160,13 +180,59 @@ impl App {
     pub fn toggle_help(&mut self) {
         self.overlay = match self.overlay {
             Overlay::Help => Overlay::None,
-            Overlay::None => Overlay::Help,
+            _ => Overlay::Help,
         };
+    }
+
+    /// Toggle event detail overlay for the selected worktree.
+    pub fn toggle_event_detail(&mut self) {
+        if self.overlay == Overlay::EventDetail {
+            self.overlay = Overlay::None;
+            self.event_detail = None;
+            return;
+        }
+
+        let Some(session) = self.sessions.get(self.selected_session) else {
+            return;
+        };
+        let Some(wt) = session.worktrees.get(self.selected_worktree) else {
+            return;
+        };
+
+        let events = discovery::read_agent_events(session, &wt.id, 50);
+        self.event_detail = Some(EventDetail {
+            worktree_id: wt.id.clone(),
+            branch: wt.branch.clone(),
+            events,
+            last_refresh: Instant::now(),
+        });
+        self.overlay = Overlay::EventDetail;
+    }
+
+    /// Refresh event detail data (called on tick).
+    fn refresh_event_detail(&mut self) {
+        let Some(ref detail) = self.event_detail else {
+            return;
+        };
+        let wt_id = detail.worktree_id.clone();
+
+        let Some(session) = self.sessions.get(self.selected_session) else {
+            return;
+        };
+
+        let events = discovery::read_agent_events(session, &wt_id, 50);
+        if let Some(ref mut d) = self.event_detail {
+            d.events = events;
+            d.last_refresh = Instant::now();
+        }
     }
 
     /// Dismiss any overlay.
     pub fn dismiss_overlay(&mut self) {
         self.overlay = Overlay::None;
+        if self.event_detail.is_some() {
+            self.event_detail = None;
+        }
     }
 
     /// Whether an overlay is currently shown.

@@ -266,6 +266,7 @@ mod tests {
             status: TaskStatus::Pending,
             assigned_to: None,
             branch: None,
+            origin: None,
         }
     }
 

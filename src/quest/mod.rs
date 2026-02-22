@@ -9,6 +9,22 @@ use color_eyre::eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Where a quest/task originated from, for routing notifications back.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskOrigin {
+    /// Channel the request came from: "telegram", "cli", "dashboard".
+    pub channel: String,
+    /// Telegram chat_id (for routing replies back).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<i64>,
+    /// Human-readable user name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    /// Numeric user ID (e.g. Telegram user_id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+}
+
 /// The status of a quest through its lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,6 +92,9 @@ pub struct Task {
     /// Git branch for this task's work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Where this task originated from (for notification routing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TaskOrigin>,
 }
 
 impl Task {
@@ -88,6 +107,7 @@ impl Task {
             status: TaskStatus::Pending,
             assigned_to: None,
             branch: None,
+            origin: None,
         }
     }
 }
@@ -112,6 +132,9 @@ pub struct Quest {
     /// Associated GitHub issue in "owner/repo#123" format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_issue: Option<String>,
+    /// Where this quest originated from (for notification routing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TaskOrigin>,
 }
 
 impl Quest {
@@ -127,6 +150,7 @@ impl Quest {
             created_at: now,
             updated_at: now,
             github_issue: None,
+            origin: None,
         }
     }
 
@@ -414,6 +438,56 @@ mod tests {
         let store = QuestStore::new(dir.path().join("nonexistent"));
         let quests = store.list().unwrap();
         assert!(quests.is_empty());
+    }
+
+    #[test]
+    fn quest_without_origin_deserializes() {
+        // Backward compat: old JSON files won't have the origin field.
+        let json = r#"{
+            "id": "abc",
+            "title": "Old Quest",
+            "description": "no origin",
+            "status": "active",
+            "tasks": [],
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let quest: Quest = serde_json::from_str(json).unwrap();
+        assert!(quest.origin.is_none());
+        assert!(quest.github_issue.is_none());
+    }
+
+    #[test]
+    fn task_with_origin_roundtrip() {
+        let origin = TaskOrigin {
+            channel: "telegram".into(),
+            chat_id: Some(100),
+            user_name: Some("josh".into()),
+            user_id: Some(42),
+        };
+        let mut task = Task::new("q1", "Test task");
+        task.origin = Some(origin);
+
+        let json = serde_json::to_string(&task).unwrap();
+        let restored: Task = serde_json::from_str(&json).unwrap();
+        let o = restored.origin.unwrap();
+        assert_eq!(o.channel, "telegram");
+        assert_eq!(o.chat_id, Some(100));
+        assert_eq!(o.user_name.as_deref(), Some("josh"));
+        assert_eq!(o.user_id, Some(42));
+    }
+
+    #[test]
+    fn task_without_origin_deserializes() {
+        let json = r#"{
+            "id": "t1",
+            "quest_id": "q1",
+            "title": "Old Task",
+            "status": "pending"
+        }"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert!(task.origin.is_none());
+        assert!(task.branch.is_none());
     }
 
     #[test]

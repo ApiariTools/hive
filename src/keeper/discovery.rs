@@ -112,6 +112,69 @@ pub struct BuzzSummary {
     pub info_count: usize,
 }
 
+// ── Agent event types (read from `.swarm/agents/<id>/events.jsonl`) ──
+
+/// A single event from an agent's structured event log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEventEntry {
+    /// Event type: "text", "tool_use", "tool_result", "error", "cost", etc.
+    #[serde(default)]
+    pub r#type: String,
+    /// When the event occurred.
+    #[serde(default)]
+    pub timestamp: Option<DateTime<Utc>>,
+    /// For tool_use events — the tool name.
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// For text events — the text content (may be truncated).
+    #[serde(default)]
+    pub text: Option<String>,
+    /// For error events — the error message.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// For cost events — cumulative cost.
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
+/// Read recent agent events from `.swarm/agents/<id>/events.jsonl`.
+/// Returns the most recent `limit` events, newest last.
+pub fn read_agent_events(
+    session: &SwarmSession,
+    worktree_id: &str,
+    limit: usize,
+) -> Vec<AgentEventEntry> {
+    let events_path = session
+        .project_dir
+        .join(".swarm")
+        .join("agents")
+        .join(worktree_id)
+        .join("events.jsonl");
+
+    let content = match std::fs::read_to_string(&events_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut events: Vec<AgentEventEntry> = content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str(trimmed).ok()
+        })
+        .collect();
+
+    // Keep only the last `limit` events.
+    if events.len() > limit {
+        events.drain(..events.len() - limit);
+    }
+
+    events
+}
+
 // ── PR info (queried from gh CLI) ─────────────────────────
 
 /// Pull request information discovered via `gh`.
