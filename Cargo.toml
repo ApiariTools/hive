@@ -15,3 +15,11 @@ clap.workspace = true
 color-eyre.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+serde_yaml = "0.9"
+reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

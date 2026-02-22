@@ -1,0 +1,425 @@
+//! Telegram Bot API client using raw reqwest (no framework).
+//!
+//! Uses long-polling via `getUpdates` and sends responses via `sendMessage`.
+//! Keeps dependencies minimal — same pattern as buzz's Sentry watcher.
+
+use super::{Channel, ChannelEvent, OutboundMessage};
+use async_trait::async_trait;
+use color_eyre::eyre::Result;
+use serde::Deserialize;
+use tokio::sync::mpsc::Sender;
+use tokio_util::sync::CancellationToken;
+
+/// Maximum message length for Telegram (we chunk below this).
+const MAX_MESSAGE_LEN: usize = 4000;
+
+/// Telegram Bot API client.
+pub struct TelegramChannel {
+    bot_token: String,
+    allowed_user_ids: Vec<i64>,
+    client: reqwest::Client,
+}
+
+// --- Telegram API response types ---
+
+#[derive(Debug, Deserialize)]
+struct TgResponse<T> {
+    ok: bool,
+    result: Option<T>,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TgUpdate {
+    update_id: i64,
+    message: Option<TgMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TgMessage {
+    message_id: i64,
+    chat: TgChat,
+    from: Option<TgUser>,
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TgChat {
+    id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TgUser {
+    id: i64,
+    #[serde(default)]
+    first_name: String,
+    #[serde(default)]
+    username: Option<String>,
+}
+
+impl TelegramChannel {
+    pub fn new(bot_token: String, allowed_user_ids: Vec<i64>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .expect("failed to build reqwest client");
+
+        Self {
+            bot_token,
+            allowed_user_ids,
+            client,
+        }
+    }
+
+    fn api_url(&self, method: &str) -> String {
+        format!("https://api.telegram.org/bot{}/{method}", self.bot_token)
+    }
+
+    fn is_user_allowed(&self, user_id: i64) -> bool {
+        self.allowed_user_ids.is_empty() || self.allowed_user_ids.contains(&user_id)
+    }
+
+    /// Parse a message into a ChannelEvent.
+    fn parse_message(msg: &TgMessage) -> Option<ChannelEvent> {
+        let text = msg.text.as_deref()?.trim();
+        if text.is_empty() {
+            return None;
+        }
+
+        let user = msg.from.as_ref()?;
+        let user_name = user
+            .username
+            .clone()
+            .unwrap_or_else(|| user.first_name.clone());
+
+        if let Some(rest) = text.strip_prefix('/') {
+            // Split command from args: "/reset abc" -> ("reset", "abc")
+            let (command, args) = match rest.split_once(' ') {
+                Some((cmd, args)) => (cmd, args),
+                None => (rest, ""),
+            };
+            // Strip @botname suffix from commands like "/reset@mybot"
+            let command = command.split('@').next().unwrap_or(command);
+            Some(ChannelEvent::Command {
+                chat_id: msg.chat.id,
+                message_id: msg.message_id,
+                user_id: user.id,
+                user_name,
+                command: command.to_owned(),
+                args: args.trim().to_owned(),
+            })
+        } else {
+            Some(ChannelEvent::Message {
+                chat_id: msg.chat.id,
+                message_id: msg.message_id,
+                user_id: user.id,
+                user_name,
+                text: text.to_owned(),
+            })
+        }
+    }
+
+    /// Long-poll for updates from Telegram.
+    async fn get_updates(&self, offset: i64) -> Result<Vec<TgUpdate>> {
+        let resp = self
+            .client
+            .get(self.api_url("getUpdates"))
+            .query(&[
+                ("offset", offset.to_string()),
+                ("timeout", "30".to_string()),
+            ])
+            .send()
+            .await?;
+
+        let body: TgResponse<Vec<TgUpdate>> = resp.json().await?;
+
+        if !body.ok {
+            let desc = body.description.unwrap_or_default();
+            color_eyre::eyre::bail!("Telegram API error: {desc}");
+        }
+
+        Ok(body.result.unwrap_or_default())
+    }
+
+    /// React to a message with an emoji.
+    pub async fn send_reaction(&self, chat_id: i64, message_id: i64, emoji: &str) {
+        let resp = self
+            .client
+            .post(self.api_url("setMessageReaction"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reaction": [{"type": "emoji", "emoji": emoji}],
+            }))
+            .send()
+            .await;
+
+        if let Err(e) = resp {
+            eprintln!("[telegram] setMessageReaction failed: {e}");
+        }
+    }
+
+    /// Send a "typing" chat action indicator.
+    pub async fn send_typing(&self, chat_id: i64) {
+        let resp = self
+            .client
+            .post(self.api_url("sendChatAction"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "action": "typing",
+            }))
+            .send()
+            .await;
+
+        if let Err(e) = resp {
+            eprintln!("[telegram] sendChatAction failed: {e}");
+        }
+    }
+
+    /// Send a text message, chunking if necessary.
+    async fn send_text(&self, chat_id: i64, text: &str) -> Result<()> {
+        let chunks = chunk_message(text);
+        for chunk in chunks {
+            let resp = self
+                .client
+                .post(self.api_url("sendMessage"))
+                .json(&serde_json::json!({
+                    "chat_id": chat_id,
+                    "text": chunk,
+                    "parse_mode": "Markdown",
+                }))
+                .send()
+                .await?;
+
+            let body: TgResponse<serde_json::Value> = resp.json().await?;
+            if !body.ok {
+                // Retry without Markdown if parse_mode fails.
+                let resp = self
+                    .client
+                    .post(self.api_url("sendMessage"))
+                    .json(&serde_json::json!({
+                        "chat_id": chat_id,
+                        "text": chunk,
+                    }))
+                    .send()
+                    .await?;
+
+                let body: TgResponse<serde_json::Value> = resp.json().await?;
+                if !body.ok {
+                    let desc = body.description.unwrap_or_default();
+                    eprintln!("[telegram] sendMessage failed: {desc}");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Channel for TelegramChannel {
+    fn name(&self) -> &str {
+        "telegram"
+    }
+
+    async fn run(&self, tx: Sender<ChannelEvent>, cancel: CancellationToken) {
+        let mut offset: i64 = 0;
+
+        loop {
+            if cancel.is_cancelled() {
+                break;
+            }
+
+            let updates = tokio::select! {
+                _ = cancel.cancelled() => break,
+                result = self.get_updates(offset) => {
+                    match result {
+                        Ok(updates) => updates,
+                        Err(e) => {
+                            eprintln!("[telegram] Poll error: {e}");
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            for update in updates {
+                offset = update.update_id + 1;
+
+                let Some(msg) = update.message else {
+                    continue;
+                };
+
+                // Check user authorization.
+                if let Some(user) = &msg.from {
+                    if !self.is_user_allowed(user.id) {
+                        eprintln!(
+                            "[telegram] Ignoring message from unauthorized user {}",
+                            user.id
+                        );
+                        continue;
+                    }
+                }
+
+                if let Some(event) = Self::parse_message(&msg) {
+                    if tx.send(event).await.is_err() {
+                        // Receiver dropped — shut down.
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn send_message(&self, msg: &OutboundMessage) -> Result<()> {
+        self.send_text(msg.chat_id, &msg.text).await
+    }
+}
+
+/// Split a message into chunks that fit within Telegram's limit.
+fn chunk_message(text: &str) -> Vec<&str> {
+    if text.len() <= MAX_MESSAGE_LEN {
+        return vec![text];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= MAX_MESSAGE_LEN {
+            chunks.push(remaining);
+            break;
+        }
+
+        // Try to split at a newline within the limit.
+        let split_at = remaining[..MAX_MESSAGE_LEN]
+            .rfind('\n')
+            .unwrap_or(MAX_MESSAGE_LEN);
+
+        let (chunk, rest) = remaining.split_at(split_at);
+        chunks.push(chunk);
+        // Skip the newline we split on.
+        remaining = rest.strip_prefix('\n').unwrap_or(rest);
+    }
+
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chunk_message_short() {
+        let chunks = chunk_message("hello");
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_chunk_message_long() {
+        let line = "x".repeat(100);
+        // 50 lines of 100 chars = 5000 chars + newlines
+        let text: String = (0..50).map(|_| line.as_str()).collect::<Vec<_>>().join("\n");
+        let chunks = chunk_message(&text);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.len() <= MAX_MESSAGE_LEN);
+        }
+    }
+
+    #[test]
+    fn test_parse_command() {
+        let msg = TgMessage {
+            message_id: 1,
+            chat: TgChat { id: 100 },
+            from: Some(TgUser {
+                id: 1,
+                first_name: "Josh".into(),
+                username: Some("josh".into()),
+            }),
+            text: Some("/reset now".into()),
+        };
+        let event = TelegramChannel::parse_message(&msg).unwrap();
+        match event {
+            ChannelEvent::Command {
+                command, args, ..
+            } => {
+                assert_eq!(command, "reset");
+                assert_eq!(args, "now");
+            }
+            _ => panic!("expected Command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_command_with_bot_suffix() {
+        let msg = TgMessage {
+            message_id: 1,
+            chat: TgChat { id: 100 },
+            from: Some(TgUser {
+                id: 1,
+                first_name: "Josh".into(),
+                username: None,
+            }),
+            text: Some("/status@mybot".into()),
+        };
+        let event = TelegramChannel::parse_message(&msg).unwrap();
+        match event {
+            ChannelEvent::Command { command, .. } => {
+                assert_eq!(command, "status");
+            }
+            _ => panic!("expected Command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_regular_message() {
+        let msg = TgMessage {
+            message_id: 1,
+            chat: TgChat { id: 100 },
+            from: Some(TgUser {
+                id: 1,
+                first_name: "Josh".into(),
+                username: Some("josh".into()),
+            }),
+            text: Some("hello world".into()),
+        };
+        let event = TelegramChannel::parse_message(&msg).unwrap();
+        match event {
+            ChannelEvent::Message { text, .. } => {
+                assert_eq!(text, "hello world");
+            }
+            _ => panic!("expected Message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_text() {
+        let msg = TgMessage {
+            message_id: 1,
+            chat: TgChat { id: 100 },
+            from: Some(TgUser {
+                id: 1,
+                first_name: "Josh".into(),
+                username: None,
+            }),
+            text: Some("  ".into()),
+        };
+        assert!(TelegramChannel::parse_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_parse_no_text() {
+        let msg = TgMessage {
+            message_id: 1,
+            chat: TgChat { id: 100 },
+            from: Some(TgUser {
+                id: 1,
+                first_name: "Josh".into(),
+                username: None,
+            }),
+            text: None,
+        };
+        assert!(TelegramChannel::parse_message(&msg).is_none());
+    }
+}
