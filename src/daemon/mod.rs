@@ -7,6 +7,7 @@
 //! 4. Shutdown signals (SIGTERM/SIGINT)
 
 pub mod config;
+pub mod markdown;
 pub mod origin_map;
 pub mod session_store;
 pub mod swarm_watcher;
@@ -694,7 +695,8 @@ impl DaemonRunner {
         let send_fn = move |text: String| {
             let channel = channel.clone();
             async move {
-                for chunk in split_message(&text, 4000) {
+                let sanitized = markdown::sanitize_for_telegram(&text);
+                for chunk in split_message(&sanitized, 4000) {
                     channel
                         .send_message(&OutboundMessage {
                             chat_id,
@@ -1153,8 +1155,12 @@ impl DaemonRunner {
     }
 
     /// Send a message through the Telegram channel, splitting if too long.
+    ///
+    /// All outbound text is sanitized for Telegram's limited markdown parser
+    /// (tables, headers, HR rules, bold syntax).
     async fn send(&self, chat_id: i64, text: &str) -> Result<()> {
-        for chunk in split_message(text, 4000) {
+        let sanitized = markdown::sanitize_for_telegram(text);
+        for chunk in split_message(&sanitized, 4000) {
             self.channel
                 .send_message(&OutboundMessage {
                     chat_id,
