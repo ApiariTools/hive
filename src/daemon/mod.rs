@@ -688,14 +688,21 @@ impl DaemonRunner {
             .get_active(chat_id)
             .map(|s| s.session_id.clone());
 
-        // Build a callback that sends intermediate text blocks to Telegram immediately.
+        // Build a callback that sends intermediate text blocks to Telegram immediately,
+        // splitting long messages to stay within Telegram's 4096-char limit.
         let channel = self.channel.clone();
         let send_fn = move |text: String| {
             let channel = channel.clone();
             async move {
-                channel
-                    .send_message(&OutboundMessage { chat_id, text })
-                    .await
+                for chunk in split_message(&text, 4000) {
+                    channel
+                        .send_message(&OutboundMessage {
+                            chat_id,
+                            text: chunk,
+                        })
+                        .await?;
+                }
+                Ok(())
             }
         };
 
@@ -1145,14 +1152,17 @@ impl DaemonRunner {
         Ok(text)
     }
 
-    /// Send a message through the Telegram channel.
+    /// Send a message through the Telegram channel, splitting if too long.
     async fn send(&self, chat_id: i64, text: &str) -> Result<()> {
-        self.channel
-            .send_message(&OutboundMessage {
-                chat_id,
-                text: text.to_owned(),
-            })
-            .await
+        for chunk in split_message(text, 4000) {
+            self.channel
+                .send_message(&OutboundMessage {
+                    chat_id,
+                    text: chunk,
+                })
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -1180,6 +1190,34 @@ fn format_triage_alert(signal: &Signal, assessment: &str) -> String {
     }
 
     alert
+}
+
+/// Split text into chunks of at most `limit` characters, preferring to break at newlines.
+fn split_message(text: &str, limit: usize) -> Vec<String> {
+    if text.len() <= limit {
+        return vec![text.to_owned()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= limit {
+            chunks.push(remaining.to_owned());
+            break;
+        }
+
+        // Look for the last newline within the limit.
+        let split_at = remaining[..limit]
+            .rfind('\n')
+            .map(|pos| pos + 1) // include the newline in the current chunk
+            .unwrap_or(limit); // no newline found — hard split at limit
+
+        chunks.push(remaining[..split_at].to_owned());
+        remaining = &remaining[split_at..];
+    }
+
+    chunks
 }
 
 /// Truncate a string for display.
