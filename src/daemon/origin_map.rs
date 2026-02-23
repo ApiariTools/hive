@@ -42,8 +42,7 @@ impl OriginMap {
     /// Save the origin map to disk.
     pub fn save(&self, workspace_root: &Path) -> std::io::Result<()> {
         let path = Self::path(workspace_root);
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
@@ -65,8 +64,7 @@ impl OriginMap {
     /// Return the chat_id to route a notification to for a given worktree,
     /// or `None` if the origin has no chat_id (falls back to alert_chat_id).
     pub fn route_target(&self, worktree_id: &str) -> Option<i64> {
-        self.get(worktree_id)
-            .and_then(|e| e.origin.chat_id)
+        self.get(worktree_id).and_then(|e| e.origin.chat_id)
     }
 
     fn path(workspace_root: &Path) -> PathBuf {

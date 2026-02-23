@@ -21,13 +21,13 @@ use crate::channel::{Channel, ChannelEvent, OutboundMessage};
 use crate::coordinator::Coordinator;
 use crate::quest::{QuestStore, TaskOrigin, default_store_path};
 use crate::signal::{Severity, Signal};
-use origin_map::{OriginEntry, OriginMap};
 use crate::workspace::load_workspace;
 use apiari_claude_sdk::types::ContentBlock;
 use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use apiari_common::ipc::JsonlReader;
 use color_eyre::eyre::{Result, WrapErr};
 use config::DaemonConfig;
+use origin_map::{OriginEntry, OriginMap};
 use session_store::SessionStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -114,18 +114,10 @@ pub async fn start(cwd: &Path, foreground: bool) -> Result<()> {
         "[daemon] Buzz poll interval: {}s",
         config.buzz_poll_interval_secs
     );
-    if config
-        .buzz
-        .as_ref()
-        .is_some_and(|b| b.enabled)
-    {
+    if config.buzz.as_ref().is_some_and(|b| b.enabled) {
         eprintln!("[daemon] Inline buzz watchers: enabled");
     }
-    if config
-        .swarm_watch
-        .as_ref()
-        .is_some_and(|sw| sw.enabled)
-    {
+    if config.swarm_watch.as_ref().is_some_and(|sw| sw.enabled) {
         eprintln!("[daemon] Swarm watcher: enabled");
     }
 
@@ -442,9 +434,8 @@ impl DaemonRunner {
             .as_ref()
             .filter(|sw| sw.enabled)
             .map(|sw| std::time::Duration::from_secs(sw.poll_interval_secs));
-        let mut swarm_timer = tokio::time::interval(
-            swarm_interval.unwrap_or(std::time::Duration::from_secs(3600)),
-        );
+        let mut swarm_timer =
+            tokio::time::interval(swarm_interval.unwrap_or(std::time::Duration::from_secs(3600)));
         swarm_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Skip the first immediate tick.
         swarm_timer.tick().await;
@@ -703,10 +694,7 @@ impl DaemonRunner {
             let channel = channel.clone();
             async move {
                 channel
-                    .send_message(&OutboundMessage {
-                        chat_id,
-                        text,
-                    })
+                    .send_message(&OutboundMessage { chat_id, text })
                     .await
             }
         };
@@ -835,8 +823,7 @@ impl DaemonRunner {
                         session_id.clone_from(sid);
                     }
 
-                    let is_end_turn =
-                        message.message.stop_reason.as_deref() == Some("end_turn");
+                    let is_end_turn = message.message.stop_reason.as_deref() == Some("end_turn");
 
                     // Collect text blocks from this event.
                     let mut block_text = String::new();
@@ -975,10 +962,10 @@ impl DaemonRunner {
         prioritize(&mut signals);
 
         // Emit to JSONL so the dashboard can read them.
-        if let Some(output_mode) = &self.buzz_output {
-            if let Err(e) = output::emit(&signals, output_mode) {
-                eprintln!("[daemon] Failed to write buzz signals: {e}");
-            }
+        if let Some(output_mode) = &self.buzz_output
+            && let Err(e) = output::emit(&signals, output_mode)
+        {
+            eprintln!("[daemon] Failed to write buzz signals: {e}");
         }
 
         // Save watcher cursors.
@@ -1022,27 +1009,23 @@ impl DaemonRunner {
                 branch,
                 ..
             } = notification
+                && let Some(pending) = self.pending_origins.pop()
             {
-                if let Some(pending) = self.pending_origins.pop() {
-                    self.origin_map.insert(
-                        worktree_id.clone(),
-                        OriginEntry {
-                            origin: pending.origin,
-                            quest_id: None,
-                            task_id: None,
-                            branch: Some(branch.clone()),
-                            created_at: chrono::Utc::now(),
-                        },
-                    );
-                    origin_map_changed = true;
-                }
+                self.origin_map.insert(
+                    worktree_id.clone(),
+                    OriginEntry {
+                        origin: pending.origin,
+                        quest_id: None,
+                        task_id: None,
+                        branch: Some(branch.clone()),
+                        created_at: chrono::Utc::now(),
+                    },
+                );
+                origin_map_changed = true;
             }
 
             // Route the notification to the originating chat, or fall back to alert_chat_id.
-            let target_chat_id = self
-                .origin_map
-                .route_target(wt_id)
-                .unwrap_or(alert_chat_id);
+            let target_chat_id = self.origin_map.route_target(wt_id).unwrap_or(alert_chat_id);
 
             let text = notification.format_telegram();
             self.send(target_chat_id, &text).await?;
@@ -1060,10 +1043,8 @@ impl DaemonRunner {
         }
 
         // Persist origin map if it changed.
-        if origin_map_changed {
-            if let Err(e) = self.origin_map.save(&self.workspace_root) {
-                eprintln!("[daemon] Failed to save origin map: {e}");
-            }
+        if origin_map_changed && let Err(e) = self.origin_map.save(&self.workspace_root) {
+            eprintln!("[daemon] Failed to save origin map: {e}");
         }
 
         Ok(())

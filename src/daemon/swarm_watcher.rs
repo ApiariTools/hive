@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 /// Typed swarm event notifications emitted by `SwarmWatcher::poll()`.
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum SwarmNotification {
     /// A new agent worktree appeared.
     AgentSpawned {
@@ -62,30 +63,22 @@ impl SwarmNotification {
                     .as_deref()
                     .map(|s| format!("\nTask: {s}"))
                     .unwrap_or_default();
-                format!(
-                    "🐝 *New agent spawned* — {short}\nBranch: `{branch}`{summary_line}"
-                )
+                format!("🐝 *New agent spawned* — {short}\nBranch: `{branch}`{summary_line}")
             }
             Self::AgentCompleted {
                 branch, duration, ..
             } => {
                 let short = short_branch(branch);
-                format!(
-                    "🐝 *Agent completed* — {short}\nBranch: `{branch}`\nDuration: {duration}"
-                )
+                format!("🐝 *Agent completed* — {short}\nBranch: `{branch}`\nDuration: {duration}")
             }
             Self::AgentClosed {
                 branch, duration, ..
             } => {
                 let short = short_branch(branch);
-                format!(
-                    "🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}"
-                )
+                format!("🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}")
             }
             Self::AgentStalled {
-                branch,
-                stall_kind,
-                ..
+                branch, stall_kind, ..
             } => {
                 let short = short_branch(branch);
                 let detail = match stall_kind {
@@ -94,9 +87,7 @@ impl SwarmNotification {
                         format!("Waiting on permission for `{tool}`")
                     }
                 };
-                format!(
-                    "⚠️ *Agent stalled* — {short}\nBranch: `{branch}`\n{detail}"
-                )
+                format!("⚠️ *Agent stalled* — {short}\nBranch: `{branch}`\n{detail}")
             }
         }
     }
@@ -318,18 +309,16 @@ impl SwarmWatcher {
             let last = &events[events.len() - 1];
 
             // Check for permission block: last event is tool_use with no tool_result after.
-            if last.r#type == "tool_use" {
-                if let Some(tool) = &last.tool {
-                    stalls.push(SwarmNotification::AgentStalled {
-                        worktree_id: id.clone(),
-                        branch: tracked.branch.clone(),
-                        stall_kind: StallKind::PermissionBlock {
-                            tool: tool.clone(),
-                        },
-                    });
-                    tracked.stall_notified = true;
-                    continue;
-                }
+            if last.r#type == "tool_use"
+                && let Some(tool) = &last.tool
+            {
+                stalls.push(SwarmNotification::AgentStalled {
+                    worktree_id: id.clone(),
+                    branch: tracked.branch.clone(),
+                    stall_kind: StallKind::PermissionBlock { tool: tool.clone() },
+                });
+                tracked.stall_notified = true;
+                continue;
             }
 
             // Check for idle stall: last event timestamp is old.
@@ -425,7 +414,10 @@ mod tests {
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
         let notes = watcher.poll();
-        assert!(notes.is_empty(), "first poll should not generate notifications");
+        assert!(
+            notes.is_empty(),
+            "first poll should not generate notifications"
+        );
         assert!(watcher.initialized);
         assert_eq!(watcher.known.len(), 1);
     }

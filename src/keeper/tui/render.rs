@@ -635,7 +635,7 @@ fn format_event_line(event: &AgentEventEntry, max_width: usize) -> Line<'static>
         }
         "tool_use" => {
             let tool = event.tool.as_deref().unwrap_or("?");
-            ("\u{2699}", format!("{tool}")) // ⚙
+            ("\u{2699}", tool.to_string()) // ⚙
         }
         "tool_result" => {
             let tool = event.tool.as_deref().unwrap_or("?");
