@@ -4,6 +4,7 @@
 //! context, active quests, and incoming signals. It helps the user plan work,
 //! break quests into tasks, and dispatch workers.
 
+use crate::daemon::config::DaemonConfig;
 use crate::quest::{Quest, QuestStore, TaskStatus};
 use crate::worker::Worker;
 use crate::workspace::Workspace;
@@ -108,6 +109,43 @@ impl Coordinator {
             "IMPORTANT: Always use the -d flag with swarm commands to target the workspace root.\n",
         );
         prompt.push_str("When the user asks you to do work, use swarm create to dispatch it.\n\n");
+
+        // Hive CLI subcommands the coordinator can invoke directly.
+        prompt.push_str("## Hive CLI Subcommands\n");
+        prompt.push_str("You can run these directly via Bash:\n");
+        prompt.push_str("  hive status                              — show workspace and quest status\n");
+        prompt.push_str("  hive plan \"<description>\"                — plan a new quest\n");
+        prompt.push_str("  hive start <quest-id>                    — dispatch quest tasks to swarm\n");
+        prompt.push_str("  hive buzz --once                         — single poll of signal sources\n");
+        prompt.push_str("  hive dashboard --once                    — print dashboard status and exit\n\n");
+
+        prompt.push_str("### Reminders\n");
+        prompt.push_str("Schedule one-shot or repeating reminders that fire as buzz signals:\n");
+        prompt.push_str("  hive remind <duration> <message>         — one-shot (e.g. 30m, 2h, 1d)\n");
+        prompt.push_str("  hive remind --cron \"<expr>\" <message>    — repeating (cron expression)\n");
+        prompt.push_str("  hive reminders                           — list pending reminders\n");
+        prompt.push_str("  hive reminders cancel <id>               — cancel a specific reminder\n");
+        prompt.push_str("Use reminders proactively: set follow-ups after dispatching work, schedule\n");
+        prompt.push_str("check-ins on long-running tasks, remind yourself to review PRs, etc.\n\n");
+
+        prompt.push_str("### Sending Telegram Messages\n");
+        prompt.push_str("You can message the user directly via Telegram for proactive communication —\n");
+        prompt.push_str("when a long task finishes, when you notice an issue, or for any async notification.\n");
+        // Inject actual bot token and chat_id if daemon config is available.
+        if let Ok(cfg) = DaemonConfig::load(&self.workspace.root) {
+            prompt.push_str(&format!(
+                "  curl -s -X POST \"https://api.telegram.org/bot{}/sendMessage\" \\\n",
+                cfg.telegram.bot_token
+            ));
+            prompt.push_str(&format!(
+                "    -d chat_id={} -d text=\"Your message here\"\n\n",
+                cfg.telegram.alert_chat_id
+            ));
+        } else {
+            prompt.push_str("  curl -s -X POST \"https://api.telegram.org/bot<BOT_TOKEN>/sendMessage\" \\\n");
+            prompt.push_str("    -d chat_id=<CHAT_ID> -d text=\"Your message here\"\n");
+            prompt.push_str("Read bot_token and alert_chat_id from .hive/daemon.toml [telegram] section.\n\n");
+        }
 
         // Daemon setup help — give the coordinator full context so it doesn't need to read files.
         let daemon_config_path = self.workspace.root.join(".hive/daemon.toml");

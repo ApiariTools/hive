@@ -105,6 +105,40 @@ src/
 | `daemon restart` | Restart the daemon |
 | `buzz` | Poll signal sources (Sentry, GitHub, webhooks, reminders) |
 | `dashboard` | Launch read-only TUI for monitoring swarm sessions |
+| `remind <duration> <message>` | Schedule a one-shot reminder (e.g. 30m, 2h, 1d) |
+| `remind --cron "<expr>" <message>` | Schedule a repeating reminder (cron expression) |
+| `reminders` | List pending reminders |
+| `reminders cancel <id>` | Cancel a specific reminder |
+
+## Available Tools for Proactive Communication
+
+The coordinator (and swarm workers via Bash) can use these tools for scheduling follow-ups and notifying the user.
+
+### Reminders
+
+```bash
+hive remind 30m "Check PR #42 status"         # one-shot, fires in 30 minutes
+hive remind 2h "Follow up on deploy"           # one-shot, fires in 2 hours
+hive remind 1d "Review weekly metrics"         # one-shot, fires in 1 day
+hive remind --cron "0 9 * * 1" "Weekly standup reminder"  # repeating
+hive reminders                                 # list all pending
+hive reminders cancel <id>                     # cancel one
+```
+
+Reminders fire as buzz signals, which are picked up by the daemon for auto-triage and Telegram delivery.
+
+### Sending Telegram Messages
+
+Send messages directly to the user's Telegram for proactive notifications (task completion, errors, async updates):
+
+```bash
+curl -s -X POST "https://api.telegram.org/bot<BOT_TOKEN>/sendMessage" \
+  -d chat_id=<CHAT_ID> -d text="Your message here"
+```
+
+Bot token and chat ID are in `.hive/daemon.toml` under `[telegram]`:
+- `bot_token` — from @BotFather
+- `alert_chat_id` — the user's chat/group ID
 
 ## Workspace Config (`.hive/workspace.yaml`)
 
