@@ -69,9 +69,9 @@ impl Watcher for WebhookWatcher {
 
 /// Run the HTTP server that accepts `POST /signal`.
 async fn run_server(port: u16, buffer: Arc<Mutex<Vec<Signal>>>) -> Result<()> {
+    use hyper::Request;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
-    use hyper::Request;
     use hyper_util::rt::TokioIo;
     use tokio::net::TcpListener;
 
@@ -86,9 +86,7 @@ async fn run_server(port: u16, buffer: Arc<Mutex<Vec<Signal>>>) -> Result<()> {
         tokio::spawn(async move {
             let service = service_fn(move |req: Request<hyper::body::Incoming>| {
                 let buffer = buffer.clone();
-                async move {
-                    handle_request(req, buffer).await
-                }
+                async move { handle_request(req, buffer).await }
             });
 
             if let Err(e) = http1::Builder::new().serve_connection(io, service).await {

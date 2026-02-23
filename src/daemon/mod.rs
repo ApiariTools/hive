@@ -21,13 +21,13 @@ use crate::channel::{Channel, ChannelEvent, OutboundMessage};
 use crate::coordinator::Coordinator;
 use crate::quest::{QuestStore, TaskOrigin, default_store_path};
 use crate::signal::{Severity, Signal};
-use origin_map::{OriginEntry, OriginMap};
 use crate::workspace::load_workspace;
 use apiari_claude_sdk::types::ContentBlock;
 use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use apiari_common::ipc::JsonlReader;
 use color_eyre::eyre::{Result, WrapErr};
 use config::DaemonConfig;
+use origin_map::{OriginEntry, OriginMap};
 use session_store::SessionStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -114,18 +114,10 @@ pub async fn start(cwd: &Path, foreground: bool) -> Result<()> {
         "[daemon] Buzz poll interval: {}s",
         config.buzz_poll_interval_secs
     );
-    if config
-        .buzz
-        .as_ref()
-        .is_some_and(|b| b.enabled)
-    {
+    if config.buzz.as_ref().is_some_and(|b| b.enabled) {
         eprintln!("[daemon] Inline buzz watchers: enabled");
     }
-    if config
-        .swarm_watch
-        .as_ref()
-        .is_some_and(|sw| sw.enabled)
-    {
+    if config.swarm_watch.as_ref().is_some_and(|sw| sw.enabled) {
         eprintln!("[daemon] Swarm watcher: enabled");
     }
 
@@ -442,9 +434,8 @@ impl DaemonRunner {
             .as_ref()
             .filter(|sw| sw.enabled)
             .map(|sw| std::time::Duration::from_secs(sw.poll_interval_secs));
-        let mut swarm_timer = tokio::time::interval(
-            swarm_interval.unwrap_or(std::time::Duration::from_secs(3600)),
-        );
+        let mut swarm_timer =
+            tokio::time::interval(swarm_interval.unwrap_or(std::time::Duration::from_secs(3600)));
         swarm_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Skip the first immediate tick.
         swarm_timer.tick().await;
@@ -697,8 +688,22 @@ impl DaemonRunner {
             .get_active(chat_id)
             .map(|s| s.session_id.clone());
 
-        let response = match self.run_coordinator_turn(text, resume_id.as_deref()).await {
-            Ok((response, session_id)) => {
+        // Build a callback that sends intermediate text blocks to Telegram immediately.
+        let channel = self.channel.clone();
+        let send_fn = move |text: String| {
+            let channel = channel.clone();
+            async move {
+                channel
+                    .send_message(&OutboundMessage { chat_id, text })
+                    .await
+            }
+        };
+
+        let response = match self
+            .run_coordinator_turn(text, resume_id.as_deref(), send_fn)
+            .await
+        {
+            Ok((final_text, session_id)) => {
                 // If this was a new session, record it.
                 if resume_id.is_none() || resume_id.as_deref() != Some(&session_id) {
                     self.sessions.start_session(chat_id, session_id);
@@ -709,7 +714,7 @@ impl DaemonRunner {
                     .record_turn(chat_id, self.config.nudge_turn_threshold);
                 self.sessions.save()?;
 
-                let mut full_response = response;
+                let mut full_response = final_text;
                 if should_nudge {
                     full_response.push_str(
                         "\n\n_This session has many turns. Consider /reset for better performance._",
@@ -731,23 +736,40 @@ impl DaemonRunner {
             }
         };
 
-        // Stop typing indicator before sending the response.
+        // Stop typing indicator before sending the final response.
         typing_cancel.cancel();
 
-        eprintln!(
-            "[daemon] Responding ({} chars): {}",
-            response.len(),
-            truncate(&response, 80)
-        );
-        self.send(chat_id, &response).await
+        // Only send the final response if there's text (may be empty if all
+        // content was already streamed as intermediate messages).
+        if !response.is_empty() {
+            eprintln!(
+                "[daemon] Responding ({} chars): {}",
+                response.len(),
+                truncate(&response, 80)
+            );
+            self.send(chat_id, &response).await?;
+        }
+
+        Ok(())
     }
 
-    /// Run a single coordinator turn: send message, collect response text, return (text, session_id).
-    async fn run_coordinator_turn(
+    /// Run a single coordinator turn: send message, stream intermediate text blocks
+    /// to the caller via `send_fn`, return session_id.
+    ///
+    /// Each `ContentBlock::Text` from intermediate `Event::Assistant` events (those
+    /// without `stop_reason: "end_turn"`) is forwarded immediately through `send_fn`,
+    /// giving the user real-time responses as Claude thinks and acts. The final
+    /// end_turn text (if any) is returned so the caller can append nudge hints.
+    async fn run_coordinator_turn<F, Fut>(
         &self,
         text: &str,
         resume_id: Option<&str>,
-    ) -> Result<(String, String)> {
+        send_fn: F,
+    ) -> Result<(String, String)>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
         let opts = SessionOptions {
             system_prompt: if resume_id.is_none() {
                 Some(self.coordinator_prompt.clone())
@@ -783,9 +805,11 @@ impl DaemonRunner {
             .await
             .map_err(|e| color_eyre::eyre::eyre!("failed to send message: {e}"))?;
 
-        // Collect the response.
-        let mut response_text = String::new();
         let mut session_id = String::new();
+        // Text from the final end_turn event (returned to caller for nudge appending).
+        let mut final_text = String::new();
+        // Track whether we sent anything so we can detect empty responses.
+        let mut sent_any = false;
 
         loop {
             let event = session
@@ -798,21 +822,47 @@ impl DaemonRunner {
                     if let Some(sid) = &message.session_id {
                         session_id.clone_from(sid);
                     }
+
+                    let is_end_turn = message.message.stop_reason.as_deref() == Some("end_turn");
+
+                    // Collect text blocks from this event.
+                    let mut block_text = String::new();
                     for block in &message.message.content {
                         if let ContentBlock::Text { text } = block {
-                            response_text.push_str(text);
+                            block_text.push_str(text);
                         }
                     }
-                    if message.message.stop_reason.as_deref() == Some("end_turn") {
+
+                    if !block_text.is_empty() {
+                        if is_end_turn {
+                            // Final response — return to caller so it can append nudge.
+                            final_text = block_text;
+                        } else {
+                            // Intermediate response — send immediately.
+                            eprintln!(
+                                "[daemon] Streaming intermediate ({} chars): {}",
+                                block_text.len(),
+                                truncate(&block_text, 80)
+                            );
+                            if let Err(e) = send_fn(block_text).await {
+                                eprintln!("[daemon] Failed to send intermediate text: {e}");
+                            } else {
+                                sent_any = true;
+                            }
+                        }
+                    }
+
+                    if is_end_turn {
                         break;
                     }
                 }
                 Some(Event::Result(result)) => {
                     session_id = result.session_id;
                     if let Some(text) = &result.result
-                        && response_text.is_empty()
+                        && final_text.is_empty()
+                        && !sent_any
                     {
-                        response_text = text.clone();
+                        final_text = text.clone();
                     }
                     break;
                 }
@@ -829,11 +879,11 @@ impl DaemonRunner {
         // Close the session gracefully (stdin EOF, let process finish).
         session.close_stdin();
 
-        if response_text.is_empty() {
-            response_text = "[No response from coordinator]".to_owned();
+        if final_text.is_empty() && !sent_any {
+            final_text = "[No response from coordinator]".to_owned();
         }
 
-        Ok((response_text, session_id))
+        Ok((final_text, session_id))
     }
 
     /// Poll buzz signals and auto-triage critical/warning ones.
@@ -912,10 +962,10 @@ impl DaemonRunner {
         prioritize(&mut signals);
 
         // Emit to JSONL so the dashboard can read them.
-        if let Some(output_mode) = &self.buzz_output {
-            if let Err(e) = output::emit(&signals, output_mode) {
-                eprintln!("[daemon] Failed to write buzz signals: {e}");
-            }
+        if let Some(output_mode) = &self.buzz_output
+            && let Err(e) = output::emit(&signals, output_mode)
+        {
+            eprintln!("[daemon] Failed to write buzz signals: {e}");
         }
 
         // Save watcher cursors.
@@ -959,27 +1009,23 @@ impl DaemonRunner {
                 branch,
                 ..
             } = notification
+                && let Some(pending) = self.pending_origins.pop()
             {
-                if let Some(pending) = self.pending_origins.pop() {
-                    self.origin_map.insert(
-                        worktree_id.clone(),
-                        OriginEntry {
-                            origin: pending.origin,
-                            quest_id: None,
-                            task_id: None,
-                            branch: Some(branch.clone()),
-                            created_at: chrono::Utc::now(),
-                        },
-                    );
-                    origin_map_changed = true;
-                }
+                self.origin_map.insert(
+                    worktree_id.clone(),
+                    OriginEntry {
+                        origin: pending.origin,
+                        quest_id: None,
+                        task_id: None,
+                        branch: Some(branch.clone()),
+                        created_at: chrono::Utc::now(),
+                    },
+                );
+                origin_map_changed = true;
             }
 
             // Route the notification to the originating chat, or fall back to alert_chat_id.
-            let target_chat_id = self
-                .origin_map
-                .route_target(wt_id)
-                .unwrap_or(alert_chat_id);
+            let target_chat_id = self.origin_map.route_target(wt_id).unwrap_or(alert_chat_id);
 
             let text = notification.format_telegram();
             self.send(target_chat_id, &text).await?;
@@ -997,10 +1043,8 @@ impl DaemonRunner {
         }
 
         // Persist origin map if it changed.
-        if origin_map_changed {
-            if let Err(e) = self.origin_map.save(&self.workspace_root) {
-                eprintln!("[daemon] Failed to save origin map: {e}");
-            }
+        if origin_map_changed && let Err(e) = self.origin_map.save(&self.workspace_root) {
+            eprintln!("[daemon] Failed to save origin map: {e}");
         }
 
         Ok(())
