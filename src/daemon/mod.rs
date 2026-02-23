@@ -1211,7 +1211,8 @@ impl DaemonRunner {
                 }
                 swarm_watcher::SwarmNotification::PrOpened { .. }
                 | swarm_watcher::SwarmNotification::AgentSpawned { .. }
-                | swarm_watcher::SwarmNotification::AgentStalled { .. } => {}
+                | swarm_watcher::SwarmNotification::AgentStalled { .. }
+                | swarm_watcher::SwarmNotification::AgentWaiting { .. } => {}
             }
         }
 

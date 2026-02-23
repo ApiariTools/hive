@@ -50,6 +50,12 @@ pub enum SwarmNotification {
         branch: String,
         stall_kind: StallKind,
     },
+    /// A claude-tui agent is waiting for user input.
+    AgentWaiting {
+        worktree_id: String,
+        branch: String,
+        summary: Option<String>,
+    },
 }
 
 /// What kind of stall was detected.
@@ -129,6 +135,20 @@ impl SwarmNotification {
                 };
                 format!("⚠️ *Agent stalled* — {short}\nBranch: `{branch}`\n{detail}")
             }
+            Self::AgentWaiting {
+                worktree_id,
+                branch,
+                summary,
+            } => {
+                let short = short_branch(branch);
+                let summary_line = summary
+                    .as_deref()
+                    .map(|s| format!("\n_{s}_"))
+                    .unwrap_or_default();
+                format!(
+                    "⏳ *Worker waiting* — {short}{summary_line}\n\nReply: `swarm send {worktree_id} <message>`"
+                )
+            }
         }
     }
 
@@ -139,7 +159,8 @@ impl SwarmNotification {
             | Self::AgentCompleted { worktree_id, .. }
             | Self::AgentClosed { worktree_id, .. }
             | Self::PrOpened { worktree_id, .. }
-            | Self::AgentStalled { worktree_id, .. } => worktree_id,
+            | Self::AgentStalled { worktree_id, .. }
+            | Self::AgentWaiting { worktree_id, .. } => worktree_id,
         }
     }
 }
@@ -167,6 +188,7 @@ struct TrackedWorktree {
     stall_notified: bool,
     agent_kind: Option<String>,
     pr_url: Option<String>,
+    agent_session_status: Option<String>,
 }
 
 // Mirror types for deserializing .swarm/state.json.
@@ -193,6 +215,8 @@ struct WorktreeState {
     pr_url: Option<String>,
     #[serde(default)]
     pr_title: Option<String>,
+    #[serde(default)]
+    agent_session_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +283,7 @@ impl SwarmWatcher {
                         stall_notified: false,
                         agent_kind: wt.agent_kind.clone(),
                         pr_url: wt.pr_url.clone(),
+                        agent_session_status: wt.agent_session_status.clone(),
                     },
                 );
             }
@@ -301,6 +326,17 @@ impl SwarmWatcher {
                         duration,
                     });
                 }
+
+                // Check if agent transitioned to "waiting" (needs user input).
+                if prev.agent_session_status.as_deref() != Some("waiting")
+                    && wt.agent_session_status.as_deref() == Some("waiting")
+                {
+                    notifications.push(SwarmNotification::AgentWaiting {
+                        worktree_id: id.clone(),
+                        branch: wt.branch.clone(),
+                        summary: wt.summary.clone(),
+                    });
+                }
             } else {
                 // Worktree was removed (closed or merged).
                 let duration = format_duration(prev.created_at);
@@ -336,6 +372,7 @@ impl SwarmWatcher {
                     stall_notified: false,
                     agent_kind: wt.agent_kind.clone(),
                     pr_url: wt.pr_url.clone(),
+                    agent_session_status: wt.agent_session_status.clone(),
                 },
             );
         }
@@ -823,5 +860,122 @@ mod tests {
             duration: "1m".into(),
         };
         assert_eq!(pr.worktree_id(), "xyz");
+    }
+
+    #[test]
+    fn test_agent_waiting_transition() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Initial state: agent running, not waiting.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Agent transitions to waiting.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing","agent_session_status":"waiting"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let waiting_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(waiting_notes.len(), 1, "should emit exactly one AgentWaiting");
+
+        let msg = waiting_notes[0].format_telegram();
+        assert!(msg.contains("Worker waiting"));
+        assert!(msg.contains("do-stuff"));
+        assert!(msg.contains("Fix the thing"));
+        assert!(msg.contains("swarm send 1"));
+    }
+
+    #[test]
+    fn test_agent_waiting_no_duplicate() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Initial state: agent already waiting.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Same state on next poll — should NOT emit again.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let waiting_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting_notes.is_empty(),
+            "should NOT emit AgentWaiting when status stays 'waiting'"
+        );
+    }
+
+    #[test]
+    fn test_agent_waiting_retriggers_after_active() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Agent starts waiting.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Agent becomes active (got input).
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+        let notes = watcher.poll();
+        assert!(
+            notes
+                .iter()
+                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
+            "should not emit when transitioning away from waiting"
+        );
+
+        // Agent finishes task and goes back to waiting.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+        let notes = watcher.poll();
+        let waiting_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting_notes.len(),
+            1,
+            "should re-emit AgentWaiting after active→waiting transition"
+        );
+    }
+
+    #[test]
+    fn test_agent_waiting_format_no_summary() {
+        let waiting = SwarmNotification::AgentWaiting {
+            worktree_id: "abc".into(),
+            branch: "swarm/my-task".into(),
+            summary: None,
+        };
+        let msg = waiting.format_telegram();
+        assert_eq!(
+            msg,
+            "⏳ *Worker waiting* — my-task\n\nReply: `swarm send abc <message>`"
+        );
     }
 }
