@@ -108,7 +108,10 @@ impl Coordinator {
         prompt.push_str(
             "IMPORTANT: Always use the -d flag with swarm commands to target the workspace root.\n",
         );
-        prompt.push_str("When the user asks you to do work, use swarm create to dispatch it.\n\n");
+        prompt.push_str("When the user asks you to do work, use swarm create to dispatch it.\n");
+        prompt.push_str("IMPORTANT: Swarm workers must plan and execute in one go. When dispatching tasks, include this in the task description: ");
+        prompt.push_str("'Plan and implement this completely in one session — do not pause mid-task to ask for confirmation or approval. ");
+        prompt.push_str("Use the Plan subagent internally if helpful, but then immediately proceed to implement, commit, and open a PR without waiting for input.'\n\n");
 
         // Hive CLI subcommands the coordinator can invoke directly.
         prompt.push_str("## Hive CLI Subcommands\n");
