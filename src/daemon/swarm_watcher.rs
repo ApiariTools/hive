@@ -36,6 +36,14 @@ pub enum SwarmNotification {
         duration: String,
         pr_url: Option<String>,
     },
+    /// A PR was opened by an agent (pr_url transitioned from None to Some).
+    PrOpened {
+        worktree_id: String,
+        branch: String,
+        pr_url: String,
+        pr_title: Option<String>,
+        duration: String,
+    },
     /// An agent appears stalled.
     AgentStalled {
         worktree_id: String,
@@ -93,6 +101,22 @@ impl SwarmNotification {
                     .unwrap_or_default();
                 format!("🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}")
             }
+            Self::PrOpened {
+                branch,
+                pr_url,
+                pr_title,
+                duration,
+                ..
+            } => {
+                let short = short_branch(branch);
+                let title_line = pr_title
+                    .as_deref()
+                    .map(|t| format!("\n{t}"))
+                    .unwrap_or_default();
+                format!(
+                    "🔗 *PR opened* — {short}{title_line}\n{pr_url}\nDuration: {duration}"
+                )
+            }
             Self::AgentStalled {
                 branch, stall_kind, ..
             } => {
@@ -114,6 +138,7 @@ impl SwarmNotification {
             Self::AgentSpawned { worktree_id, .. }
             | Self::AgentCompleted { worktree_id, .. }
             | Self::AgentClosed { worktree_id, .. }
+            | Self::PrOpened { worktree_id, .. }
             | Self::AgentStalled { worktree_id, .. } => worktree_id,
         }
     }
@@ -166,6 +191,8 @@ struct WorktreeState {
     agent_kind: Option<String>,
     #[serde(default)]
     pr_url: Option<String>,
+    #[serde(default)]
+    pr_title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +287,18 @@ impl SwarmWatcher {
                         branch: wt.branch.clone(),
                         duration,
                         pr_url: wt.pr_url.clone(),
+                    });
+                }
+
+                // Check if a PR was opened (pr_url transitioned from None to Some).
+                if prev.pr_url.is_none() && wt.pr_url.is_some() {
+                    let duration = format_duration(prev.created_at);
+                    notifications.push(SwarmNotification::PrOpened {
+                        worktree_id: id.clone(),
+                        branch: wt.branch.clone(),
+                        pr_url: wt.pr_url.clone().unwrap(),
+                        pr_title: wt.pr_title.clone(),
+                        duration,
                     });
                 }
             } else {
@@ -637,5 +676,152 @@ mod tests {
             stall_notes.is_empty(),
             "claude-tui agents should not trigger stall notifications"
         );
+    }
+
+    #[test]
+    fn test_pr_opened_none_to_some() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Initial state: agent running, no PR yet.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/add-auth","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // PR appears while agent is still running.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/add-auth","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","pr_url":"https://github.com/ApiariTools/hive/pull/42","pr_title":"Add OAuth support"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert_eq!(pr_notes.len(), 1, "should emit exactly one PrOpened");
+
+        if let SwarmNotification::PrOpened {
+            worktree_id,
+            branch,
+            pr_url,
+            pr_title,
+            ..
+        } = &pr_notes[0]
+        {
+            assert_eq!(worktree_id, "1");
+            assert_eq!(branch, "swarm/add-auth");
+            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/42");
+            assert_eq!(pr_title.as_deref(), Some("Add OAuth support"));
+        }
+
+        let msg = pr_notes[0].format_telegram();
+        assert!(msg.contains("PR opened"));
+        assert!(msg.contains("add-auth"));
+        assert!(msg.contains("Add OAuth support"));
+        assert!(msg.contains("https://github.com/ApiariTools/hive/pull/42"));
+        assert!(msg.contains("Duration:"));
+    }
+
+    #[test]
+    fn test_pr_opened_same_url_no_duplicate() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Initial state: agent running with a PR already set.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/42"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Same PR URL on next poll — should NOT emit PrOpened again.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/42"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(
+            pr_notes.is_empty(),
+            "should NOT emit PrOpened when pr_url stays the same"
+        );
+    }
+
+    #[test]
+    fn test_pr_opened_changed_url_no_spam() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Initial state: agent running with a PR already set.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/42"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // PR URL changed — should NOT emit PrOpened (only None→Some triggers).
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/99"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(
+            pr_notes.is_empty(),
+            "should NOT emit PrOpened when pr_url changes (Some→Some)"
+        );
+    }
+
+    #[test]
+    fn test_pr_opened_format_telegram() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "1".into(),
+            branch: "swarm/add-auth".into(),
+            pr_url: "https://github.com/ApiariTools/hive/pull/42".into(),
+            pr_title: Some("Add OAuth support".into()),
+            duration: "15m".into(),
+        };
+        let msg = pr.format_telegram();
+        assert_eq!(
+            msg,
+            "🔗 *PR opened* — add-auth\nAdd OAuth support\nhttps://github.com/ApiariTools/hive/pull/42\nDuration: 15m"
+        );
+
+        // Without pr_title.
+        let pr_no_title = SwarmNotification::PrOpened {
+            worktree_id: "1".into(),
+            branch: "swarm/fix-bug".into(),
+            pr_url: "https://github.com/ApiariTools/hive/pull/7".into(),
+            pr_title: None,
+            duration: "3m".into(),
+        };
+        let msg2 = pr_no_title.format_telegram();
+        assert_eq!(
+            msg2,
+            "🔗 *PR opened* — fix-bug\nhttps://github.com/ApiariTools/hive/pull/7\nDuration: 3m"
+        );
+    }
+
+    #[test]
+    fn test_pr_opened_worktree_id() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "xyz".into(),
+            branch: "swarm/test".into(),
+            pr_url: "https://example.com/pr/1".into(),
+            pr_title: None,
+            duration: "1m".into(),
+        };
+        assert_eq!(pr.worktree_id(), "xyz");
     }
 }
