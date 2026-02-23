@@ -104,7 +104,7 @@ fn default_buzz_signals_path() -> PathBuf {
 }
 
 fn default_max_turns() -> u32 {
-    3
+    20
 }
 
 fn default_buzz_poll_interval() -> u64 {
@@ -248,7 +248,7 @@ alert_chat_id = 42
         let config: DaemonConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.model, "sonnet");
         assert_eq!(config.nudge_turn_threshold, 50);
-        assert_eq!(config.max_turns, 3);
+        assert_eq!(config.max_turns, 20);
         assert_eq!(
             config.buzz_signals_path,
             PathBuf::from(".buzz/signals.jsonl")

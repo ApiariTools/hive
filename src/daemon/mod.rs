@@ -697,8 +697,25 @@ impl DaemonRunner {
             .get_active(chat_id)
             .map(|s| s.session_id.clone());
 
-        let response = match self.run_coordinator_turn(text, resume_id.as_deref()).await {
-            Ok((response, session_id)) => {
+        // Build a callback that sends intermediate text blocks to Telegram immediately.
+        let channel = self.channel.clone();
+        let send_fn = move |text: String| {
+            let channel = channel.clone();
+            async move {
+                channel
+                    .send_message(&OutboundMessage {
+                        chat_id,
+                        text,
+                    })
+                    .await
+            }
+        };
+
+        let response = match self
+            .run_coordinator_turn(text, resume_id.as_deref(), send_fn)
+            .await
+        {
+            Ok((final_text, session_id)) => {
                 // If this was a new session, record it.
                 if resume_id.is_none() || resume_id.as_deref() != Some(&session_id) {
                     self.sessions.start_session(chat_id, session_id);
@@ -709,7 +726,7 @@ impl DaemonRunner {
                     .record_turn(chat_id, self.config.nudge_turn_threshold);
                 self.sessions.save()?;
 
-                let mut full_response = response;
+                let mut full_response = final_text;
                 if should_nudge {
                     full_response.push_str(
                         "\n\n_This session has many turns. Consider /reset for better performance._",
@@ -731,23 +748,40 @@ impl DaemonRunner {
             }
         };
 
-        // Stop typing indicator before sending the response.
+        // Stop typing indicator before sending the final response.
         typing_cancel.cancel();
 
-        eprintln!(
-            "[daemon] Responding ({} chars): {}",
-            response.len(),
-            truncate(&response, 80)
-        );
-        self.send(chat_id, &response).await
+        // Only send the final response if there's text (may be empty if all
+        // content was already streamed as intermediate messages).
+        if !response.is_empty() {
+            eprintln!(
+                "[daemon] Responding ({} chars): {}",
+                response.len(),
+                truncate(&response, 80)
+            );
+            self.send(chat_id, &response).await?;
+        }
+
+        Ok(())
     }
 
-    /// Run a single coordinator turn: send message, collect response text, return (text, session_id).
-    async fn run_coordinator_turn(
+    /// Run a single coordinator turn: send message, stream intermediate text blocks
+    /// to the caller via `send_fn`, return session_id.
+    ///
+    /// Each `ContentBlock::Text` from intermediate `Event::Assistant` events (those
+    /// without `stop_reason: "end_turn"`) is forwarded immediately through `send_fn`,
+    /// giving the user real-time responses as Claude thinks and acts. The final
+    /// end_turn text (if any) is returned so the caller can append nudge hints.
+    async fn run_coordinator_turn<F, Fut>(
         &self,
         text: &str,
         resume_id: Option<&str>,
-    ) -> Result<(String, String)> {
+        send_fn: F,
+    ) -> Result<(String, String)>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
         let opts = SessionOptions {
             system_prompt: if resume_id.is_none() {
                 Some(self.coordinator_prompt.clone())
@@ -783,9 +817,11 @@ impl DaemonRunner {
             .await
             .map_err(|e| color_eyre::eyre::eyre!("failed to send message: {e}"))?;
 
-        // Collect the response.
-        let mut response_text = String::new();
         let mut session_id = String::new();
+        // Text from the final end_turn event (returned to caller for nudge appending).
+        let mut final_text = String::new();
+        // Track whether we sent anything so we can detect empty responses.
+        let mut sent_any = false;
 
         loop {
             let event = session
@@ -798,21 +834,48 @@ impl DaemonRunner {
                     if let Some(sid) = &message.session_id {
                         session_id.clone_from(sid);
                     }
+
+                    let is_end_turn =
+                        message.message.stop_reason.as_deref() == Some("end_turn");
+
+                    // Collect text blocks from this event.
+                    let mut block_text = String::new();
                     for block in &message.message.content {
                         if let ContentBlock::Text { text } = block {
-                            response_text.push_str(text);
+                            block_text.push_str(text);
                         }
                     }
-                    if message.message.stop_reason.as_deref() == Some("end_turn") {
+
+                    if !block_text.is_empty() {
+                        if is_end_turn {
+                            // Final response — return to caller so it can append nudge.
+                            final_text = block_text;
+                        } else {
+                            // Intermediate response — send immediately.
+                            eprintln!(
+                                "[daemon] Streaming intermediate ({} chars): {}",
+                                block_text.len(),
+                                truncate(&block_text, 80)
+                            );
+                            if let Err(e) = send_fn(block_text).await {
+                                eprintln!("[daemon] Failed to send intermediate text: {e}");
+                            } else {
+                                sent_any = true;
+                            }
+                        }
+                    }
+
+                    if is_end_turn {
                         break;
                     }
                 }
                 Some(Event::Result(result)) => {
                     session_id = result.session_id;
                     if let Some(text) = &result.result
-                        && response_text.is_empty()
+                        && final_text.is_empty()
+                        && !sent_any
                     {
-                        response_text = text.clone();
+                        final_text = text.clone();
                     }
                     break;
                 }
@@ -829,11 +892,11 @@ impl DaemonRunner {
         // Close the session gracefully (stdin EOF, let process finish).
         session.close_stdin();
 
-        if response_text.is_empty() {
-            response_text = "[No response from coordinator]".to_owned();
+        if final_text.is_empty() && !sent_any {
+            final_text = "[No response from coordinator]".to_owned();
         }
 
-        Ok((response_text, session_id))
+        Ok((final_text, session_id))
     }
 
     /// Poll buzz signals and auto-triage critical/warning ones.
