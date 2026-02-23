@@ -1038,6 +1038,8 @@ impl DaemonRunner {
             self.send(target_chat_id, &text).await?;
 
             // Clean up origin map entries for completed/closed agents.
+            // PrOpened routes to the origin chat but does NOT clean up —
+            // the agent is still running and may produce more notifications.
             match notification {
                 swarm_watcher::SwarmNotification::AgentCompleted { worktree_id, .. }
                 | swarm_watcher::SwarmNotification::AgentClosed { worktree_id, .. } => {
@@ -1045,7 +1047,9 @@ impl DaemonRunner {
                         origin_map_changed = true;
                     }
                 }
-                _ => {}
+                swarm_watcher::SwarmNotification::PrOpened { .. }
+                | swarm_watcher::SwarmNotification::AgentSpawned { .. }
+                | swarm_watcher::SwarmNotification::AgentStalled { .. } => {}
             }
         }
 
