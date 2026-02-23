@@ -1214,10 +1214,13 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
         }
 
         // Look for the last newline within the limit.
-        let split_at = remaining[..limit]
+        // Find the nearest char boundary at or before `limit` to avoid
+        // slicing in the middle of a multi-byte UTF-8 character.
+        let safe_limit = floor_char_boundary(remaining, limit);
+        let split_at = remaining[..safe_limit]
             .rfind('\n')
             .map(|pos| pos + 1) // include the newline in the current chunk
-            .unwrap_or(limit); // no newline found — hard split at limit
+            .unwrap_or(safe_limit); // no newline found — hard split at limit
 
         chunks.push(remaining[..split_at].to_owned());
         remaining = &remaining[split_at..];
@@ -1228,5 +1231,17 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
 
 /// Truncate a string for display.
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max { s } else { &s[..floor_char_boundary(s, max)] }
+}
+
+/// Find the largest byte index `<= max` that is a valid char boundary.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
