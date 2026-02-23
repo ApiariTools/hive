@@ -152,6 +152,53 @@ impl SwarmNotification {
         }
     }
 
+    /// One-line summary for use in batched notification messages.
+    pub fn summary_line(&self) -> String {
+        match self {
+            Self::AgentSpawned {
+                branch, summary, ..
+            } => {
+                let short = short_branch(branch);
+                match summary {
+                    Some(s) => format!("New agent spawned — {short} ({s})"),
+                    None => format!("New agent spawned — {short}"),
+                }
+            }
+            Self::AgentCompleted {
+                branch, pr_url, ..
+            } => {
+                let short = short_branch(branch);
+                match pr_url {
+                    Some(url) => format!("Agent completed — {short} (PR: {url})"),
+                    None => format!("Agent completed — {short}"),
+                }
+            }
+            Self::AgentClosed { branch, .. } => {
+                let short = short_branch(branch);
+                format!("Agent closed — {short}")
+            }
+            Self::PrOpened {
+                branch, pr_url, ..
+            } => {
+                let short = short_branch(branch);
+                format!("PR opened — {short} ({pr_url})")
+            }
+            Self::AgentStalled {
+                branch, stall_kind, ..
+            } => {
+                let short = short_branch(branch);
+                match stall_kind {
+                    StallKind::Idle { minutes } => {
+                        format!("Agent stalled — {short} (idle {minutes}m)")
+                    }
+                    StallKind::PermissionBlock { tool } => {
+                        format!("Agent stalled — {short} (permission: {tool})")
+                    }
+                }
+            }
+        }
+    }
+
     /// Return the worktree_id associated with this notification.
     pub fn worktree_id(&self) -> &str {
         match self {
@@ -976,6 +1023,95 @@ mod tests {
         assert_eq!(
             msg,
             "⏳ *Worker waiting* — my-task\n\nReply: `swarm send abc <message>`"
+    }
+
+    #[test]
+    fn test_summary_line_spawned() {
+        let n = SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/fix-auth".into(),
+            summary: Some("Fix authentication bug".into()),
+        };
+        assert_eq!(
+            n.summary_line(),
+            "New agent spawned — fix-auth (Fix authentication bug)"
+        );
+
+        let n2 = SwarmNotification::AgentSpawned {
+            worktree_id: "2".into(),
+            branch: "swarm/cleanup".into(),
+            summary: None,
+        };
+        assert_eq!(n2.summary_line(), "New agent spawned — cleanup");
+    }
+
+    #[test]
+    fn test_summary_line_completed() {
+        let n = SwarmNotification::AgentCompleted {
+            worktree_id: "1".into(),
+            branch: "swarm/done".into(),
+            duration: "5m".into(),
+            pr_url: Some("https://github.com/example/pull/1".into()),
+        };
+        assert_eq!(
+            n.summary_line(),
+            "Agent completed — done (PR: https://github.com/example/pull/1)"
+        );
+
+        let n2 = SwarmNotification::AgentCompleted {
+            worktree_id: "1".into(),
+            branch: "swarm/done".into(),
+            duration: "5m".into(),
+            pr_url: None,
+        };
+        assert_eq!(n2.summary_line(), "Agent completed — done");
+    }
+
+    #[test]
+    fn test_summary_line_closed() {
+        let n = SwarmNotification::AgentClosed {
+            worktree_id: "1".into(),
+            branch: "swarm/old".into(),
+            duration: "10m".into(),
+            pr_url: None,
+        };
+        assert_eq!(n.summary_line(), "Agent closed — old");
+    }
+
+    #[test]
+    fn test_summary_line_pr_opened() {
+        let n = SwarmNotification::PrOpened {
+            worktree_id: "1".into(),
+            branch: "swarm/feat".into(),
+            pr_url: "https://github.com/example/pull/42".into(),
+            pr_title: Some("Add feature".into()),
+            duration: "8m".into(),
+        };
+        assert_eq!(
+            n.summary_line(),
+            "PR opened — feat (https://github.com/example/pull/42)"
+        );
+    }
+
+    #[test]
+    fn test_summary_line_stalled() {
+        let idle = SwarmNotification::AgentStalled {
+            worktree_id: "1".into(),
+            branch: "swarm/stuck".into(),
+            stall_kind: StallKind::Idle { minutes: 15 },
+        };
+        assert_eq!(idle.summary_line(), "Agent stalled — stuck (idle 15m)");
+
+        let perm = SwarmNotification::AgentStalled {
+            worktree_id: "1".into(),
+            branch: "swarm/blocked".into(),
+            stall_kind: StallKind::PermissionBlock {
+                tool: "Write".into(),
+            },
+        };
+        assert_eq!(
+            perm.summary_line(),
+            "Agent stalled — blocked (permission: Write)"
         );
     }
 }
