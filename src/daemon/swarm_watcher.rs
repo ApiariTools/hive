@@ -9,7 +9,7 @@
 
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Typed swarm event notifications emitted by `SwarmWatcher::poll()`.
@@ -227,6 +227,9 @@ pub struct SwarmWatcher {
     swarm_dir: PathBuf,
     /// Stall timeout in seconds (0 = disabled).
     stall_timeout_secs: u64,
+    /// Workers that were already in "waiting" state at initialization.
+    /// Drained on the first poll after init to re-emit AgentWaiting.
+    waiting_at_init: HashSet<String>,
 }
 
 /// Snapshot of a worktree's state for diffing between polls.
@@ -300,6 +303,7 @@ impl SwarmWatcher {
             initialized: false,
             swarm_dir,
             stall_timeout_secs: 0,
+            waiting_at_init: HashSet::new(),
         }
     }
 
@@ -337,6 +341,13 @@ impl SwarmWatcher {
                         agent_session_status: wt.agent_session_status.clone(),
                     },
                 );
+            }
+            // Track workers already in "waiting" state so we can re-emit
+            // AgentWaiting on the next poll (handles daemon restarts).
+            for wt in &state.worktrees {
+                if wt.agent_session_status.as_deref() == Some("waiting") {
+                    self.waiting_at_init.insert(wt.id.clone());
+                }
             }
             if !self.known.is_empty() {
                 eprintln!(
@@ -433,6 +444,25 @@ impl SwarmWatcher {
         // Re-read previous stall state from notifications: if we just emitted
         // AgentCompleted or AgentClosed, the worktree is gone anyway.
         // For stall detection, check_stalls() handles the stall_notified flag.
+
+        // Re-emit AgentWaiting for workers that were already waiting at init.
+        // Drain ensures this only fires once (the first poll after initialization).
+        if !self.waiting_at_init.is_empty() {
+            let init_ids: HashSet<String> = self.waiting_at_init.drain().collect();
+            for id in init_ids {
+                if let Some(wt) = current.get(&id) {
+                    if wt.agent_session_status.as_deref() == Some("waiting")
+                        && wt.pr_url.is_none()
+                    {
+                        notifications.push(SwarmNotification::AgentWaiting {
+                            worktree_id: id,
+                            branch: wt.branch.clone(),
+                            summary: wt.summary.clone(),
+                        });
+                    }
+                }
+            }
+        }
 
         // Check for stalled agents.
         if self.stall_timeout_secs > 0 {
@@ -957,12 +987,27 @@ mod tests {
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
         watcher.poll(); // Initialize
 
-        // Same state on next poll — should NOT emit again.
+        // Second poll — should emit AgentWaiting (re-notify for workers waiting at init).
         write_state(
             &mut file,
             r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
         );
+        let notes = watcher.poll();
+        let waiting_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting_notes.len(),
+            1,
+            "should emit AgentWaiting on second poll for workers waiting at init"
+        );
 
+        // Third poll with same state — should NOT emit again.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
         let notes = watcher.poll();
         let waiting_notes: Vec<_> = notes
             .iter()
@@ -970,7 +1015,7 @@ mod tests {
             .collect();
         assert!(
             waiting_notes.is_empty(),
-            "should NOT emit AgentWaiting when status stays 'waiting'"
+            "should NOT emit AgentWaiting again after the re-notify"
         );
     }
 
@@ -1117,6 +1162,174 @@ mod tests {
         assert_eq!(
             perm.summary_line(),
             "Agent stalled — blocked (permission: Write)"
+        );
+    }
+
+    // --- Tests for waiting_at_init re-notification ---
+
+    #[test]
+    fn test_waiting_at_init_fires_on_second_poll() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Worker already in "waiting" when daemon starts.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/stale-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Do the thing"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        let notes = watcher.poll(); // Initialize
+        assert!(notes.is_empty(), "first poll should not notify");
+        assert!(watcher.waiting_at_init.contains("w1"));
+
+        // Second poll — still waiting, no PR → should re-emit AgentWaiting.
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].worktree_id(), "w1");
+        let msg = waiting[0].format_telegram();
+        assert!(msg.contains("Worker waiting"));
+        assert!(msg.contains("Do the thing"));
+    }
+
+    #[test]
+    fn test_waiting_at_init_with_pr_url_no_notify() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Worker already waiting AND already has a PR.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/done-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","pr_url":"https://github.com/ApiariTools/hive/pull/99"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Second poll — still waiting but has pr_url → no re-notify.
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting.is_empty(),
+            "should NOT re-notify waiting worker that already has a PR"
+        );
+    }
+
+    #[test]
+    fn test_running_to_waiting_still_fires_immediately() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Worker starts in "active" (running) state.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/running","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+        assert!(
+            watcher.waiting_at_init.is_empty(),
+            "active worker should not be in waiting_at_init"
+        );
+
+        // Worker transitions to waiting — standard detection should fire.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/running","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Need input"}]}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "running→waiting transition should fire AgentWaiting immediately"
+        );
+    }
+
+    #[test]
+    fn test_waiting_at_init_gone_before_second_poll() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Worker already waiting at init.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/ephemeral","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+        assert!(watcher.waiting_at_init.contains("w1"));
+
+        // Worker disappears before second poll.
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting.is_empty(),
+            "should NOT notify for worker that disappeared before second poll"
+        );
+        // Should still get AgentClosed though.
+        let closed: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentClosed { .. }))
+            .collect();
+        assert_eq!(closed.len(), 1);
+    }
+
+    #[test]
+    fn test_waiting_at_init_processed_only_once() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Worker already waiting at init.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/once","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+        assert!(!watcher.waiting_at_init.is_empty());
+
+        // Second poll — fires re-notify, drains waiting_at_init.
+        let notes = watcher.poll();
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            watcher.waiting_at_init.is_empty(),
+            "waiting_at_init should be drained after second poll"
+        );
+
+        // Third poll — same state, no re-notify.
+        let notes = watcher.poll();
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+                .count(),
+            0,
+            "waiting_at_init should not produce notifications on subsequent polls"
+        );
+
+        // Fourth poll — still no re-notify.
+        let notes = watcher.poll();
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+                .count(),
+            0,
+            "waiting_at_init must remain empty after being drained"
         );
     }
 }
