@@ -196,6 +196,10 @@ impl SwarmNotification {
                     }
                 }
             }
+            Self::AgentWaiting { branch, .. } => {
+                let short = short_branch(branch);
+                format!("Worker waiting — {short}")
+            }
         }
     }
 
@@ -1023,6 +1027,7 @@ mod tests {
         assert_eq!(
             msg,
             "⏳ *Worker waiting* — my-task\n\nReply: `swarm send abc <message>`"
+        );
     }
 
     #[test]
