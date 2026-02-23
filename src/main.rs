@@ -11,6 +11,7 @@ mod daemon;
 mod github;
 mod keeper;
 mod quest;
+mod reminder;
 pub(crate) mod signal;
 mod worker;
 mod workspace;
@@ -89,6 +90,27 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
+
+    /// Schedule a reminder.
+    Remind {
+        /// Duration until reminder fires (e.g. 30m, 2h, 1d).
+        #[arg(required_unless_present = "cron", conflicts_with = "cron")]
+        duration: Option<String>,
+
+        /// Cron expression for repeating reminders (e.g. "0 9 * * *").
+        #[arg(long)]
+        cron: Option<String>,
+
+        /// The reminder message (multiple words joined).
+        #[arg(trailing_var_arg = true, required = true)]
+        message: Vec<String>,
+    },
+
+    /// List or manage pending reminders.
+    Reminders {
+        #[command(subcommand)]
+        action: Option<RemindersAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -103,6 +125,15 @@ enum DaemonAction {
     Stop,
     /// Restart the daemon.
     Restart,
+}
+
+#[derive(Subcommand)]
+enum RemindersAction {
+    /// Cancel a reminder by ID (or ID prefix).
+    Cancel {
+        /// Reminder ID (or prefix).
+        id: String,
+    },
 }
 
 #[tokio::main]
@@ -136,6 +167,15 @@ async fn main() -> Result<()> {
             output,
         } => buzz::run(&config, daemon, once, output.as_deref()).await,
         Command::Dashboard { once } => keeper::run(once).await,
+        Command::Remind {
+            duration,
+            cron,
+            message,
+        } => cmd_remind(&cwd, duration.as_deref(), cron.as_deref(), &message.join(" ")),
+        Command::Reminders { action } => match action {
+            None => cmd_list_reminders(&cwd),
+            Some(RemindersAction::Cancel { id }) => cmd_cancel_reminder(&cwd, &id),
+        },
     }
 }
 
@@ -246,6 +286,85 @@ async fn cmd_start(cwd: &Path, quest_id: Option<&str>) -> Result<()> {
                 }
                 println!("\nRun `hive start <quest-id>` to begin.");
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Schedule a reminder.
+fn cmd_remind(
+    cwd: &Path,
+    duration: Option<&str>,
+    cron: Option<&str>,
+    message: &str,
+) -> Result<()> {
+    let workspace = load_workspace(cwd)?;
+    let mut store = reminder::ReminderStore::load(&workspace.root);
+
+    let r = if let Some(cron_expr) = cron {
+        reminder::create_cron(cron_expr, message, None)
+            .map_err(|e| color_eyre::eyre::eyre!("{e}"))?
+    } else if let Some(dur) = duration {
+        reminder::create_oneshot(dur, message, None)
+            .map_err(|e| color_eyre::eyre::eyre!("{e}"))?
+    } else {
+        color_eyre::eyre::bail!("either <duration> or --cron is required");
+    };
+
+    let fire_str = r
+        .fire_at
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let short_id = r.id[..8.min(r.id.len())].to_owned();
+    let kind = r.kind.to_string();
+
+    store.add(r);
+    store.save()?;
+
+    eprintln!(
+        "[reminder] Created {kind} reminder {short_id}: \"{message}\" fires at {fire_str}"
+    );
+    println!("Reminder set (ID: {short_id})");
+    println!("Next fire: {fire_str}");
+    println!("Message: {message}");
+
+    Ok(())
+}
+
+/// List all pending reminders.
+fn cmd_list_reminders(cwd: &Path) -> Result<()> {
+    let workspace = load_workspace(cwd)?;
+    let store = reminder::ReminderStore::load(&workspace.root);
+
+    let active = store.active();
+    eprintln!("[reminder] Listed {} active reminder(s)", active.len());
+    println!("{}", reminder::format_reminder_list(&active));
+
+    Ok(())
+}
+
+/// Cancel a reminder by ID prefix.
+fn cmd_cancel_reminder(cwd: &Path, id_prefix: &str) -> Result<()> {
+    let workspace = load_workspace(cwd)?;
+    let mut store = reminder::ReminderStore::load(&workspace.root);
+
+    match store.cancel(id_prefix) {
+        Ok(id) => {
+            store.save()?;
+            let short = &id[..8.min(id.len())];
+            eprintln!("[reminder] Cancelled reminder {short}");
+            println!("Cancelled reminder {short}.");
+        }
+        Err(reminder::CancelError::NotFound) => {
+            color_eyre::eyre::bail!("no reminder found matching \"{id_prefix}\"");
+        }
+        Err(reminder::CancelError::Ambiguous(ids)) => {
+            eprintln!("Multiple reminders match \"{id_prefix}\":");
+            for id in &ids {
+                eprintln!("  {}", &id[..8.min(id.len())]);
+            }
+            color_eyre::eyre::bail!("ambiguous reminder ID prefix");
         }
     }
 

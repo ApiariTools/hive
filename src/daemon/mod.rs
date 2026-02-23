@@ -20,6 +20,7 @@ use crate::channel::telegram::{self, TelegramChannel};
 use crate::channel::{Channel, ChannelEvent, OutboundMessage};
 use crate::coordinator::Coordinator;
 use crate::quest::{QuestStore, TaskOrigin, default_store_path};
+use crate::reminder::{self as user_reminder, ReminderStore};
 use crate::signal::{Severity, Signal};
 use crate::workspace::load_workspace;
 use apiari_claude_sdk::types::ContentBlock;
@@ -261,6 +262,8 @@ struct DaemonRunner {
     origin_map: OriginMap,
     /// FIFO queue of origins waiting to be matched with newly spawned worktrees.
     pending_origins: Vec<PendingOrigin>,
+    /// User-facing reminders (file-backed, one-shot and cron).
+    reminder_store: ReminderStore,
     /// Cancellation token for the main event loop (set at start of `run()`).
     cancel: Option<CancellationToken>,
     /// Set by `/restart` handler before cancelling the loop.
@@ -369,6 +372,13 @@ impl DaemonRunner {
             );
         }
 
+        // Load user-facing reminders.
+        let reminder_store = ReminderStore::load(&workspace_root);
+        let active_reminders = reminder_store.active().len();
+        if active_reminders > 0 {
+            eprintln!("[daemon] Loaded {active_reminders} active reminder(s)");
+        }
+
         Ok(Self {
             workspace_root,
             config,
@@ -382,6 +392,7 @@ impl DaemonRunner {
             swarm_watcher: swarm_watcher_instance,
             origin_map,
             pending_origins: Vec::new(),
+            reminder_store,
             cancel: None,
             restart_requested: Arc::new(AtomicBool::new(false)),
         })
@@ -440,6 +451,12 @@ impl DaemonRunner {
         // Skip the first immediate tick.
         swarm_timer.tick().await;
 
+        // Reminder check timer (every 60 seconds).
+        let mut reminder_timer = tokio::time::interval(std::time::Duration::from_secs(60));
+        reminder_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the first immediate tick.
+        reminder_timer.tick().await;
+
         eprintln!("[daemon] Ready. Listening for Telegram messages and buzz signals.");
 
         loop {
@@ -474,11 +491,20 @@ impl DaemonRunner {
                         eprintln!("[daemon] Swarm poll error: {e}");
                     }
                 }
+
+                _ = reminder_timer.tick() => {
+                    if let Err(e) = self.poll_reminders().await {
+                        eprintln!("[daemon] Reminder poll error: {e}");
+                    }
+                }
             }
         }
 
         // Persist state before exiting.
         self.sessions.save()?;
+        if let Err(e) = self.reminder_store.save() {
+            eprintln!("[daemon] Failed to save reminders: {e}");
+        }
         if let Err(e) = self.origin_map.save(&self.workspace_root) {
             eprintln!("[daemon] Failed to save origin map: {e}");
         }
@@ -625,6 +651,8 @@ impl DaemonRunner {
                 }
                 Ok(())
             }
+            "remind" => self.handle_remind_command(chat_id, args).await,
+            "reminders" => self.handle_reminders_command(chat_id, args).await,
             "help" => {
                 self.send(
                     chat_id,
@@ -633,6 +661,10 @@ impl DaemonRunner {
                      /history — List previous sessions\n\
                      /resume <id> — Resume an archived session\n\
                      /status — Show workspace and session info\n\
+                     /remind <dur> <msg> — Schedule a reminder\n\
+                     /remind --cron \"expr\" <msg> — Cron reminder\n\
+                     /reminders — List pending reminders\n\
+                     /reminders cancel <id> — Cancel a reminder\n\
                      /restart — Restart the daemon (picks up new binary)\n\
                      /help — Show this message\n\n\
                      Send any other message to chat with the coordinator.",
@@ -986,6 +1018,136 @@ impl DaemonRunner {
         let signals = self.buzz_reader.poll().unwrap_or_default();
         self.sessions.set_buzz_offset(self.buzz_reader.offset());
         signals
+    }
+
+    /// Poll user-facing reminders and send fired ones to Telegram.
+    async fn poll_reminders(&mut self) -> Result<()> {
+        // Reload from disk to pick up CLI-created reminders.
+        self.reminder_store = ReminderStore::load(&self.workspace_root);
+
+        let fired = self.reminder_store.check_and_advance();
+        if fired.is_empty() {
+            return Ok(());
+        }
+
+        eprintln!("[daemon] {} reminder(s) fired", fired.len());
+
+        for r in &fired {
+            let chat_id = r.chat_id.unwrap_or(self.config.telegram.alert_chat_id);
+            let text = format!("🔔 Reminder: {}", r.message);
+            self.send(chat_id, &text).await?;
+            eprintln!(
+                "[daemon] Reminder fired: \"{}\" -> chat {}",
+                r.message, chat_id
+            );
+        }
+
+        self.reminder_store.save()?;
+        Ok(())
+    }
+
+    /// Handle `/remind` Telegram command.
+    async fn handle_remind_command(&mut self, chat_id: i64, args: &str) -> Result<()> {
+        if args.is_empty() {
+            return self
+                .send(
+                    chat_id,
+                    "Usage:\n\
+                     /remind 30m Check PR status\n\
+                     /remind --cron \"0 9 * * *\" Daily standup",
+                )
+                .await;
+        }
+
+        let result = if let Some(rest) = args.strip_prefix("--cron ") {
+            match user_reminder::parse_cron_args(rest) {
+                Ok((cron_expr, message)) => {
+                    user_reminder::create_cron(&cron_expr, &message, Some(chat_id))
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            match args.split_once(' ') {
+                Some((duration_str, message)) => {
+                    user_reminder::create_oneshot(duration_str, message.trim(), Some(chat_id))
+                }
+                None => Err("Usage: /remind <duration> <message>".into()),
+            }
+        };
+
+        match result {
+            Ok(r) => {
+                let fire_str = r
+                    .fire_at
+                    .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+                    .unwrap_or_else(|| "unknown".into());
+                let short_id = r.id[..8.min(r.id.len())].to_owned();
+                let msg = r.message.clone();
+
+                // Reload, add, save.
+                self.reminder_store = ReminderStore::load(&self.workspace_root);
+                self.reminder_store.add(r);
+                self.reminder_store.save()?;
+
+                eprintln!("[daemon] Created reminder {short_id} from Telegram chat {chat_id}");
+                self.send(
+                    chat_id,
+                    &format!(
+                        "Reminder set (ID: `{short_id}`)\n\
+                         Next fire: {fire_str}\n\
+                         Message: {msg}"
+                    ),
+                )
+                .await
+            }
+            Err(e) => self.send(chat_id, &format!("Error: {e}")).await,
+        }
+    }
+
+    /// Handle `/reminders` Telegram command.
+    async fn handle_reminders_command(&mut self, chat_id: i64, args: &str) -> Result<()> {
+        self.reminder_store = ReminderStore::load(&self.workspace_root);
+
+        if let Some(rest) = args.strip_prefix("cancel") {
+            let id_prefix = rest.trim();
+            if id_prefix.is_empty() {
+                return self
+                    .send(chat_id, "Usage: /reminders cancel <id>")
+                    .await;
+            }
+            match self.reminder_store.cancel(id_prefix) {
+                Ok(cancelled_id) => {
+                    self.reminder_store.save()?;
+                    let short = &cancelled_id[..8.min(cancelled_id.len())];
+                    eprintln!("[daemon] Cancelled reminder {short} from Telegram chat {chat_id}");
+                    self.send(chat_id, &format!("Cancelled reminder `{short}`."))
+                        .await
+                }
+                Err(user_reminder::CancelError::NotFound) => {
+                    self.send(
+                        chat_id,
+                        &format!("No reminder found matching `{id_prefix}`."),
+                    )
+                    .await
+                }
+                Err(user_reminder::CancelError::Ambiguous(ids)) => {
+                    let list = ids
+                        .iter()
+                        .map(|id| format!("  `{}`", &id[..8.min(id.len())]))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.send(
+                        chat_id,
+                        &format!("Multiple reminders match `{id_prefix}`:\n{list}"),
+                    )
+                    .await
+                }
+            }
+        } else {
+            let active = self.reminder_store.active();
+            let text = user_reminder::format_reminder_list(&active);
+            self.send(chat_id, &text).await
+        }
     }
 
     /// Poll swarm state for agent completion notifications.
