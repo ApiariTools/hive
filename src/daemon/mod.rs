@@ -1152,6 +1152,11 @@ impl DaemonRunner {
     }
 
     /// Poll swarm state for agent completion notifications.
+    ///
+    /// To avoid Telegram rate-limiting (~1 msg/sec per chat), notifications are
+    /// sent with a 500ms delay between consecutive messages. When 3 or more
+    /// notifications land in a single poll cycle for the same chat, they are
+    /// batched into a single summary message instead of sent individually.
     async fn poll_swarm(&mut self) -> Result<()> {
         let watcher = match self.swarm_watcher.as_mut() {
             Some(w) => w,
@@ -1169,6 +1174,9 @@ impl DaemonRunner {
 
         let alert_chat_id = self.config.telegram.alert_chat_id;
         let mut origin_map_changed = false;
+
+        // Phase 1: Process origin map and collect routed (chat_id, notification) pairs.
+        let mut routed: Vec<(i64, &swarm_watcher::SwarmNotification)> = Vec::new();
 
         for notification in &notifications {
             let wt_id = notification.worktree_id();
@@ -1196,9 +1204,7 @@ impl DaemonRunner {
 
             // Route the notification to the originating chat, or fall back to alert_chat_id.
             let target_chat_id = self.origin_map.route_target(wt_id).unwrap_or(alert_chat_id);
-
-            let text = notification.format_telegram();
-            self.send(target_chat_id, &text).await?;
+            routed.push((target_chat_id, notification));
 
             // Clean up origin map entries for completed/closed agents.
             // PrOpened routes to the origin chat but does NOT clean up —
@@ -1214,6 +1220,38 @@ impl DaemonRunner {
                 | swarm_watcher::SwarmNotification::AgentSpawned { .. }
                 | swarm_watcher::SwarmNotification::AgentStalled { .. }
                 | swarm_watcher::SwarmNotification::AgentWaiting { .. } => {}
+            }
+        }
+
+        // Phase 2: Group by chat_id, preserving insertion order.
+        let mut by_chat: Vec<(i64, Vec<&swarm_watcher::SwarmNotification>)> = Vec::new();
+        for (chat_id, notification) in &routed {
+            if let Some((_, group)) = by_chat.iter_mut().find(|(id, _)| id == chat_id) {
+                group.push(notification);
+            } else {
+                by_chat.push((*chat_id, vec![notification]));
+            }
+        }
+
+        // Phase 3: Send — batch 3+ notifications per chat, else send with 500ms delays.
+        let mut first_send = true;
+        for (chat_id, group) in &by_chat {
+            if group.len() >= 3 {
+                if !first_send {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                let text = format_swarm_batch(group);
+                self.send(*chat_id, &text).await?;
+                first_send = false;
+            } else {
+                for notification in group {
+                    if !first_send {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    let text = notification.format_telegram();
+                    self.send(*chat_id, &text).await?;
+                    first_send = false;
+                }
             }
         }
 
@@ -1335,6 +1373,18 @@ impl DaemonRunner {
     }
 }
 
+/// Format a batch of swarm notifications into a single summary message.
+///
+/// Used when 3+ notifications arrive in one poll cycle for the same chat,
+/// to avoid spamming Telegram with rapid-fire messages.
+fn format_swarm_batch(notifications: &[&swarm_watcher::SwarmNotification]) -> String {
+    let mut text = format!("🐝 {} swarm updates:", notifications.len());
+    for n in notifications {
+        text.push_str(&format!("\n• {}", n.summary_line()));
+    }
+    text
+}
+
 /// Format a triage alert for Telegram.
 fn format_triage_alert(signal: &Signal, assessment: &str) -> String {
     let severity_emoji = match signal.severity {
@@ -1407,4 +1457,69 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_swarm_batch_three_notifications() {
+        let n1 = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/task-a".into(),
+            summary: Some("propagate waiting status".into()),
+        };
+        let n2 = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "2".into(),
+            branch: "swarm/task-b".into(),
+            summary: Some("agent waiting notification".into()),
+        };
+        let n3 = swarm_watcher::SwarmNotification::AgentClosed {
+            worktree_id: "3".into(),
+            branch: "swarm/task-c".into(),
+            duration: "5m".into(),
+            pr_url: None,
+        };
+
+        let batch = format_swarm_batch(&[&n1, &n2, &n3]);
+        assert!(batch.starts_with("🐝 3 swarm updates:"));
+        assert!(batch.contains("• New agent spawned — task-a (propagate waiting status)"));
+        assert!(batch.contains("• New agent spawned — task-b (agent waiting notification)"));
+        assert!(batch.contains("• Agent closed — task-c"));
+    }
+
+    #[test]
+    fn test_format_swarm_batch_mixed_types() {
+        let spawned = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/feat-1".into(),
+            summary: None,
+        };
+        let completed = swarm_watcher::SwarmNotification::AgentCompleted {
+            worktree_id: "2".into(),
+            branch: "swarm/feat-2".into(),
+            duration: "10m".into(),
+            pr_url: Some("https://github.com/example/pull/7".into()),
+        };
+        let pr = swarm_watcher::SwarmNotification::PrOpened {
+            worktree_id: "3".into(),
+            branch: "swarm/feat-3".into(),
+            pr_url: "https://github.com/example/pull/8".into(),
+            pr_title: Some("Add feature 3".into()),
+            duration: "12m".into(),
+        };
+        let stalled = swarm_watcher::SwarmNotification::AgentStalled {
+            worktree_id: "4".into(),
+            branch: "swarm/feat-4".into(),
+            stall_kind: swarm_watcher::StallKind::Idle { minutes: 20 },
+        };
+
+        let batch = format_swarm_batch(&[&spawned, &completed, &pr, &stalled]);
+        assert!(batch.starts_with("🐝 4 swarm updates:"));
+        assert!(batch.contains("• New agent spawned — feat-1"));
+        assert!(batch.contains("• Agent completed — feat-2 (PR: https://github.com/example/pull/7)"));
+        assert!(batch.contains("• PR opened — feat-3 (https://github.com/example/pull/8)"));
+        assert!(batch.contains("• Agent stalled — feat-4 (idle 20m)"));
+    }
 }
