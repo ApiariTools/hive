@@ -19,12 +19,22 @@ cargo run -p hive -- dashboard           # Launch TUI dashboard
 cargo run -p hive -- dashboard --once    # Print status and exit
 ```
 
+## Swarm Worker Rules
+
+1. **You are working in a git worktree.** Always create a new branch (`swarm/*`), never commit directly to `main`.
+2. **Only modify files within this repo (`hive/`).** Do not touch other repos in the workspace (e.g., `common/`, `claude-sdk/`, `swarm/`).
+3. **When done, create a PR:**
+   ```bash
+   gh pr create --repo ApiariTools/hive --title "..." --body "..."
+   ```
+4. **Do not run `cargo install` or modify system state.** No global installs, no modifying dotfiles, no system-level changes.
+
 ## Git Workflow
 
 - You are working in a swarm worktree on a `swarm/*` branch. Stay on this branch.
 - NEVER push to or merge into `main` directly.
-- When done, create a PR from your branch. Swarm will handle merging.
 - NEVER run `git push origin main` or `git checkout main`.
+- When done, push your branch and open a PR. Swarm will handle merging.
 
 ## Architecture
 
