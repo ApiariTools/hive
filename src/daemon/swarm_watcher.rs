@@ -27,12 +27,14 @@ pub enum SwarmNotification {
         worktree_id: String,
         branch: String,
         duration: String,
+        pr_url: Option<String>,
     },
     /// A worktree was removed entirely (closed or merged).
     AgentClosed {
         worktree_id: String,
         branch: String,
         duration: String,
+        pr_url: Option<String>,
     },
     /// An agent appears stalled.
     AgentStalled {
@@ -66,16 +68,30 @@ impl SwarmNotification {
                 format!("🐝 *New agent spawned* — {short}\nBranch: `{branch}`{summary_line}")
             }
             Self::AgentCompleted {
-                branch, duration, ..
+                branch,
+                duration,
+                pr_url,
+                ..
             } => {
                 let short = short_branch(branch);
-                format!("🐝 *Agent completed* — {short}\nBranch: `{branch}`\nDuration: {duration}")
+                let pr_line = pr_url
+                    .as_deref()
+                    .map(|url| format!("\nPR: {url}"))
+                    .unwrap_or_default();
+                format!("🐝 *Agent completed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}")
             }
             Self::AgentClosed {
-                branch, duration, ..
+                branch,
+                duration,
+                pr_url,
+                ..
             } => {
                 let short = short_branch(branch);
-                format!("🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}")
+                let pr_line = pr_url
+                    .as_deref()
+                    .map(|url| format!("\nPR: {url}"))
+                    .unwrap_or_default();
+                format!("🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}")
             }
             Self::AgentStalled {
                 branch, stall_kind, ..
@@ -124,6 +140,8 @@ struct TrackedWorktree {
     created_at: DateTime<Local>,
     /// Whether a stall notification has already been sent for this worktree.
     stall_notified: bool,
+    agent_kind: Option<String>,
+    pr_url: Option<String>,
 }
 
 // Mirror types for deserializing .swarm/state.json.
@@ -144,6 +162,10 @@ struct WorktreeState {
     created_at: DateTime<Local>,
     #[serde(default)]
     summary: Option<String>,
+    #[serde(default)]
+    agent_kind: Option<String>,
+    #[serde(default)]
+    pr_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -208,6 +230,8 @@ impl SwarmWatcher {
                         had_agent: wt.agent.is_some(),
                         created_at: wt.created_at,
                         stall_notified: false,
+                        agent_kind: wt.agent_kind.clone(),
+                        pr_url: wt.pr_url.clone(),
                     },
                 );
             }
@@ -235,6 +259,7 @@ impl SwarmWatcher {
                         worktree_id: id.clone(),
                         branch: wt.branch.clone(),
                         duration,
+                        pr_url: wt.pr_url.clone(),
                     });
                 }
             } else {
@@ -244,6 +269,7 @@ impl SwarmWatcher {
                     worktree_id: id.clone(),
                     branch: prev.branch.clone(),
                     duration,
+                    pr_url: prev.pr_url.clone(),
                 });
             }
         }
@@ -269,6 +295,8 @@ impl SwarmWatcher {
                     had_agent: wt.agent.is_some(),
                     created_at: wt.created_at,
                     stall_notified: false,
+                    agent_kind: wt.agent_kind.clone(),
+                    pr_url: wt.pr_url.clone(),
                 },
             );
         }
@@ -295,6 +323,11 @@ impl SwarmWatcher {
         for (id, tracked) in self.known.iter_mut() {
             // Only check agents that are alive and haven't been notified yet.
             if !tracked.had_agent || tracked.stall_notified {
+                continue;
+            }
+
+            // claude-tui agents sit idle waiting for user input — not a stall.
+            if tracked.agent_kind.as_deref() == Some("claude-tui") {
                 continue;
             }
 
@@ -526,9 +559,11 @@ mod tests {
             worktree_id: "1".into(),
             branch: "swarm/done".into(),
             duration: "5m".into(),
+            pr_url: None,
         };
         assert!(completed.format_telegram().contains("Agent completed"));
         assert!(completed.format_telegram().contains("5m"));
+        assert!(!completed.format_telegram().contains("PR:"));
 
         let stalled_idle = SwarmNotification::AgentStalled {
             worktree_id: "1".into(),
@@ -547,5 +582,60 @@ mod tests {
         };
         assert!(stalled_perm.format_telegram().contains("permission"));
         assert!(stalled_perm.format_telegram().contains("Write"));
+    }
+
+    #[test]
+    fn test_pr_url_in_completed_notification() {
+        let completed = SwarmNotification::AgentCompleted {
+            worktree_id: "1".into(),
+            branch: "swarm/feat".into(),
+            duration: "12m".into(),
+            pr_url: Some("https://github.com/ApiariTools/hive/pull/42".into()),
+        };
+        let msg = completed.format_telegram();
+        assert!(msg.contains("PR: https://github.com/ApiariTools/hive/pull/42"));
+    }
+
+    #[test]
+    fn test_pr_url_in_closed_notification() {
+        let closed = SwarmNotification::AgentClosed {
+            worktree_id: "1".into(),
+            branch: "swarm/feat".into(),
+            duration: "8m".into(),
+            pr_url: Some("https://github.com/ApiariTools/hive/pull/99".into()),
+        };
+        let msg = closed.format_telegram();
+        assert!(msg.contains("PR: https://github.com/ApiariTools/hive/pull/99"));
+    }
+
+    #[test]
+    fn test_agent_kind_deserialized() {
+        let json = r#"{"worktrees":[{"id":"1","branch":"swarm/tui","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui"}]}"#;
+        let state: SwarmState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.worktrees[0].agent_kind.as_deref(), Some("claude-tui"));
+    }
+
+    #[test]
+    fn test_claude_tui_skips_stall_detection() {
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/tui-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_stall_timeout(1); // 1 second — would trigger immediately
+        watcher.poll(); // Initialize
+
+        // Poll again — agent is still running, but should NOT get a stall notification.
+        let notes = watcher.poll();
+        let stall_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentStalled { .. }))
+            .collect();
+        assert!(
+            stall_notes.is_empty(),
+            "claude-tui agents should not trigger stall notifications"
+        );
     }
 }
