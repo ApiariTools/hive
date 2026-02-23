@@ -1234,24 +1234,25 @@ impl DaemonRunner {
         }
 
         // Phase 3: Send — batch 3+ notifications per chat, else send with 500ms delays.
+        // If a send fails (e.g. stale chat_id from origin map), fall back to alert_chat_id.
         let mut first_send = true;
         for (chat_id, group) in &by_chat {
-            if group.len() >= 3 {
+            let texts: Vec<String> = if group.len() >= 3 {
+                vec![format_swarm_batch(group)]
+            } else {
+                group.iter().map(|n| n.format_telegram()).collect()
+            };
+            for text in &texts {
                 if !first_send {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
-                let text = format_swarm_batch(group);
-                self.send(*chat_id, &text).await?;
-                first_send = false;
-            } else {
-                for notification in group {
-                    if !first_send {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Err(e) = self.send(*chat_id, text).await {
+                    eprintln!("[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id");
+                    if *chat_id != alert_chat_id {
+                        let _ = self.send(alert_chat_id, text).await;
                     }
-                    let text = notification.format_telegram();
-                    self.send(*chat_id, &text).await?;
-                    first_send = false;
                 }
+                first_send = false;
             }
         }
 
