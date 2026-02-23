@@ -31,6 +31,7 @@ use config::DaemonConfig;
 use session_store::SessionStore;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -129,13 +130,35 @@ pub async fn start(cwd: &Path, foreground: bool) -> Result<()> {
     }
 
     let mut runner = DaemonRunner::new(root.to_path_buf(), config)?;
-    let result = runner.run().await;
+    let restart = runner.run().await?;
 
-    // Clean up PID file on exit.
+    if restart {
+        // Restart: exec a fresh binary in-place (same PID, same fds).
+        // Intentionally do NOT remove the PID file — the new process inherits it.
+        eprintln!("[daemon] Execing new binary...");
+        let exe = std::env::current_exe().wrap_err("failed to find hive executable")?;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args(["daemon", "start", "--foreground", "-C"]);
+        cmd.arg(root);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // exec() never returns on success — it replaces this process.
+            let err = cmd.exec();
+            color_eyre::eyre::bail!("exec() failed: {err}");
+        }
+        #[cfg(not(unix))]
+        {
+            color_eyre::eyre::bail!("restart is only supported on Unix");
+        }
+    }
+
+    // Normal shutdown — clean up PID file.
     remove_pid(root);
     eprintln!("[daemon] PID file removed");
 
-    result
+    Ok(())
 }
 
 /// Spawn `hive daemon start --foreground` as a detached background process,
@@ -246,6 +269,10 @@ struct DaemonRunner {
     origin_map: OriginMap,
     /// FIFO queue of origins waiting to be matched with newly spawned worktrees.
     pending_origins: Vec<PendingOrigin>,
+    /// Cancellation token for the main event loop (set at start of `run()`).
+    cancel: Option<CancellationToken>,
+    /// Set by `/restart` handler before cancelling the loop.
+    restart_requested: Arc<AtomicBool>,
 }
 
 impl DaemonRunner {
@@ -363,11 +390,14 @@ impl DaemonRunner {
             swarm_watcher: swarm_watcher_instance,
             origin_map,
             pending_origins: Vec::new(),
+            cancel: None,
+            restart_requested: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    async fn run(&mut self) -> Result<()> {
+    async fn run(&mut self) -> Result<bool> {
         let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
 
         // Set up SIGTERM/SIGINT handler.
         let shutdown_cancel = cancel.clone();
@@ -458,8 +488,17 @@ impl DaemonRunner {
 
         // Persist state before exiting.
         self.sessions.save()?;
-        eprintln!("[daemon] State saved. Goodbye.");
-        Ok(())
+        if let Err(e) = self.origin_map.save(&self.workspace_root) {
+            eprintln!("[daemon] Failed to save origin map: {e}");
+        }
+
+        let restart = self.restart_requested.load(Ordering::Relaxed);
+        if restart {
+            eprintln!("[daemon] State saved. Restarting...");
+        } else {
+            eprintln!("[daemon] State saved. Goodbye.");
+        }
+        Ok(restart)
     }
 
     /// Handle a message or command from a channel.
@@ -587,6 +626,14 @@ impl DaemonRunner {
                 }
                 self.send(chat_id, &text).await
             }
+            "restart" => {
+                self.send(chat_id, "Restarting daemon...").await?;
+                self.restart_requested.store(true, Ordering::Relaxed);
+                if let Some(cancel) = &self.cancel {
+                    cancel.cancel();
+                }
+                Ok(())
+            }
             "help" => {
                 self.send(
                     chat_id,
@@ -595,6 +642,7 @@ impl DaemonRunner {
                      /history — List previous sessions\n\
                      /resume <id> — Resume an archived session\n\
                      /status — Show workspace and session info\n\
+                     /restart — Restart the daemon (picks up new binary)\n\
                      /help — Show this message\n\n\
                      Send any other message to chat with the coordinator.",
                 )
