@@ -28,6 +28,7 @@ cargo run -p hive -- dashboard --once    # Print status and exit
    gh pr create --repo ApiariTools/hive --title "..." --body "..."
    ```
 4. **Do not run `cargo install` or modify system state.** No global installs, no modifying dotfiles, no system-level changes.
+5. **Plan and execute in one go.** When you receive a task via `swarm create`, plan and implement it completely in one session — do not pause mid-task to ask for confirmation or approval. Use the Plan subagent internally if helpful, but then immediately proceed to implement, commit, and open a PR without waiting for input.
 
 ## Git Workflow
 
