@@ -649,10 +649,7 @@ impl DaemonRunner {
                 );
                 // Append custom commands.
                 for (name, cmd) in &self.config.commands {
-                    let desc = cmd
-                        .description
-                        .as_deref()
-                        .unwrap_or(cmd.run.as_str());
+                    let desc = cmd.description.as_deref().unwrap_or(cmd.run.as_str());
                     text.push_str(&format!("\n/{name} — {desc}"));
                 }
                 text.push_str("\n\nSend any other message to chat with the coordinator.");
@@ -674,7 +671,8 @@ impl DaemonRunner {
     /// Run a user-defined custom command from `[commands]` config.
     async fn run_custom_command(&mut self, chat_id: i64, command: &str) -> Result<()> {
         let cmd = self.config.commands.get(command).cloned().unwrap();
-        self.send(chat_id, &format!("Running /{command}...")).await?;
+        self.send(chat_id, &format!("Running /{command}..."))
+            .await?;
 
         let output = tokio::process::Command::new("sh")
             .args(["-c", &cmd.run])
@@ -1340,9 +1338,7 @@ impl DaemonRunner {
                         _ => "notification",
                     };
                     tokio::spawn(async move {
-                        eprintln!(
-                            "[daemon] Auto-triaging {notification_kind} for {worktree_id}"
-                        );
+                        eprintln!("[daemon] Auto-triaging {notification_kind} for {worktree_id}");
 
                         let system_prompt = format!(
                             "{coordinator_prompt}\n\n\
