@@ -1341,7 +1341,20 @@ impl DaemonRunner {
                 if auto_triaged.contains(&wt_id) {
                     continue;
                 }
-                if let Some(prompt) = auto_triage_prompt(notification) {
+                // Pre-fetch PR details synchronously so the coordinator gets
+                // the facts embedded in its prompt and can't accidentally look
+                // at the wrong PR.
+                let pr_url_for_fetch = match notification {
+                    swarm_watcher::SwarmNotification::PrOpened { pr_url, .. } => {
+                        Some(pr_url.as_str())
+                    }
+                    swarm_watcher::SwarmNotification::AgentWaiting {
+                        pr_url: Some(url), ..
+                    } => Some(url.as_str()),
+                    _ => None,
+                };
+                let pr_details = pr_url_for_fetch.and_then(fetch_pr_details);
+                if let Some(prompt) = auto_triage_prompt(notification, pr_details.as_deref()) {
                     auto_triaged.insert(wt_id);
                     let chat_id = *chat_id;
                     let channel = self.channel.clone();
@@ -1558,7 +1571,14 @@ async fn run_ephemeral_session(
 ///
 /// Returns `Some(prompt)` for notification types that benefit from a coordinator
 /// follow-up suggestion (PrOpened, AgentWaiting), `None` for others.
-fn auto_triage_prompt(notification: &swarm_watcher::SwarmNotification) -> Option<String> {
+///
+/// When `pr_details` is `Some`, the pre-fetched PR JSON is embedded directly in
+/// the prompt so the coordinator doesn't need to run `gh pr view` itself (which
+/// can accidentally pick up the wrong PR).
+fn auto_triage_prompt(
+    notification: &swarm_watcher::SwarmNotification,
+    pr_details: Option<&str>,
+) -> Option<String> {
     match notification {
         swarm_watcher::SwarmNotification::PrOpened {
             worktree_id,
@@ -1567,28 +1587,74 @@ fn auto_triage_prompt(notification: &swarm_watcher::SwarmNotification) -> Option
             ..
         } => {
             let title = pr_title.as_deref().unwrap_or("untitled");
-            Some(format!(
-                "Worker {worktree_id} opened PR: \"{title}\" ({pr_url}).\n\
-                 Check the PR (use `gh pr view {pr_url}`) and give a brief assessment: \
-                 is it ready to merge?"
-            ))
+            if let Some(details) = pr_details {
+                Some(format!(
+                    "Worker {worktree_id} opened PR: \"{title}\" ({pr_url}).\n\n\
+                     PR snapshot:\n{details}\n\n\
+                     Based on the above, give a brief assessment: is it ready to merge?\n\
+                     You may use `gh pr view {pr_url}` for additional detail (diff, CI status) if needed."
+                ))
+            } else {
+                Some(format!(
+                    "Worker {worktree_id} opened PR: \"{title}\" ({pr_url}).\n\
+                     Check the PR (use `gh pr view {pr_url}`) and give a brief assessment: \
+                     is it ready to merge?"
+                ))
+            }
         }
         swarm_watcher::SwarmNotification::AgentWaiting {
             worktree_id,
             pr_url,
             ..
         } => match pr_url {
-            Some(url) => Some(format!(
-                "Worker {worktree_id} is waiting and has an open PR ({url}).\n\
-                 Check the PR status (use `gh pr view {url}`) and summarize: \
-                 is it ready to merge?"
-            )),
+            Some(url) => {
+                if let Some(details) = pr_details {
+                    Some(format!(
+                        "Worker {worktree_id} is waiting and has an open PR ({url}).\n\n\
+                         PR snapshot:\n{details}\n\n\
+                         Based on the above, give a brief assessment: is it ready to merge?\n\
+                         You may use `gh pr view {url}` for additional detail (diff, CI status) if needed."
+                    ))
+                } else {
+                    Some(format!(
+                        "Worker {worktree_id} is waiting and has an open PR ({url}).\n\
+                         Check the PR status (use `gh pr view {url}`) and summarize: \
+                         is it ready to merge?"
+                    ))
+                }
+            }
             None => Some(format!(
                 "Worker {worktree_id} is waiting for input with no open PR.\n\
                  Is this likely done (should be closed) or still in progress (needs a nudge)?"
             )),
         },
         _ => None,
+    }
+}
+
+/// Pre-fetch PR details using `gh pr view` as a synchronous subprocess.
+///
+/// Returns the JSON output on success, or `None` if the command fails.
+fn fetch_pr_details(pr_url: &str) -> Option<String> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            pr_url,
+            "--json",
+            "title,body,state,additions,deletions,headRefName",
+        ])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if stdout.trim().is_empty() {
+            None
+        } else {
+            Some(stdout)
+        }
+    } else {
+        None
     }
 }
 
@@ -1997,7 +2063,7 @@ mod tests {
             pr_title: Some("Add OAuth support".into()),
             duration: "10m".into(),
         };
-        let prompt = auto_triage_prompt(&n).unwrap();
+        let prompt = auto_triage_prompt(&n, None).unwrap();
         assert!(prompt.contains("hive-3"));
         assert!(prompt.contains("Add OAuth support"));
         assert!(prompt.contains("https://github.com/ApiariTools/hive/pull/22"));
@@ -2014,7 +2080,7 @@ mod tests {
             pr_title: None,
             duration: "5m".into(),
         };
-        let prompt = auto_triage_prompt(&n).unwrap();
+        let prompt = auto_triage_prompt(&n, None).unwrap();
         assert!(prompt.contains("untitled"));
     }
 
@@ -2026,7 +2092,7 @@ mod tests {
             summary: Some("Add feature".into()),
             pr_url: Some("https://github.com/example/pull/5".into()),
         };
-        let prompt = auto_triage_prompt(&n).unwrap();
+        let prompt = auto_triage_prompt(&n, None).unwrap();
         assert!(prompt.contains("hive-2"));
         assert!(prompt.contains("https://github.com/example/pull/5"));
         assert!(prompt.contains("gh pr view"));
@@ -2041,7 +2107,7 @@ mod tests {
             summary: None,
             pr_url: None,
         };
-        let prompt = auto_triage_prompt(&n).unwrap();
+        let prompt = auto_triage_prompt(&n, None).unwrap();
         assert!(prompt.contains("hive-4"));
         assert!(prompt.contains("waiting for input"));
         assert!(prompt.contains("should be closed"));
@@ -2055,7 +2121,7 @@ mod tests {
             branch: "swarm/a".into(),
             summary: None,
         };
-        assert!(auto_triage_prompt(&spawned).is_none());
+        assert!(auto_triage_prompt(&spawned, None).is_none());
 
         let completed = swarm_watcher::SwarmNotification::AgentCompleted {
             worktree_id: "1".into(),
@@ -2064,7 +2130,7 @@ mod tests {
             duration: "5m".into(),
             pr_url: None,
         };
-        assert!(auto_triage_prompt(&completed).is_none());
+        assert!(auto_triage_prompt(&completed, None).is_none());
 
         let closed = swarm_watcher::SwarmNotification::AgentClosed {
             worktree_id: "1".into(),
@@ -2073,14 +2139,14 @@ mod tests {
             duration: "5m".into(),
             pr_url: None,
         };
-        assert!(auto_triage_prompt(&closed).is_none());
+        assert!(auto_triage_prompt(&closed, None).is_none());
 
         let stalled = swarm_watcher::SwarmNotification::AgentStalled {
             worktree_id: "1".into(),
             branch: "swarm/a".into(),
             stall_kind: swarm_watcher::StallKind::Idle { minutes: 10 },
         };
-        assert!(auto_triage_prompt(&stalled).is_none());
+        assert!(auto_triage_prompt(&stalled, None).is_none());
     }
 
     #[test]
@@ -2114,12 +2180,50 @@ mod tests {
             if auto_triaged.contains(&wt_id) {
                 continue;
             }
-            if auto_triage_prompt(notification).is_some() {
+            if auto_triage_prompt(notification, None).is_some() {
                 auto_triaged.insert(wt_id);
                 triage_count += 1;
             }
         }
 
         assert_eq!(triage_count, 1, "should auto-triage only once per worktree");
+    }
+
+    #[test]
+    fn test_auto_triage_prompt_pr_opened_with_details() {
+        let n = swarm_watcher::SwarmNotification::PrOpened {
+            worktree_id: "hive-5".into(),
+            branch: "swarm/fix-login".into(),
+            pr_url: "https://github.com/ApiariTools/hive/pull/30".into(),
+            pr_title: Some("Fix login bug".into()),
+            duration: "8m".into(),
+        };
+        let details = r#"{"title":"Fix login bug","body":"Fixes #42","state":"OPEN","additions":10,"deletions":3,"headRefName":"swarm/fix-login"}"#;
+        let prompt = auto_triage_prompt(&n, Some(details)).unwrap();
+        assert!(prompt.contains("hive-5"));
+        assert!(prompt.contains("Fix login bug"));
+        assert!(prompt.contains("PR snapshot:"));
+        assert!(prompt.contains(details));
+        assert!(prompt.contains("Based on the above"));
+        assert!(prompt.contains("ready to merge"));
+        // Should still mention gh pr view as a fallback for deeper inspection.
+        assert!(prompt.contains("gh pr view"));
+    }
+
+    #[test]
+    fn test_auto_triage_prompt_agent_waiting_with_pr_details() {
+        let n = swarm_watcher::SwarmNotification::AgentWaiting {
+            worktree_id: "hive-6".into(),
+            branch: "swarm/refactor".into(),
+            summary: Some("Refactor auth".into()),
+            pr_url: Some("https://github.com/example/pull/99".into()),
+        };
+        let details = r#"{"title":"Refactor auth","state":"OPEN","additions":50,"deletions":20,"headRefName":"swarm/refactor"}"#;
+        let prompt = auto_triage_prompt(&n, Some(details)).unwrap();
+        assert!(prompt.contains("hive-6"));
+        assert!(prompt.contains("PR snapshot:"));
+        assert!(prompt.contains(details));
+        assert!(prompt.contains("Based on the above"));
+        assert!(prompt.contains("ready to merge"));
     }
 }
