@@ -1265,11 +1265,100 @@ impl DaemonRunner {
             }
         }
 
+        // Phase 4: Auto-triage eligible notifications (PrOpened, AgentWaiting).
+        if self
+            .config
+            .swarm_watch
+            .as_ref()
+            .is_some_and(|sw| sw.auto_triage)
+        {
+            for (chat_id, notification) in &routed {
+                if auto_triage_prompt(notification).is_some() {
+                    if let Err(e) = self.auto_triage_notification(notification, *chat_id).await {
+                        eprintln!("[daemon] Auto-triage error: {e}");
+                    }
+                }
+            }
+        }
+
         // Persist origin map if it changed.
         if origin_map_changed && let Err(e) = self.origin_map.save(&self.workspace_root) {
             eprintln!("[daemon] Failed to save origin map: {e}");
         }
 
+        Ok(())
+    }
+
+    /// Run auto-triage for a swarm notification: invoke the coordinator with a
+    /// short prompt and send the suggestion to the target chat.
+    async fn auto_triage_notification(
+        &self,
+        notification: &swarm_watcher::SwarmNotification,
+        chat_id: i64,
+    ) -> Result<()> {
+        let prompt = match auto_triage_prompt(notification) {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        eprintln!(
+            "[daemon] Auto-triaging {} for {}",
+            match notification {
+                swarm_watcher::SwarmNotification::PrOpened { .. } => "PrOpened",
+                swarm_watcher::SwarmNotification::AgentWaiting { .. } => "AgentWaiting",
+                _ => "notification",
+            },
+            notification.worktree_id()
+        );
+
+        let system_prompt = format!(
+            "{}\n\n## Auto-Triage Mode\n\
+             Reply in 1-2 sentences with a specific suggested action. Be direct.",
+            self.coordinator_prompt
+        );
+
+        let opts = SessionOptions {
+            system_prompt: Some(system_prompt),
+            model: Some(self.config.model.clone()),
+            max_turns: Some(1),
+            no_session_persistence: true,
+            working_dir: Some(self.workspace_root.clone()),
+            allowed_tools: vec![
+                "Bash".into(),
+                "Read".into(),
+                "Glob".into(),
+                "Grep".into(),
+            ],
+            ..Default::default()
+        };
+
+        let client = ClaudeClient::new();
+        let session = match client.spawn(opts).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[daemon] Failed to spawn auto-triage session: {e}");
+                return Ok(());
+            }
+        };
+
+        let response = match self.run_ephemeral_session(session, &prompt).await {
+            Ok(text) if !text.is_empty() => text,
+            Ok(_) => {
+                eprintln!("[daemon] Auto-triage session produced no output");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("[daemon] Auto-triage session error: {e}");
+                return Ok(());
+            }
+        };
+
+        eprintln!(
+            "[daemon] Auto-triage suggestion ({} chars): {}",
+            response.len(),
+            truncate(&response, 80)
+        );
+        self.send(chat_id, &format!("💡 {response}")).await?;
         Ok(())
     }
 
@@ -1380,6 +1469,42 @@ impl DaemonRunner {
                 .await?;
         }
         Ok(())
+    }
+}
+
+/// Build an auto-triage prompt for a swarm notification, if applicable.
+///
+/// Returns `Some(prompt)` for notification types that benefit from a coordinator
+/// follow-up suggestion (PrOpened, AgentWaiting), `None` for others.
+fn auto_triage_prompt(notification: &swarm_watcher::SwarmNotification) -> Option<String> {
+    match notification {
+        swarm_watcher::SwarmNotification::PrOpened {
+            worktree_id,
+            pr_url,
+            pr_title,
+            ..
+        } => {
+            let title = pr_title.as_deref().unwrap_or("untitled");
+            Some(format!(
+                "Worker {worktree_id} opened PR: \"{title}\" ({pr_url}). \
+                 Should I review and merge it, or is there anything to check first?"
+            ))
+        }
+        swarm_watcher::SwarmNotification::AgentWaiting {
+            worktree_id,
+            pr_url,
+            ..
+        } => match pr_url {
+            Some(url) => Some(format!(
+                "Worker {worktree_id} is waiting and has an open PR ({url}). \
+                 Want me to merge the PR and close the worker?"
+            )),
+            None => Some(format!(
+                "Worker {worktree_id} is waiting for input. \
+                 Want me to nudge it, or should I close it?"
+            )),
+        },
+        _ => None,
     }
 }
 
@@ -1769,5 +1894,97 @@ mod tests {
             .returning(|_| Ok(()));
 
         dispatch_notifications(&mock, &routed, 999).await;
+    }
+
+    // --- Auto-triage prompt tests ---
+
+    #[test]
+    fn test_auto_triage_prompt_pr_opened() {
+        let n = swarm_watcher::SwarmNotification::PrOpened {
+            worktree_id: "hive-3".into(),
+            branch: "swarm/add-auth".into(),
+            pr_url: "https://github.com/ApiariTools/hive/pull/22".into(),
+            pr_title: Some("Add OAuth support".into()),
+            duration: "10m".into(),
+        };
+        let prompt = auto_triage_prompt(&n).unwrap();
+        assert!(prompt.contains("hive-3"));
+        assert!(prompt.contains("Add OAuth support"));
+        assert!(prompt.contains("https://github.com/ApiariTools/hive/pull/22"));
+        assert!(prompt.contains("review and merge"));
+    }
+
+    #[test]
+    fn test_auto_triage_prompt_pr_opened_no_title() {
+        let n = swarm_watcher::SwarmNotification::PrOpened {
+            worktree_id: "hive-1".into(),
+            branch: "swarm/fix".into(),
+            pr_url: "https://github.com/example/pull/1".into(),
+            pr_title: None,
+            duration: "5m".into(),
+        };
+        let prompt = auto_triage_prompt(&n).unwrap();
+        assert!(prompt.contains("untitled"));
+    }
+
+    #[test]
+    fn test_auto_triage_prompt_agent_waiting_with_pr() {
+        let n = swarm_watcher::SwarmNotification::AgentWaiting {
+            worktree_id: "hive-2".into(),
+            branch: "swarm/feat".into(),
+            summary: Some("Add feature".into()),
+            pr_url: Some("https://github.com/example/pull/5".into()),
+        };
+        let prompt = auto_triage_prompt(&n).unwrap();
+        assert!(prompt.contains("hive-2"));
+        assert!(prompt.contains("https://github.com/example/pull/5"));
+        assert!(prompt.contains("merge the PR"));
+    }
+
+    #[test]
+    fn test_auto_triage_prompt_agent_waiting_no_pr() {
+        let n = swarm_watcher::SwarmNotification::AgentWaiting {
+            worktree_id: "hive-4".into(),
+            branch: "swarm/task".into(),
+            summary: None,
+            pr_url: None,
+        };
+        let prompt = auto_triage_prompt(&n).unwrap();
+        assert!(prompt.contains("hive-4"));
+        assert!(prompt.contains("waiting for input"));
+        assert!(prompt.contains("nudge"));
+    }
+
+    #[test]
+    fn test_auto_triage_prompt_returns_none_for_other_types() {
+        let spawned = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/a".into(),
+            summary: None,
+        };
+        assert!(auto_triage_prompt(&spawned).is_none());
+
+        let completed = swarm_watcher::SwarmNotification::AgentCompleted {
+            worktree_id: "1".into(),
+            branch: "swarm/a".into(),
+            duration: "5m".into(),
+            pr_url: None,
+        };
+        assert!(auto_triage_prompt(&completed).is_none());
+
+        let closed = swarm_watcher::SwarmNotification::AgentClosed {
+            worktree_id: "1".into(),
+            branch: "swarm/a".into(),
+            duration: "5m".into(),
+            pr_url: None,
+        };
+        assert!(auto_triage_prompt(&closed).is_none());
+
+        let stalled = swarm_watcher::SwarmNotification::AgentStalled {
+            worktree_id: "1".into(),
+            branch: "swarm/a".into(),
+            stall_kind: swarm_watcher::StallKind::Idle { minutes: 10 },
+        };
+        assert!(auto_triage_prompt(&stalled).is_none());
     }
 }

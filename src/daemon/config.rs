@@ -89,6 +89,11 @@ pub struct SwarmWatchConfig {
     /// Seconds of inactivity before an agent is considered stalled (default: 300, 0 = disabled).
     #[serde(default = "default_stall_timeout")]
     pub stall_timeout_secs: u64,
+
+    /// When enabled, automatically invoke the coordinator after certain swarm
+    /// notifications (PrOpened, AgentWaiting) to suggest a next action.
+    #[serde(default)]
+    pub auto_triage: bool,
 }
 
 fn default_model() -> String {
@@ -394,6 +399,37 @@ stall_timeout_secs = 600
         let config: DaemonConfig = toml::from_str(toml).unwrap();
         let sw = config.swarm_watch.unwrap();
         assert_eq!(sw.stall_timeout_secs, 600);
+    }
+
+    #[test]
+    fn test_auto_triage_default_false() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+enabled = true
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let sw = config.swarm_watch.unwrap();
+        assert!(!sw.auto_triage, "auto_triage should default to false");
+    }
+
+    #[test]
+    fn test_auto_triage_enabled() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+enabled = true
+auto_triage = true
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let sw = config.swarm_watch.unwrap();
+        assert!(sw.auto_triage);
     }
 
     #[test]
