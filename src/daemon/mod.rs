@@ -1543,8 +1543,15 @@ async fn run_ephemeral_session(
         match event {
             Some(Event::Assistant { message, .. }) => {
                 for block in &message.message.content {
-                    if let ContentBlock::Text { text: t } = block {
-                        text.push_str(t);
+                    match block {
+                        ContentBlock::Text { text: t } => text.push_str(t),
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            eprintln!(
+                                "[daemon] Ephemeral session tool call: {name}({})",
+                                truncate(&input.to_string(), 120)
+                            );
+                        }
+                        _ => {}
                     }
                 }
                 if message.message.stop_reason.as_deref() == Some("end_turn") {
@@ -1558,6 +1565,11 @@ async fn run_ephemeral_session(
                     text = result_text.clone();
                 }
                 break;
+            }
+            Some(Event::RateLimit(rl)) => {
+                if let Some(info) = &rl.rate_limit_info {
+                    eprintln!("[daemon] Ephemeral session rate limit: {info}");
+                }
             }
             Some(_) => {}
             None => break,
