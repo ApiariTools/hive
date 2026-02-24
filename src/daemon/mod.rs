@@ -1745,7 +1745,27 @@ async fn run_ephemeral_session(
                     eprintln!("[daemon] Ephemeral session rate limit: {info}");
                 }
             }
-            Some(_) => {}
+            Some(Event::System(sys)) => {
+                let session_id = sys
+                    .data
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let model = sys
+                    .data
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                eprintln!(
+                    "[daemon] Ephemeral session started: session_id={session_id}, model={model}",
+                );
+            }
+            Some(Event::User(_)) => {
+                // Echo of our own prompt — nothing to do.
+            }
+            Some(Event::Stream { .. }) => {
+                // Partial streaming events — not used in ephemeral mode.
+            }
             None => break,
         }
     }
