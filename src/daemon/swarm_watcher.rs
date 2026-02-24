@@ -196,6 +196,55 @@ impl SwarmNotification {
         }
     }
 
+    /// Return inline keyboard button rows for this notification type.
+    ///
+    /// Returns empty vec for notification types that don't need action buttons.
+    pub fn inline_buttons(&self) -> Vec<Vec<crate::channel::InlineButton>> {
+        use crate::channel::InlineButton;
+
+        match self {
+            Self::PrOpened { worktree_id, .. } => {
+                vec![vec![
+                    InlineButton {
+                        text: "✅ Merge PR".into(),
+                        callback_data: format!("merge_pr:{worktree_id}"),
+                    },
+                    InlineButton {
+                        text: "🗑 Close Worker".into(),
+                        callback_data: format!("close_worker:{worktree_id}"),
+                    },
+                ]]
+            }
+            Self::AgentWaiting {
+                worktree_id,
+                pr_url,
+                ..
+            } => {
+                let mut row = Vec::new();
+                if pr_url.is_some() {
+                    row.push(InlineButton {
+                        text: "✅ Merge PR".into(),
+                        callback_data: format!("merge_pr:{worktree_id}"),
+                    });
+                }
+                row.push(InlineButton {
+                    text: "🗑 Close Worker".into(),
+                    callback_data: format!("close_worker:{worktree_id}"),
+                });
+                vec![row]
+            }
+            Self::AgentStalled { worktree_id, .. } => {
+                vec![vec![InlineButton {
+                    text: "🗑 Close Worker".into(),
+                    callback_data: format!("close_worker:{worktree_id}"),
+                }]]
+            }
+            Self::AgentSpawned { .. } | Self::AgentCompleted { .. } | Self::AgentClosed { .. } => {
+                vec![]
+            }
+        }
+    }
+
     /// Return the worktree_id associated with this notification.
     pub fn worktree_id(&self) -> &str {
         match self {

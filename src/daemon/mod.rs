@@ -514,6 +514,24 @@ impl DaemonRunner {
 
     /// Handle a message or command from a channel.
     async fn handle_channel_event(&mut self, event: ChannelEvent) -> Result<()> {
+        // Callback queries don't have message_id — handle separately.
+        if let ChannelEvent::CallbackQuery {
+            chat_id,
+            user_name,
+            data,
+            callback_query_id,
+        } = event
+        {
+            if !self.config.is_chat_allowed(chat_id) {
+                self.channel.answer_callback_query(&callback_query_id).await;
+                return Ok(());
+            }
+            eprintln!("[daemon] Callback from {user_name}: {data}");
+            // Always acknowledge immediately to dismiss Telegram's spinner.
+            self.channel.answer_callback_query(&callback_query_id).await;
+            return self.handle_callback(chat_id, &data).await;
+        }
+
         let (chat_id, message_id) = match &event {
             ChannelEvent::Command {
                 chat_id,
@@ -525,6 +543,7 @@ impl DaemonRunner {
                 message_id,
                 ..
             } => (*chat_id, *message_id),
+            ChannelEvent::CallbackQuery { .. } => unreachable!(),
         };
 
         if !self.config.is_chat_allowed(chat_id) {
@@ -559,6 +578,111 @@ impl DaemonRunner {
                 );
                 self.handle_message(chat_id, user_id, &user_name, &text)
                     .await
+            }
+            ChannelEvent::CallbackQuery { .. } => unreachable!(),
+        }
+    }
+
+    /// Handle an inline keyboard button press.
+    async fn handle_callback(&mut self, chat_id: i64, data: &str) -> Result<()> {
+        if let Some(worktree_id) = data.strip_prefix("merge_pr:") {
+            self.handle_merge_pr(chat_id, worktree_id).await
+        } else if let Some(worktree_id) = data.strip_prefix("close_worker:") {
+            self.handle_close_worker(chat_id, worktree_id).await
+        } else {
+            eprintln!("[daemon] Unknown callback data: {data}");
+            self.send(chat_id, "Unknown action.").await
+        }
+    }
+
+    /// Merge a PR for the given worktree by looking up its PR URL from swarm state.
+    async fn handle_merge_pr(&self, chat_id: i64, worktree_id: &str) -> Result<()> {
+        let pr_url = match read_pr_url_from_swarm(&self.workspace_root, worktree_id) {
+            Some(url) => url,
+            None => {
+                return self
+                    .send(chat_id, &format!("No PR URL found for `{worktree_id}`."))
+                    .await;
+            }
+        };
+
+        self.send(chat_id, &format!("Merging PR for `{worktree_id}`..."))
+            .await?;
+
+        let output = tokio::process::Command::new("gh")
+            .args(["pr", "merge", &pr_url, "--squash", "--delete-branch"])
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => {
+                self.send(chat_id, &format!("✅ PR merged for `{worktree_id}`."))
+                    .await
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let detail = if !stderr.is_empty() {
+                    stderr.to_string()
+                } else {
+                    stdout.to_string()
+                };
+                self.send(
+                    chat_id,
+                    &format!("❌ Failed to merge PR for `{worktree_id}`:\n```\n{detail}\n```"),
+                )
+                .await
+            }
+            Err(e) => {
+                self.send(
+                    chat_id,
+                    &format!("❌ Failed to run `gh pr merge` for `{worktree_id}`: {e}"),
+                )
+                .await
+            }
+        }
+    }
+
+    /// Close a swarm worker by running `swarm close`.
+    async fn handle_close_worker(&self, chat_id: i64, worktree_id: &str) -> Result<()> {
+        self.send(chat_id, &format!("Closing worker `{worktree_id}`..."))
+            .await?;
+
+        let output = tokio::process::Command::new("swarm")
+            .args([
+                "--dir",
+                &self.workspace_root.display().to_string(),
+                "close",
+                worktree_id,
+            ])
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => {
+                self.send(chat_id, &format!("✅ Worker `{worktree_id}` closed."))
+                    .await
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let detail = if !stderr.is_empty() {
+                    stderr.to_string()
+                } else {
+                    stdout.to_string()
+                };
+                self.send(
+                    chat_id,
+                    &format!("❌ Failed to close `{worktree_id}`:\n```\n{detail}\n```"),
+                )
+                .await
+            }
+            Err(e) => {
+                self.send(
+                    chat_id,
+                    &format!("❌ Failed to run `swarm close` for `{worktree_id}`: {e}"),
+                )
+                .await
             }
         }
     }
@@ -800,6 +924,7 @@ impl DaemonRunner {
                         .send_message(&OutboundMessage {
                             chat_id,
                             text: chunk,
+                            buttons: vec![],
                         })
                         .await?;
                 }
@@ -1301,26 +1426,47 @@ impl DaemonRunner {
 
         // Phase 3: Send — batch 3+ notifications per chat, else send with 500ms delays.
         // If a send fails (e.g. stale chat_id from origin map), fall back to alert_chat_id.
+        // Individual notifications get inline keyboard buttons; batches do not.
         let mut first_send = true;
         for (chat_id, group) in &by_chat {
-            let texts: Vec<String> = if group.len() >= 3 {
-                vec![format_swarm_batch(group)]
-            } else {
-                group.iter().map(|n| n.format_telegram()).collect()
-            };
-            for text in &texts {
+            if group.len() >= 3 {
+                // Batched — no buttons.
+                let text = format_swarm_batch(group);
                 if !first_send {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
-                if let Err(e) = self.send(*chat_id, text).await {
+                if let Err(e) = self.send(*chat_id, &text).await {
                     eprintln!(
                         "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
                     );
                     if *chat_id != alert_chat_id {
-                        let _ = self.send(alert_chat_id, text).await;
+                        let _ = self.send(alert_chat_id, &text).await;
                     }
                 }
                 first_send = false;
+            } else {
+                // Individual — include inline buttons per notification type.
+                for n in group {
+                    if !first_send {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    let text = n.format_telegram();
+                    let buttons = n.inline_buttons();
+                    let result = if buttons.is_empty() {
+                        self.send(*chat_id, &text).await
+                    } else {
+                        self.send_with_buttons(*chat_id, &text, buttons).await
+                    };
+                    if let Err(e) = result {
+                        eprintln!(
+                            "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
+                        );
+                        if *chat_id != alert_chat_id {
+                            let _ = self.send(alert_chat_id, &text).await;
+                        }
+                    }
+                    first_send = false;
+                }
             }
         }
 
@@ -1439,6 +1585,7 @@ impl DaemonRunner {
                                 .send_message(&OutboundMessage {
                                     chat_id,
                                     text: chunk,
+                                    buttons: vec![],
                                 })
                                 .await
                             {
@@ -1515,6 +1662,33 @@ impl DaemonRunner {
                 .send_message(&OutboundMessage {
                     chat_id,
                     text: chunk,
+                    buttons: vec![],
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Send a message with inline keyboard buttons.
+    async fn send_with_buttons(
+        &self,
+        chat_id: i64,
+        text: &str,
+        buttons: Vec<Vec<crate::channel::InlineButton>>,
+    ) -> Result<()> {
+        let text = markdown::sanitize_for_telegram(text);
+        let chunks = split_message(&text, 4000);
+        let last_idx = chunks.len().saturating_sub(1);
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            self.channel
+                .send_message(&OutboundMessage {
+                    chat_id,
+                    text: chunk,
+                    buttons: if i == last_idx {
+                        buttons.clone()
+                    } else {
+                        vec![]
+                    },
                 })
                 .await?;
         }
@@ -1670,6 +1844,20 @@ fn fetch_pr_details(pr_url: &str) -> Option<String> {
     }
 }
 
+/// Read the PR URL for a given worktree from `.swarm/state.json`.
+fn read_pr_url_from_swarm(workspace_root: &Path, worktree_id: &str) -> Option<String> {
+    let state_path = workspace_root.join(".swarm").join("state.json");
+    let content = std::fs::read_to_string(&state_path).ok()?;
+    let state: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let worktrees = state.get("worktrees")?.as_array()?;
+    for wt in worktrees {
+        if wt.get("id")?.as_str()? == worktree_id {
+            return wt.get("pr")?.get("url")?.as_str().map(String::from);
+        }
+    }
+    None
+}
+
 /// Format a batch of swarm notifications into a single summary message.
 ///
 /// Used when 3+ notifications arrive in one poll cycle for the same chat,
@@ -1795,6 +1983,7 @@ pub(crate) async fn dispatch_notifications(
                 .send_message(&OutboundMessage {
                     chat_id: *chat_id,
                     text: text.clone(),
+                    buttons: vec![],
                 })
                 .await
             {
@@ -1806,6 +1995,7 @@ pub(crate) async fn dispatch_notifications(
                         .send_message(&OutboundMessage {
                             chat_id: alert_chat_id,
                             text: text.clone(),
+                            buttons: vec![],
                         })
                         .await;
                 }
