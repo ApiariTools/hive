@@ -696,8 +696,10 @@ mod tests {
 
     #[test]
     fn test_state_serde_roundtrip() {
-        let mut state = SessionStoreState::default();
-        state.buzz_reader_offset = 42;
+        let mut state = SessionStoreState {
+            buzz_reader_offset: 42,
+            ..SessionStoreState::default()
+        };
         state.active.insert(
             100,
             ChatSession {

@@ -1,0 +1,5 @@
+//! Hive library — re-exports modules for integration tests.
+
+pub mod buzz;
+pub mod quest;
+pub mod signal;

@@ -563,52 +563,182 @@ run = "./deploy.sh"
         assert!(deploy.then_action.is_none());
     }
 
+    // ---- resolved_buzz_config_path ----
+
     #[test]
-    fn test_resolved_buzz_config_path_disabled() {
-        let toml = r#"
+    fn resolved_buzz_config_path_none_when_buzz_absent() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+"#,
+        )
+        .unwrap();
+        assert!(config.resolved_buzz_config_path(Path::new("/ws")).is_none());
+    }
+
+    #[test]
+    fn resolved_buzz_config_path_none_when_disabled() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
 [telegram]
 bot_token = "tok"
 alert_chat_id = 42
 
 [buzz]
 enabled = false
-"#;
-        let config: DaemonConfig = toml::from_str(toml).unwrap();
-        let result = config.resolved_buzz_config_path(Path::new("/workspace"));
-        assert!(result.is_none(), "should return None when buzz is disabled");
+"#,
+        )
+        .unwrap();
+        assert!(config.resolved_buzz_config_path(Path::new("/ws")).is_none());
     }
 
     #[test]
-    fn test_resolved_buzz_config_path_enabled_default() {
-        let toml = r#"
+    fn resolved_buzz_config_path_relative_when_enabled() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
 [telegram]
 bot_token = "tok"
 alert_chat_id = 42
 
 [buzz]
 enabled = true
-"#;
-        let config: DaemonConfig = toml::from_str(toml).unwrap();
-        let result = config.resolved_buzz_config_path(Path::new("/workspace"));
+config_path = ".buzz/config.toml"
+"#,
+        )
+        .unwrap();
+        let resolved = config.resolved_buzz_config_path(Path::new("/workspace"));
         assert_eq!(
-            result,
-            Some(PathBuf::from("/workspace/.buzz/config.toml")),
-            "should resolve default config_path relative to workspace root"
+            resolved,
+            Some(PathBuf::from("/workspace/.buzz/config.toml"))
         );
     }
 
     #[test]
-    fn test_resolved_buzz_config_path_no_buzz_section() {
-        let toml = r#"
+    fn resolved_buzz_config_path_absolute_when_enabled() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
 [telegram]
 bot_token = "tok"
 alert_chat_id = 42
-"#;
-        let config: DaemonConfig = toml::from_str(toml).unwrap();
-        let result = config.resolved_buzz_config_path(Path::new("/workspace"));
+
+[buzz]
+enabled = true
+config_path = "/etc/buzz/config.toml"
+"#,
+        )
+        .unwrap();
+        let resolved = config.resolved_buzz_config_path(Path::new("/workspace"));
+        assert_eq!(resolved, Some(PathBuf::from("/etc/buzz/config.toml")));
+    }
+
+    // ---- resolved_swarm_state_path ----
+
+    #[test]
+    fn resolved_swarm_state_path_none_when_absent() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+"#,
+        )
+        .unwrap();
+        assert!(config.resolved_swarm_state_path(Path::new("/ws")).is_none());
+    }
+
+    #[test]
+    fn resolved_swarm_state_path_none_when_disabled() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert!(config.resolved_swarm_state_path(Path::new("/ws")).is_none());
+    }
+
+    #[test]
+    fn resolved_swarm_state_path_relative_when_enabled() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+enabled = true
+state_path = ".swarm/state.json"
+"#,
+        )
+        .unwrap();
+        let resolved = config.resolved_swarm_state_path(Path::new("/workspace"));
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("/workspace/.swarm/state.json"))
+        );
+    }
+
+    #[test]
+    fn resolved_swarm_state_path_absolute_when_enabled() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+enabled = true
+state_path = "/var/swarm/state.json"
+"#,
+        )
+        .unwrap();
+        let resolved = config.resolved_swarm_state_path(Path::new("/workspace"));
+        assert_eq!(resolved, Some(PathBuf::from("/var/swarm/state.json")));
+    }
+
+    // ---- DaemonConfig::load from temp file ----
+
+    #[test]
+    fn load_from_temp_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let hive_dir = dir.path().join(".hive");
+        std::fs::create_dir_all(&hive_dir).unwrap();
+        std::fs::write(
+            hive_dir.join("daemon.toml"),
+            r#"
+model = "haiku"
+max_turns = 10
+
+[telegram]
+bot_token = "test-token"
+alert_chat_id = 999
+"#,
+        )
+        .unwrap();
+
+        let config = DaemonConfig::load(dir.path()).unwrap();
+        assert_eq!(config.model, "haiku");
+        assert_eq!(config.max_turns, 10);
+        assert_eq!(config.telegram.bot_token, "test-token");
+        assert_eq!(config.telegram.alert_chat_id, 999);
+    }
+
+    #[test]
+    fn load_missing_file_returns_helpful_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = DaemonConfig::load(dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
         assert!(
-            result.is_none(),
-            "should return None when buzz section is absent"
+            err_msg.contains("No daemon config found"),
+            "error should be helpful: {err_msg}"
         );
     }
 }

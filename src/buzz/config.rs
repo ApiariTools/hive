@@ -238,3 +238,147 @@ fn default_output_mode() -> String {
 fn default_webhook_port() -> u16 {
     8088
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn load_full_config_with_sentry_and_github() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+poll_interval_secs = 120
+
+[output]
+mode = "file"
+path = ".buzz/signals.jsonl"
+
+[sentry]
+token = "sntrys_test_token"
+org = "my-org"
+project = "my-project"
+
+[github]
+repos = ["owner/repo1", "owner/repo2"]
+watch_labels = ["critical", "P0"]
+
+[[reminders]]
+message = "Daily standup"
+interval_secs = 86400
+"#,
+        )
+        .unwrap();
+
+        let config = BuzzConfig::load(&path).unwrap();
+        assert_eq!(config.poll_interval_secs, 120);
+        assert_eq!(config.output.mode, "file");
+        assert_eq!(
+            config.output.path.as_deref(),
+            Some(std::path::Path::new(".buzz/signals.jsonl"))
+        );
+
+        let sentry = config.sentry.unwrap();
+        assert_eq!(sentry.token, "sntrys_test_token");
+        assert_eq!(sentry.org, "my-org");
+        assert_eq!(sentry.project, "my-project");
+
+        let github = config.github.unwrap();
+        assert_eq!(github.repos, vec!["owner/repo1", "owner/repo2"]);
+        assert_eq!(github.watch_labels, vec!["critical", "P0"]);
+
+        assert_eq!(config.reminders.len(), 1);
+        assert_eq!(config.reminders[0].message, "Daily standup");
+        assert_eq!(config.reminders[0].interval_secs, 86400);
+    }
+
+    #[test]
+    fn load_missing_file_returns_defaults() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.toml");
+
+        let config = BuzzConfig::load(&path).unwrap();
+        assert_eq!(config.poll_interval_secs, 60);
+        assert_eq!(config.output.mode, "stdout");
+        assert!(config.sentry.is_none());
+        assert!(config.github.is_none());
+        assert!(config.webhook.is_none());
+        assert!(config.reminders.is_empty());
+    }
+
+    #[test]
+    fn load_empty_file_returns_defaults() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.toml");
+        std::fs::write(&path, "").unwrap();
+
+        let config = BuzzConfig::load(&path).unwrap();
+        assert_eq!(config.poll_interval_secs, 60);
+        assert!(config.sentry.is_none());
+    }
+
+    #[test]
+    fn validate_does_not_panic_with_empty_sentry_token() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+[sentry]
+token = ""
+org = ""
+project = ""
+"#,
+        )
+        .unwrap();
+
+        // Should not panic — just prints warnings to stderr.
+        let config = BuzzConfig::load(&path).unwrap();
+        assert!(config.sentry.is_some());
+        assert!(config.sentry.unwrap().token.is_empty());
+    }
+
+    #[test]
+    fn validate_does_not_panic_with_empty_github_repos() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+[github]
+repos = []
+"#,
+        )
+        .unwrap();
+
+        let config = BuzzConfig::load(&path).unwrap();
+        assert!(config.github.unwrap().repos.is_empty());
+    }
+
+    #[test]
+    fn validate_does_not_panic_with_zero_poll_interval() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "poll_interval_secs = 0").unwrap();
+
+        let config = BuzzConfig::load(&path).unwrap();
+        assert_eq!(config.poll_interval_secs, 0);
+    }
+
+    #[test]
+    fn webhook_config_default_port() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[webhook]\n").unwrap();
+
+        let config = BuzzConfig::load(&path).unwrap();
+        let webhook = config.webhook.unwrap();
+        assert_eq!(webhook.port, 8088);
+    }
+}
