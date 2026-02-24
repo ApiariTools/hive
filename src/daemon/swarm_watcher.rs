@@ -471,6 +471,16 @@ impl SwarmWatcher {
                     branch: wt.branch.clone(),
                     summary: wt.summary.clone(),
                 });
+                // If the worker is already waiting when first seen mid-session,
+                // the transition check won't fire (no previous state). Emit immediately.
+                if wt.agent_session_status.as_deref() == Some("waiting") {
+                    notifications.push(SwarmNotification::AgentWaiting {
+                        worktree_id: wt.id.clone(),
+                        branch: wt.branch.clone(),
+                        summary: wt.summary.clone(),
+                        pr_url: wt.pr_url(),
+                    });
+                }
             }
         }
 
@@ -1587,6 +1597,84 @@ mod tests {
         let ids: Vec<&str> = spawned.iter().map(|n| n.worktree_id()).collect();
         assert!(ids.contains(&"1"), "should have worktree 1");
         assert!(ids.contains(&"2"), "should have worktree 2");
+    }
+
+    #[test]
+    fn test_new_worker_already_waiting_emits_both() {
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize with no worktrees.
+
+        // New worker appears mid-session already in "waiting" state.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"fast-1","branch":"swarm/quick-fix","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Fix typo","pr":{"url":"https://github.com/ApiariTools/hive/pull/55"}}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(spawned.len(), 1, "should emit AgentSpawned");
+        assert_eq!(
+            waiting.len(),
+            1,
+            "should emit AgentWaiting for new worker already in waiting state"
+        );
+
+        // Verify the AgentWaiting notification has correct fields.
+        if let SwarmNotification::AgentWaiting {
+            worktree_id,
+            branch,
+            summary,
+            pr_url,
+        } = &waiting[0]
+        {
+            assert_eq!(worktree_id, "fast-1");
+            assert_eq!(branch, "swarm/quick-fix");
+            assert_eq!(summary.as_deref(), Some("Fix typo"));
+            assert_eq!(
+                pr_url.as_deref(),
+                Some("https://github.com/ApiariTools/hive/pull/55")
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_worker_running_no_waiting_notification() {
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize with no worktrees.
+
+        // New worker appears mid-session in "active" (running) state.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"run-1","branch":"swarm/big-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active","summary":"Big refactor"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(spawned.len(), 1, "should emit AgentSpawned");
+        assert!(
+            waiting.is_empty(),
+            "should NOT emit AgentWaiting for worker in active/running state"
+        );
     }
 
     #[test]
