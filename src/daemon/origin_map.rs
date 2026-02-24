@@ -72,6 +72,17 @@ impl OriginMap {
     }
 }
 
+/// Return the chat_id to route a notification to for a given worktree.
+///
+/// Looks up the originating chat in the origin map. Falls back to
+/// `alert_chat_id` when the origin is unknown or has no chat_id.
+pub fn route_notification(origin_map: &OriginMap, worktree_id: &str, alert_chat_id: i64) -> i64 {
+    origin_map.route_target(worktree_id).unwrap_or(alert_chat_id)
+}
+
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,4 +200,194 @@ mod tests {
         assert!(removed.is_some());
         assert!(map.get("wt-1").is_none());
     }
+
+    // --- route_notification tests ---
+
+    #[test]
+    fn test_route_returns_none_for_unknown_id() {
+        let map = OriginMap::default();
+        // Unknown worktree falls back to alert_chat_id.
+        assert_eq!(super::route_notification(&map, "nonexistent", 999), 999);
+    }
+
+    #[test]
+    fn test_insert_then_get_roundtrip() {
+        let mut map = OriginMap::default();
+        let entry = OriginEntry {
+            origin: TaskOrigin {
+                channel: "telegram".into(),
+                chat_id: Some(42),
+                user_name: Some("alice".into()),
+                user_id: Some(7),
+            },
+            quest_id: Some("q-abc".into()),
+            task_id: Some("t-123".into()),
+            branch: Some("swarm/do-stuff".into()),
+            created_at: Utc::now(),
+        };
+        map.insert("wt-99".into(), entry);
+
+        let got = map.get("wt-99").unwrap();
+        assert_eq!(got.origin.chat_id, Some(42));
+        assert_eq!(got.origin.user_name.as_deref(), Some("alice"));
+        assert_eq!(got.quest_id.as_deref(), Some("q-abc"));
+        assert_eq!(got.task_id.as_deref(), Some("t-123"));
+        assert_eq!(got.branch.as_deref(), Some("swarm/do-stuff"));
+    }
+
+    #[test]
+    fn test_remove_clears_entry() {
+        let mut map = OriginMap::default();
+        map.insert(
+            "wt-x".into(),
+            OriginEntry {
+                origin: TaskOrigin {
+                    channel: "telegram".into(),
+                    chat_id: Some(1),
+                    ..Default::default()
+                },
+                quest_id: None,
+                task_id: None,
+                branch: None,
+                created_at: Utc::now(),
+            },
+        );
+        assert!(map.get("wt-x").is_some());
+        assert_eq!(map.route_target("wt-x"), Some(1));
+
+        map.remove("wt-x");
+
+        assert!(map.get("wt-x").is_none());
+        assert_eq!(map.route_target("wt-x"), None);
+        assert_eq!(super::route_notification(&map, "wt-x", 500), 500);
+    }
+
+    #[test]
+    fn test_stale_entry_replaced_by_new_insert() {
+        let mut map = OriginMap::default();
+        map.insert(
+            "wt-1".into(),
+            OriginEntry {
+                origin: TaskOrigin {
+                    channel: "telegram".into(),
+                    chat_id: Some(100),
+                    user_name: Some("old_user".into()),
+                    ..Default::default()
+                },
+                quest_id: None,
+                task_id: None,
+                branch: Some("swarm/old-branch".into()),
+                created_at: Utc::now(),
+            },
+        );
+        assert_eq!(map.route_target("wt-1"), Some(100));
+
+        // Overwrite with a new entry.
+        map.insert(
+            "wt-1".into(),
+            OriginEntry {
+                origin: TaskOrigin {
+                    channel: "telegram".into(),
+                    chat_id: Some(200),
+                    user_name: Some("new_user".into()),
+                    ..Default::default()
+                },
+                quest_id: None,
+                task_id: None,
+                branch: Some("swarm/new-branch".into()),
+                created_at: Utc::now(),
+            },
+        );
+
+        let entry = map.get("wt-1").unwrap();
+        assert_eq!(entry.origin.chat_id, Some(200));
+        assert_eq!(entry.origin.user_name.as_deref(), Some("new_user"));
+        assert_eq!(entry.branch.as_deref(), Some("swarm/new-branch"));
+        assert_eq!(map.entries.len(), 1, "should not create a duplicate");
+    }
+
+    #[test]
+    fn test_serialization_roundtrip() {
+        let mut map = OriginMap::default();
+        let now = Utc::now();
+        map.insert(
+            "wt-ser".into(),
+            OriginEntry {
+                origin: TaskOrigin {
+                    channel: "telegram".into(),
+                    chat_id: Some(555),
+                    user_name: Some("bob".into()),
+                    user_id: Some(77),
+                },
+                quest_id: Some("q-1".into()),
+                task_id: None,
+                branch: Some("swarm/serialize-test".into()),
+                created_at: now,
+            },
+        );
+
+        let json = serde_json::to_string(&map).unwrap();
+        let deserialized: OriginMap = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.entries.len(), 1);
+        let entry = deserialized.get("wt-ser").unwrap();
+        assert_eq!(entry.origin.channel, "telegram");
+        assert_eq!(entry.origin.chat_id, Some(555));
+        assert_eq!(entry.origin.user_name.as_deref(), Some("bob"));
+        assert_eq!(entry.origin.user_id, Some(77));
+        assert_eq!(entry.quest_id.as_deref(), Some("q-1"));
+        assert!(entry.task_id.is_none());
+        assert_eq!(entry.branch.as_deref(), Some("swarm/serialize-test"));
+        assert_eq!(entry.created_at, now);
+    }
+
+    #[test]
+    fn test_route_notification_to_origin_chat() {
+        let mut map = OriginMap::default();
+        map.insert(
+            "wt-1".into(),
+            OriginEntry {
+                origin: TaskOrigin {
+                    channel: "telegram".into(),
+                    chat_id: Some(100),
+                    user_name: Some("alice".into()),
+                    user_id: Some(1),
+                },
+                quest_id: None,
+                task_id: None,
+                branch: None,
+                created_at: Utc::now(),
+            },
+        );
+        assert_eq!(route_notification(&map, "wt-1", 999), 100);
+    }
+
+    #[test]
+    fn test_route_notification_falls_back_to_alert() {
+        let map = OriginMap::default();
+        assert_eq!(route_notification(&map, "unknown", 999), 999);
+    }
+
+    #[test]
+    fn test_route_notification_cli_origin_falls_back() {
+        let mut map = OriginMap::default();
+        map.insert(
+            "wt-1".into(),
+            OriginEntry {
+                origin: TaskOrigin {
+                    channel: "cli".into(),
+                    chat_id: None,
+                    user_name: None,
+                    user_id: None,
+                },
+                quest_id: None,
+                task_id: None,
+                branch: None,
+                created_at: Utc::now(),
+            },
+        );
+        // CLI origin has no chat_id, so falls back to alert_chat_id.
+        assert_eq!(route_notification(&map, "wt-1", 999), 999);
+    }
+
 }
