@@ -165,7 +165,7 @@ async fn main() -> Result<()> {
             once,
             config,
             output,
-        } => buzz::run(&config, daemon, once, output.as_deref()).await,
+        } => buzz::run(&config, &cwd, daemon, once, output.as_deref()).await,
         Command::Dashboard { once } => keeper::run(once).await,
         Command::Remind {
             duration,

@@ -562,4 +562,53 @@ run = "./deploy.sh"
         assert!(deploy.description.is_none());
         assert!(deploy.then_action.is_none());
     }
+
+    #[test]
+    fn test_resolved_buzz_config_path_disabled() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[buzz]
+enabled = false
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let result = config.resolved_buzz_config_path(Path::new("/workspace"));
+        assert!(result.is_none(), "should return None when buzz is disabled");
+    }
+
+    #[test]
+    fn test_resolved_buzz_config_path_enabled_default() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[buzz]
+enabled = true
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let result = config.resolved_buzz_config_path(Path::new("/workspace"));
+        assert_eq!(
+            result,
+            Some(PathBuf::from("/workspace/.buzz/config.toml")),
+            "should resolve default config_path relative to workspace root"
+        );
+    }
+
+    #[test]
+    fn test_resolved_buzz_config_path_no_buzz_section() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let result = config.resolved_buzz_config_path(Path::new("/workspace"));
+        assert!(
+            result.is_none(),
+            "should return None when buzz section is absent"
+        );
+    }
 }

@@ -299,7 +299,7 @@ impl DaemonRunner {
             if let Some(buzz_config_path) = config.resolved_buzz_config_path(&workspace_root) {
                 match BuzzConfig::load(&buzz_config_path) {
                     Ok(buzz_config) => {
-                        let watchers = create_watchers(&buzz_config);
+                        let watchers = create_watchers(&buzz_config, &workspace_root);
                         let reminders: Vec<Reminder> = buzz_config
                             .reminders
                             .iter()
@@ -1077,7 +1077,7 @@ impl DaemonRunner {
         }
 
         // Save watcher cursors.
-        save_cursors(watchers);
+        save_cursors(watchers, &self.workspace_root);
 
         signals
     }
