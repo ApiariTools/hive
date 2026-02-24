@@ -55,6 +55,7 @@ pub enum SwarmNotification {
         worktree_id: String,
         branch: String,
         summary: Option<String>,
+        pr_url: Option<String>,
     },
 }
 
@@ -139,14 +140,19 @@ impl SwarmNotification {
                 worktree_id,
                 branch,
                 summary,
+                pr_url,
             } => {
                 let short = short_branch(branch);
                 let summary_line = summary
                     .as_deref()
                     .map(|s| format!("\n_{s}_"))
                     .unwrap_or_default();
+                let pr_line = pr_url
+                    .as_deref()
+                    .map(|url| format!("\nPR: {url}"))
+                    .unwrap_or_default();
                 format!(
-                    "⏳ *Worker waiting* — {short}{summary_line}\n\nReply: `swarm send {worktree_id} <message>`"
+                    "⏳ *Worker waiting* — {short}{summary_line}{pr_line}\n\nReply: `swarm send {worktree_id} <message>`"
                 )
             }
         }
@@ -430,6 +436,7 @@ impl SwarmWatcher {
                         worktree_id: id.clone(),
                         branch: wt.branch.clone(),
                         summary: wt.summary.clone(),
+                        pr_url: wt.pr_url.clone(),
                     });
                 }
             } else {
@@ -491,6 +498,7 @@ impl SwarmWatcher {
                             worktree_id: id,
                             branch: wt.branch.clone(),
                             summary: wt.summary.clone(),
+                            pr_url: None,
                         });
                     }
                 }
@@ -1141,12 +1149,49 @@ mod tests {
             worktree_id: "abc".into(),
             branch: "swarm/my-task".into(),
             summary: None,
+            pr_url: None,
         };
         let msg = waiting.format_telegram();
         assert_eq!(
             msg,
             "⏳ *Worker waiting* — my-task\n\nReply: `swarm send abc <message>`"
         );
+    }
+
+    #[test]
+    fn test_agent_waiting_includes_pr_url_when_set() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Agent running, no PR yet.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Agent transitions to waiting AND has a PR.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing","agent_session_status":"waiting","pr_url":"https://github.com/ApiariTools/hive/pull/77"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let waiting_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(waiting_notes.len(), 1, "should emit exactly one AgentWaiting");
+
+        let msg = waiting_notes[0].format_telegram();
+        assert!(msg.contains("Worker waiting"));
+        assert!(msg.contains("do-stuff"));
+        assert!(msg.contains("Fix the thing"));
+        assert!(
+            msg.contains("PR: https://github.com/ApiariTools/hive/pull/77"),
+            "message should contain PR URL: {msg}"
+        );
+        assert!(msg.contains("swarm send 1"));
     }
 
     #[test]
