@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use super::config::BuzzConfig;
 
-/// Default path for persisted watcher state.
-const STATE_PATH: &str = ".buzz/state.json";
+/// Relative path for persisted watcher state (joined onto a base/workspace root).
+const STATE_REL: &str = ".buzz/state.json";
 
 /// A pluggable source that can be polled for new signals.
 #[async_trait]
@@ -48,8 +48,8 @@ pub struct WatcherState {
 }
 
 /// Create all enabled watchers based on the configuration.
-/// Restores persisted cursors from `.buzz/state.json` if available.
-pub fn create_watchers(config: &BuzzConfig) -> Vec<Box<dyn Watcher>> {
+/// Restores persisted cursors from `<base>/.buzz/state.json` if available.
+pub fn create_watchers(config: &BuzzConfig, base: &Path) -> Vec<Box<dyn Watcher>> {
     let mut watchers: Vec<Box<dyn Watcher>> = Vec::new();
 
     if let Some(sentry_config) = &config.sentry {
@@ -67,15 +67,15 @@ pub fn create_watchers(config: &BuzzConfig) -> Vec<Box<dyn Watcher>> {
     }
 
     // Restore persisted cursors.
-    load_cursors(&mut watchers);
+    load_cursors(&mut watchers, base);
 
     watchers
 }
 
 /// Load persisted watcher state and restore cursors.
-fn load_cursors(watchers: &mut [Box<dyn Watcher>]) {
-    let state_path = Path::new(STATE_PATH);
-    let state: WatcherState = match load_state(state_path) {
+fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
+    let state_path = base.join(STATE_REL);
+    let state: WatcherState = match load_state(&state_path) {
         Ok(state) => state,
         Err(e) => {
             eprintln!("[buzz] failed to load watcher state: {e}");
@@ -99,8 +99,8 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>]) {
     }
 }
 
-/// Save all watcher cursors to `.buzz/state.json`.
-pub fn save_cursors(watchers: &[Box<dyn Watcher>]) {
+/// Save all watcher cursors to `<base>/.buzz/state.json`.
+pub fn save_cursors(watchers: &[Box<dyn Watcher>], base: &Path) {
     let mut state = WatcherState::default();
 
     for watcher in watchers {
@@ -109,8 +109,152 @@ pub fn save_cursors(watchers: &[Box<dyn Watcher>]) {
         }
     }
 
-    let state_path = Path::new(STATE_PATH);
-    if let Err(e) = save_state(state_path, &state) {
+    let state_path = base.join(STATE_REL);
+    if let Err(e) = save_state(&state_path, &state) {
         eprintln!("[buzz] failed to save watcher state: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Minimal mock watcher for cursor round-trip tests.
+    struct MockWatcher {
+        name: String,
+        cursor: Mutex<Option<String>>,
+    }
+
+    impl MockWatcher {
+        fn new(name: &str, cursor: Option<&str>) -> Self {
+            Self {
+                name: name.to_string(),
+                cursor: Mutex::new(cursor.map(String::from)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Watcher for MockWatcher {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn poll(&mut self) -> Result<Vec<Signal>> {
+            Ok(Vec::new())
+        }
+
+        fn cursor(&self) -> Option<String> {
+            self.cursor.lock().unwrap().clone()
+        }
+
+        fn set_cursor(&mut self, cursor: String) {
+            *self.cursor.lock().unwrap() = Some(cursor);
+        }
+    }
+
+    #[test]
+    fn test_save_cursors_writes_state_to_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        let w1: Box<dyn Watcher> = Box::new(MockWatcher::new("sentry", Some("cursor-abc")));
+        let w2: Box<dyn Watcher> = Box::new(MockWatcher::new("github", Some("cursor-xyz")));
+        let watchers: Vec<Box<dyn Watcher>> = vec![w1, w2];
+
+        save_cursors(&watchers, base);
+
+        let state_path = base.join(".buzz/state.json");
+        assert!(state_path.exists(), "state file should be created");
+
+        let state: WatcherState = load_state(&state_path).unwrap();
+        assert_eq!(state.cursors.get("sentry").unwrap(), "cursor-abc");
+        assert_eq!(state.cursors.get("github").unwrap(), "cursor-xyz");
+    }
+
+    #[test]
+    fn test_load_cursors_restores_from_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // Pre-populate state file.
+        let mut state = WatcherState::default();
+        state
+            .cursors
+            .insert("sentry".into(), "restored-cursor".into());
+        save_state(&base.join(STATE_REL), &state).unwrap();
+
+        let w: Box<dyn Watcher> = Box::new(MockWatcher::new("sentry", None));
+        let mut watchers: Vec<Box<dyn Watcher>> = vec![w];
+        load_cursors(&mut watchers, base);
+
+        assert_eq!(
+            watchers[0].cursor().as_deref(),
+            Some("restored-cursor"),
+            "cursor should be restored from state file"
+        );
+    }
+
+    #[test]
+    fn test_cursor_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // Save cursors.
+        let w: Box<dyn Watcher> = Box::new(MockWatcher::new("github", Some("issue-42")));
+        save_cursors(&[w], base);
+
+        // Load into fresh watchers.
+        let mut fresh: Vec<Box<dyn Watcher>> = vec![Box::new(MockWatcher::new("github", None))];
+        load_cursors(&mut fresh, base);
+
+        assert_eq!(
+            fresh[0].cursor().as_deref(),
+            Some("issue-42"),
+            "cursor should survive save/load round-trip"
+        );
+    }
+
+    #[test]
+    fn test_watcher_state_serialization() {
+        let mut state = WatcherState::default();
+        state.cursors.insert("sentry".into(), "abc123".into());
+        state.cursors.insert("github".into(), "xyz789".into());
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: WatcherState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.cursors.get("sentry").unwrap(), "abc123");
+        assert_eq!(deserialized.cursors.get("github").unwrap(), "xyz789");
+    }
+
+    #[test]
+    fn test_save_cursors_skips_watchers_without_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        let w1: Box<dyn Watcher> = Box::new(MockWatcher::new("with-cursor", Some("val")));
+        let w2: Box<dyn Watcher> = Box::new(MockWatcher::new("no-cursor", None));
+
+        save_cursors(&[w1, w2], base);
+
+        let state: WatcherState = load_state(&base.join(STATE_REL)).unwrap();
+        assert_eq!(state.cursors.len(), 1);
+        assert!(state.cursors.contains_key("with-cursor"));
+        assert!(!state.cursors.contains_key("no-cursor"));
+    }
+
+    #[test]
+    fn test_load_cursors_missing_file_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // No state file exists.
+        let mut watchers: Vec<Box<dyn Watcher>> = vec![Box::new(MockWatcher::new("sentry", None))];
+        load_cursors(&mut watchers, base);
+
+        // Should not panic, cursor stays None.
+        assert!(watchers[0].cursor().is_none());
     }
 }

@@ -94,6 +94,21 @@ src/
 - **Watcher**: Pluggable source that polls for new signals. Trait in `buzz::watcher`.
 - **Keeper**: Read-only TUI dashboard that discovers swarm tmux sessions and displays their status.
 
+### Inline Buzz Watchers (daemon mode)
+
+Add to `.hive/daemon.toml` to run buzz watchers directly in the daemon:
+
+```toml
+[buzz]
+enabled = true
+# config_path = ".buzz/config.toml"  # default
+```
+
+Configure `.buzz/config.toml` as normal (sentry, github, etc.).
+When enabled, the daemon polls watchers on the `buzz_poll_interval_secs` cadence
+and auto-triages Critical/Warning signals to Telegram.
+Cursor state is persisted to `<workspace_root>/.buzz/state.json` between restarts.
+
 ## CLI Subcommands
 
 | Command | Description |

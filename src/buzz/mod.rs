@@ -23,11 +23,13 @@ use self::watcher::{Watcher, create_watchers, save_cursors};
 /// Run buzz with the given options.
 ///
 /// - `config_path`: path to `.buzz/config.toml`
+/// - `base`: workspace root directory for state persistence
 /// - `daemon`: run continuously, polling on interval
 /// - `once`: single poll then exit (also the default)
 /// - `output_override`: CLI override for output mode (None = use config)
 pub async fn run(
     config_path: &Path,
+    base: &Path,
     daemon: bool,
     once: bool,
     output_override: Option<&str>,
@@ -50,12 +52,12 @@ pub async fn run(
         )?
     };
 
-    let mut watchers = create_watchers(&config);
+    let mut watchers = create_watchers(&config, base);
     let mut reminders: Vec<Reminder> = config.reminders.iter().map(Reminder::from_config).collect();
 
     if once || !daemon {
         // Single poll mode (also the default when neither flag is given).
-        run_once(&mut watchers, &mut reminders, &output_mode).await?;
+        run_once(&mut watchers, &mut reminders, &output_mode, base).await?;
     } else {
         // Daemon mode — poll on interval.
         let interval = Duration::from_secs(config.poll_interval_secs);
@@ -66,7 +68,7 @@ pub async fn run(
         );
 
         loop {
-            run_once(&mut watchers, &mut reminders, &output_mode).await?;
+            run_once(&mut watchers, &mut reminders, &output_mode, base).await?;
             sleep(interval).await;
         }
     }
@@ -79,6 +81,7 @@ async fn run_once(
     watchers: &mut [Box<dyn Watcher>],
     reminders: &mut [Reminder],
     output_mode: &OutputMode,
+    base: &Path,
 ) -> Result<()> {
     let mut all_signals = Vec::new();
 
@@ -114,7 +117,7 @@ async fn run_once(
     output::emit(&signals, output_mode)?;
 
     // Persist watcher cursors so the next run picks up where we left off.
-    save_cursors(watchers);
+    save_cursors(watchers, base);
 
     Ok(())
 }
