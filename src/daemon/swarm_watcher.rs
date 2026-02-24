@@ -26,6 +26,7 @@ pub enum SwarmNotification {
     AgentCompleted {
         worktree_id: String,
         branch: String,
+        summary: Option<String>,
         duration: String,
         pr_url: Option<String>,
     },
@@ -33,6 +34,7 @@ pub enum SwarmNotification {
     AgentClosed {
         worktree_id: String,
         branch: String,
+        summary: Option<String>,
         duration: String,
         pr_url: Option<String>,
     },
@@ -75,42 +77,36 @@ impl SwarmNotification {
             Self::AgentSpawned {
                 branch, summary, ..
             } => {
-                let short = short_branch(branch);
-                let summary_line = summary
-                    .as_deref()
-                    .map(|s| format!("\nTask: {s}"))
-                    .unwrap_or_default();
-                format!("🐝 *New agent spawned* — {short}\nBranch: `{branch}`{summary_line}")
+                let lead = summary_or_short(summary, branch);
+                format!("🐝 *Agent spawned* — {lead}\nBranch: `{branch}`")
             }
             Self::AgentCompleted {
                 branch,
+                summary,
                 duration,
                 pr_url,
                 ..
             } => {
-                let short = short_branch(branch);
+                let lead = summary_or_short(summary, branch);
                 let pr_line = pr_url
                     .as_deref()
                     .map(|url| format!("\nPR: {url}"))
                     .unwrap_or_default();
-                format!(
-                    "🐝 *Agent completed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}"
-                )
+                format!("✅ *Agent finished* — {lead}\nBranch: `{branch}` · {duration}{pr_line}")
             }
             Self::AgentClosed {
                 branch,
+                summary,
                 duration,
                 pr_url,
                 ..
             } => {
-                let short = short_branch(branch);
+                let lead = summary_or_short(summary, branch);
                 let pr_line = pr_url
                     .as_deref()
                     .map(|url| format!("\nPR: {url}"))
                     .unwrap_or_default();
-                format!(
-                    "🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}"
-                )
+                format!("🗑 *Worker closed* — {lead}\nBranch: `{branch}` · {duration}{pr_line}")
             }
             Self::PrOpened {
                 branch,
@@ -119,12 +115,8 @@ impl SwarmNotification {
                 duration,
                 ..
             } => {
-                let short = short_branch(branch);
-                let title_line = pr_title
-                    .as_deref()
-                    .map(|t| format!("\n{t}"))
-                    .unwrap_or_default();
-                format!("🔗 *PR opened* — {short}{title_line}\n{pr_url}\nDuration: {duration}")
+                let lead = pr_title.as_deref().unwrap_or_else(|| short_branch(branch));
+                format!("🔗 *PR opened* — {lead}\n{pr_url}\nBranch: `{branch}` · {duration}")
             }
             Self::AgentStalled {
                 branch, stall_kind, ..
@@ -139,22 +131,18 @@ impl SwarmNotification {
                 format!("⚠️ *Agent stalled* — {short}\nBranch: `{branch}`\n{detail}")
             }
             Self::AgentWaiting {
-                worktree_id,
                 branch,
                 summary,
                 pr_url,
+                ..
             } => {
-                let short = short_branch(branch);
-                let summary_line = summary
-                    .as_deref()
-                    .map(|s| format!("\n_{s}_"))
-                    .unwrap_or_default();
+                let lead = summary_or_short(summary, branch);
                 let pr_line = pr_url
                     .as_deref()
                     .map(|url| format!("\nPR: {url}"))
                     .unwrap_or_default();
                 format!(
-                    "⏳ *Worker waiting* — {short}{summary_line}{pr_line}\n\nReply: `swarm send {worktree_id} <message>`"
+                    "⏳ *Worker waiting* — {lead}\nBranch: `{branch}`{pr_line}\nReply here to send a message to this worker."
                 )
             }
         }
@@ -254,6 +242,7 @@ struct TrackedWorktree {
     agent_kind: Option<String>,
     pr_url: Option<String>,
     agent_session_status: Option<String>,
+    summary: Option<String>,
 }
 
 // Mirror types for deserializing .swarm/state.json.
@@ -374,6 +363,7 @@ impl SwarmWatcher {
                         agent_kind: wt.agent_kind.clone(),
                         pr_url: wt.pr_url(),
                         agent_session_status: wt.agent_session_status.clone(),
+                        summary: wt.summary.clone(),
                     },
                 );
             }
@@ -420,6 +410,7 @@ impl SwarmWatcher {
                     notifications.push(SwarmNotification::AgentCompleted {
                         worktree_id: id.clone(),
                         branch: wt.branch.clone(),
+                        summary: wt.summary.clone(),
                         duration,
                         pr_url: wt.pr_url(),
                     });
@@ -440,15 +431,18 @@ impl SwarmWatcher {
                     pr_notified_changed = true;
                 }
 
-                // Check if agent transitioned to "waiting" (needs user input).
+                // NOTIFICATION DESIGN: Suppress AgentWaiting when pr_url is set.
+                // If a PR is open, PrOpened is the actionable signal — sending both
+                // PrOpened and AgentWaiting creates redundant noise on Telegram.
                 if prev.agent_session_status.as_deref() != Some("waiting")
                     && wt.agent_session_status.as_deref() == Some("waiting")
+                    && wt.pr_url().is_none()
                 {
                     notifications.push(SwarmNotification::AgentWaiting {
                         worktree_id: id.clone(),
                         branch: wt.branch.clone(),
                         summary: wt.summary.clone(),
-                        pr_url: wt.pr_url(),
+                        pr_url: None,
                     });
                 }
             } else {
@@ -457,28 +451,49 @@ impl SwarmWatcher {
                 notifications.push(SwarmNotification::AgentClosed {
                     worktree_id: id.clone(),
                     branch: prev.branch.clone(),
+                    summary: prev.summary.clone(),
                     duration,
                     pr_url: prev.pr_url.clone(),
                 });
             }
         }
 
-        // Check for new worktrees.
+        // NOTIFICATION DESIGN: Emit exactly ONE notification per new worker.
+        // - If already waiting with PR → PrOpened (the actionable signal)
+        // - If already waiting without PR → AgentWaiting
+        // - Otherwise (running) → AgentSpawned
+        // This prevents AgentSpawned+AgentWaiting double-notifications for fast workers.
         for wt in &state.worktrees {
             if !self.known.contains_key(&wt.id) {
-                notifications.push(SwarmNotification::AgentSpawned {
-                    worktree_id: wt.id.clone(),
-                    branch: wt.branch.clone(),
-                    summary: wt.summary.clone(),
-                });
-                // If the worker is already waiting when first seen mid-session,
-                // the transition check won't fire (no previous state). Emit immediately.
                 if wt.agent_session_status.as_deref() == Some("waiting") {
-                    notifications.push(SwarmNotification::AgentWaiting {
+                    if let Some(url) = wt.pr_url() {
+                        // Fast worker: appeared already with PR — emit PrOpened.
+                        // (PrOpened transition check won't fire since there's no prev state.)
+                        let duration = format_duration(wt.created_at);
+                        notifications.push(SwarmNotification::PrOpened {
+                            worktree_id: wt.id.clone(),
+                            branch: wt.branch.clone(),
+                            pr_url: url.clone(),
+                            pr_title: wt.pr_title(),
+                            duration,
+                        });
+                        self.pr_notified.insert(url);
+                        pr_notified_changed = true;
+                    } else {
+                        // Fast worker: appeared already waiting, no PR yet.
+                        notifications.push(SwarmNotification::AgentWaiting {
+                            worktree_id: wt.id.clone(),
+                            branch: wt.branch.clone(),
+                            summary: wt.summary.clone(),
+                            pr_url: None,
+                        });
+                    }
+                } else {
+                    // Normal spawn: worker is running, not yet waiting.
+                    notifications.push(SwarmNotification::AgentSpawned {
                         worktree_id: wt.id.clone(),
                         branch: wt.branch.clone(),
                         summary: wt.summary.clone(),
-                        pr_url: wt.pr_url(),
                     });
                 }
             }
@@ -497,6 +512,7 @@ impl SwarmWatcher {
                     agent_kind: wt.agent_kind.clone(),
                     pr_url: wt.pr_url(),
                     agent_session_status: wt.agent_session_status.clone(),
+                    summary: wt.summary.clone(),
                 },
             );
         }
@@ -550,6 +566,27 @@ impl SwarmWatcher {
         // Check for stalled agents.
         if self.stall_timeout_secs > 0 {
             notifications.extend(self.check_stalls());
+        }
+
+        // NOTIFICATION DESIGN: Deduplicate AgentCompleted + AgentClosed for same worker.
+        // When closing a claude-tui worker, both can fire in the same poll cycle
+        // (agent pane gone + worktree removed). Keep only AgentClosed — it's the
+        // terminal event and includes all relevant info (PR url from prev state).
+        let completed_and_closed: HashSet<String> = notifications
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentCompleted { .. }))
+            .map(|n| n.worktree_id().to_owned())
+            .filter(|id| {
+                notifications
+                    .iter()
+                    .any(|n| matches!(n, SwarmNotification::AgentClosed { worktree_id, .. } if worktree_id == id))
+            })
+            .collect();
+        if !completed_and_closed.is_empty() {
+            notifications.retain(|n| {
+                !matches!(n, SwarmNotification::AgentCompleted { worktree_id, .. }
+                    if completed_and_closed.contains(worktree_id.as_str()))
+            });
         }
 
         if pr_notified_changed {
@@ -669,6 +706,11 @@ fn short_branch(branch: &str) -> &str {
     branch.strip_prefix("swarm/").unwrap_or(branch)
 }
 
+/// Return summary if set, else the short branch name.
+fn summary_or_short<'a>(summary: &'a Option<String>, branch: &'a str) -> &'a str {
+    summary.as_deref().unwrap_or_else(|| short_branch(branch))
+}
+
 /// Format the duration since a worktree was created.
 fn format_duration(created_at: DateTime<Local>) -> String {
     let elapsed = Utc::now() - created_at.with_timezone(&Utc);
@@ -735,7 +777,7 @@ mod tests {
         let notes = watcher.poll();
         assert_eq!(notes.len(), 1);
         let msg = notes[0].format_telegram();
-        assert!(msg.contains("Agent completed"));
+        assert!(msg.contains("Agent finished"));
         assert!(msg.contains("fix-bug"));
     }
 
@@ -756,7 +798,7 @@ mod tests {
         let notes = watcher.poll();
         assert_eq!(notes.len(), 1);
         let msg = notes[0].format_telegram();
-        assert!(msg.contains("Agent closed"));
+        assert!(msg.contains("Worker closed"));
     }
 
     #[test]
@@ -776,7 +818,7 @@ mod tests {
         let notes = watcher.poll();
         assert_eq!(notes.len(), 1);
         let msg = notes[0].format_telegram();
-        assert!(msg.contains("New agent spawned"));
+        assert!(msg.contains("Agent spawned"));
         assert!(msg.contains("new-feat"));
         assert!(msg.contains("Add new feature"));
     }
@@ -812,16 +854,17 @@ mod tests {
             branch: "swarm/new".into(),
             summary: Some("Do the thing".into()),
         };
-        assert!(spawned.format_telegram().contains("New agent spawned"));
+        assert!(spawned.format_telegram().contains("Agent spawned"));
         assert!(spawned.format_telegram().contains("Do the thing"));
 
         let completed = SwarmNotification::AgentCompleted {
             worktree_id: "1".into(),
             branch: "swarm/done".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         };
-        assert!(completed.format_telegram().contains("Agent completed"));
+        assert!(completed.format_telegram().contains("Agent finished"));
         assert!(completed.format_telegram().contains("5m"));
         assert!(!completed.format_telegram().contains("PR:"));
 
@@ -849,6 +892,7 @@ mod tests {
         let completed = SwarmNotification::AgentCompleted {
             worktree_id: "1".into(),
             branch: "swarm/feat".into(),
+            summary: None,
             duration: "12m".into(),
             pr_url: Some("https://github.com/ApiariTools/hive/pull/42".into()),
         };
@@ -861,6 +905,7 @@ mod tests {
         let closed = SwarmNotification::AgentClosed {
             worktree_id: "1".into(),
             branch: "swarm/feat".into(),
+            summary: None,
             duration: "8m".into(),
             pr_url: Some("https://github.com/ApiariTools/hive/pull/99".into()),
         };
@@ -943,7 +988,7 @@ mod tests {
         assert!(msg.contains("add-auth"));
         assert!(msg.contains("Add OAuth support"));
         assert!(msg.contains("https://github.com/ApiariTools/hive/pull/42"));
-        assert!(msg.contains("Duration:"));
+        assert!(msg.contains("Branch:"));
     }
 
     #[test]
@@ -1016,10 +1061,10 @@ mod tests {
         let msg = pr.format_telegram();
         assert_eq!(
             msg,
-            "🔗 *PR opened* — add-auth\nAdd OAuth support\nhttps://github.com/ApiariTools/hive/pull/42\nDuration: 15m"
+            "🔗 *PR opened* — Add OAuth support\nhttps://github.com/ApiariTools/hive/pull/42\nBranch: `swarm/add-auth` · 15m"
         );
 
-        // Without pr_title.
+        // Without pr_title — falls back to short branch.
         let pr_no_title = SwarmNotification::PrOpened {
             worktree_id: "1".into(),
             branch: "swarm/fix-bug".into(),
@@ -1030,7 +1075,7 @@ mod tests {
         let msg2 = pr_no_title.format_telegram();
         assert_eq!(
             msg2,
-            "🔗 *PR opened* — fix-bug\nhttps://github.com/ApiariTools/hive/pull/7\nDuration: 3m"
+            "🔗 *PR opened* — fix-bug\nhttps://github.com/ApiariTools/hive/pull/7\nBranch: `swarm/fix-bug` · 3m"
         );
     }
 
@@ -1079,7 +1124,7 @@ mod tests {
         assert!(msg.contains("Worker waiting"));
         assert!(msg.contains("do-stuff"));
         assert!(msg.contains("Fix the thing"));
-        assert!(msg.contains("swarm send 1"));
+        assert!(msg.contains("Reply here"));
     }
 
     #[test]
@@ -1179,12 +1224,14 @@ mod tests {
         let msg = waiting.format_telegram();
         assert_eq!(
             msg,
-            "⏳ *Worker waiting* — my-task\n\nReply: `swarm send abc <message>`"
+            "⏳ *Worker waiting* — my-task\nBranch: `swarm/my-task`\nReply here to send a message to this worker."
         );
     }
 
     #[test]
-    fn test_agent_waiting_includes_pr_url_when_set() {
+    fn test_agent_waiting_suppressed_when_pr_set() {
+        // NOTIFICATION DESIGN: When pr_url is set, PrOpened is the actionable
+        // signal — AgentWaiting is redundant and creates noise.
         let mut file = NamedTempFile::new().unwrap();
         // Agent running, no PR yet.
         write_state(
@@ -1202,6 +1249,44 @@ mod tests {
         );
 
         let notes = watcher.poll();
+
+        // PrOpened should fire (None→Some transition).
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert_eq!(pr_notes.len(), 1, "PrOpened should fire");
+
+        // AgentWaiting should NOT fire — PrOpened is the signal.
+        let waiting_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting_notes.is_empty(),
+            "AgentWaiting should be suppressed when pr_url is set"
+        );
+    }
+
+    #[test]
+    fn test_agent_waiting_fires_when_no_pr() {
+        // NOTIFICATION DESIGN: When no PR is set, AgentWaiting is the signal.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Agent transitions to waiting, no PR.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing","agent_session_status":"waiting"}]}"#,
+        );
+
+        let notes = watcher.poll();
         let waiting_notes: Vec<_> = notes
             .iter()
             .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
@@ -1209,18 +1294,8 @@ mod tests {
         assert_eq!(
             waiting_notes.len(),
             1,
-            "should emit exactly one AgentWaiting"
+            "AgentWaiting should fire when no PR is set"
         );
-
-        let msg = waiting_notes[0].format_telegram();
-        assert!(msg.contains("Worker waiting"));
-        assert!(msg.contains("do-stuff"));
-        assert!(msg.contains("Fix the thing"));
-        assert!(
-            msg.contains("PR: https://github.com/ApiariTools/hive/pull/77"),
-            "message should contain PR URL: {msg}"
-        );
-        assert!(msg.contains("swarm send 1"));
     }
 
     #[test]
@@ -1248,6 +1323,7 @@ mod tests {
         let n = SwarmNotification::AgentCompleted {
             worktree_id: "1".into(),
             branch: "swarm/done".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: Some("https://github.com/example/pull/1".into()),
         };
@@ -1259,6 +1335,7 @@ mod tests {
         let n2 = SwarmNotification::AgentCompleted {
             worktree_id: "1".into(),
             branch: "swarm/done".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         };
@@ -1270,6 +1347,7 @@ mod tests {
         let n = SwarmNotification::AgentClosed {
             worktree_id: "1".into(),
             branch: "swarm/old".into(),
+            summary: None,
             duration: "10m".into(),
             pr_url: None,
         };
@@ -1600,20 +1678,43 @@ mod tests {
     }
 
     #[test]
-    fn test_new_worker_already_waiting_emits_both() {
+    fn test_fast_worker_with_pr_emits_pr_opened_only() {
+        // NOTIFICATION DESIGN: Fast worker appeared already with PR — emit only
+        // PrOpened. No AgentSpawned or AgentWaiting to avoid noise.
         let mut file = NamedTempFile::new().unwrap();
         write_state(&mut file, r#"{"worktrees":[]}"#);
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
         watcher.poll(); // Initialize with no worktrees.
 
-        // New worker appears mid-session already in "waiting" state.
+        // New worker appears mid-session already in "waiting" state with PR.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"fast-1","branch":"swarm/quick-fix","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Fix typo","pr":{"url":"https://github.com/ApiariTools/hive/pull/55"}}]}"#,
+            r#"{"worktrees":[{"id":"fast-1","branch":"swarm/quick-fix","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Fix typo","pr":{"url":"https://github.com/ApiariTools/hive/pull/55","title":"Fix typo in README"}}]}"#,
         );
 
         let notes = watcher.poll();
+
+        // Only PrOpened should fire.
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert_eq!(pr_notes.len(), 1, "should emit PrOpened");
+
+        if let SwarmNotification::PrOpened {
+            worktree_id,
+            pr_url,
+            pr_title,
+            ..
+        } = &pr_notes[0]
+        {
+            assert_eq!(worktree_id, "fast-1");
+            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/55");
+            assert_eq!(pr_title.as_deref(), Some("Fix typo in README"));
+        }
+
+        // No AgentSpawned or AgentWaiting.
         let spawned: Vec<_> = notes
             .iter()
             .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
@@ -1622,29 +1723,84 @@ mod tests {
             .iter()
             .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
             .collect();
-        assert_eq!(spawned.len(), 1, "should emit AgentSpawned");
-        assert_eq!(
-            waiting.len(),
-            1,
-            "should emit AgentWaiting for new worker already in waiting state"
+        assert!(
+            spawned.is_empty(),
+            "no AgentSpawned for fast worker with PR"
+        );
+        assert!(waiting.is_empty(), "no AgentWaiting when PR is the signal");
+    }
+
+    #[test]
+    fn test_fast_worker_no_pr_emits_waiting_only() {
+        // NOTIFICATION DESIGN: Fast worker appeared already waiting, no PR —
+        // emit only AgentWaiting. No AgentSpawned.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize with no worktrees.
+
+        // New worker appears mid-session already waiting, no PR.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"fast-2","branch":"swarm/quick-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Do the thing"}]}"#,
         );
 
-        // Verify the AgentWaiting notification has correct fields.
-        if let SwarmNotification::AgentWaiting {
-            worktree_id,
-            branch,
-            summary,
-            pr_url,
-        } = &waiting[0]
-        {
-            assert_eq!(worktree_id, "fast-1");
-            assert_eq!(branch, "swarm/quick-fix");
-            assert_eq!(summary.as_deref(), Some("Fix typo"));
-            assert_eq!(
-                pr_url.as_deref(),
-                Some("https://github.com/ApiariTools/hive/pull/55")
-            );
-        }
+        let notes = watcher.poll();
+
+        // Only AgentWaiting should fire.
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(waiting.len(), 1, "should emit AgentWaiting");
+        assert_eq!(waiting[0].worktree_id(), "fast-2");
+
+        // No AgentSpawned.
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert!(
+            spawned.is_empty(),
+            "no AgentSpawned for fast worker already waiting"
+        );
+    }
+
+    #[test]
+    fn test_normal_spawn_emits_spawned_only() {
+        // NOTIFICATION DESIGN: Normal worker appears running — emit only AgentSpawned.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize with no worktrees.
+
+        // New worker appears in running state.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"run-1","branch":"swarm/big-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active","summary":"Big refactor"}]}"#,
+        );
+
+        let notes = watcher.poll();
+
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert_eq!(spawned.len(), 1, "should emit AgentSpawned");
+
+        // No AgentWaiting or PrOpened.
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        let pr: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(waiting.is_empty(), "no AgentWaiting for running worker");
+        assert!(pr.is_empty(), "no PrOpened for running worker");
     }
 
     #[test]
@@ -1853,5 +2009,45 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&notified_path).unwrap()).unwrap();
         assert!(content.contains("https://github.com/ApiariTools/hive/pull/1"));
         assert!(content.contains("https://github.com/ApiariTools/hive/pull/42"));
+    }
+
+    // --- Tests for notification deduplication ---
+
+    #[test]
+    fn test_completed_and_closed_dedup() {
+        // NOTIFICATION DESIGN: When a worktree is removed, only AgentClosed
+        // should fire — AgentCompleted is redundant. The dedup logic in poll()
+        // removes AgentCompleted when AgentClosed also fires for the same worker.
+        let mut file = NamedTempFile::new().unwrap();
+        // Worker with agent pane running.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","summary":"Do stuff"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Worktree removed entirely (agent was still running).
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let notes = watcher.poll();
+
+        // Only AgentClosed should fire, not AgentCompleted.
+        let completed: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentCompleted { .. }))
+            .collect();
+        let closed: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentClosed { .. }))
+            .collect();
+
+        assert!(
+            completed.is_empty(),
+            "AgentCompleted should not fire when worktree is removed"
+        );
+        assert_eq!(closed.len(), 1, "AgentClosed should fire");
+        assert_eq!(closed[0].worktree_id(), "1");
     }
 }

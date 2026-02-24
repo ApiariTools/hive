@@ -31,6 +31,7 @@ use color_eyre::eyre::{Result, WrapErr};
 use config::DaemonConfig;
 use origin_map::{OriginEntry, OriginMap, route_notification};
 use session_store::SessionStore;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1324,8 +1325,17 @@ impl DaemonRunner {
             .as_ref()
             .is_some_and(|sw| sw.auto_triage)
         {
+            // NOTIFICATION DESIGN: Deduplicate auto-triage per worktree.
+            // When PrOpened and AgentWaiting fire for the same worker in the same
+            // poll cycle, only auto-triage once to avoid duplicate assessments.
+            let mut auto_triaged: HashSet<String> = HashSet::new();
             for (chat_id, notification) in &routed {
+                let wt_id = notification.worktree_id().to_owned();
+                if auto_triaged.contains(&wt_id) {
+                    continue;
+                }
                 if let Some(prompt) = auto_triage_prompt(notification) {
+                    auto_triaged.insert(wt_id);
                     let chat_id = *chat_id;
                     let channel = self.channel.clone();
                     let coordinator_prompt = self.coordinator_prompt.clone();
@@ -1739,6 +1749,7 @@ mod tests {
         let n3 = swarm_watcher::SwarmNotification::AgentClosed {
             worktree_id: "3".into(),
             branch: "swarm/task-c".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         };
@@ -1760,6 +1771,7 @@ mod tests {
         let completed = swarm_watcher::SwarmNotification::AgentCompleted {
             worktree_id: "2".into(),
             branch: "swarm/feat-2".into(),
+            summary: None,
             duration: "10m".into(),
             pr_url: Some("https://github.com/example/pull/7".into()),
         };
@@ -1795,6 +1807,7 @@ mod tests {
         swarm_watcher::SwarmNotification::AgentCompleted {
             worktree_id: wt_id.into(),
             branch: branch.into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         }
@@ -1888,6 +1901,7 @@ mod tests {
         let n3 = swarm_watcher::SwarmNotification::AgentCompleted {
             worktree_id: "3".into(),
             branch: "swarm/c".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         };
@@ -1915,6 +1929,7 @@ mod tests {
         let n2 = swarm_watcher::SwarmNotification::AgentCompleted {
             worktree_id: "2".into(),
             branch: "swarm/b".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         };
@@ -1940,6 +1955,7 @@ mod tests {
         let n2 = swarm_watcher::SwarmNotification::AgentCompleted {
             worktree_id: "2".into(),
             branch: "swarm/b".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         };
@@ -2037,6 +2053,7 @@ mod tests {
         let completed = swarm_watcher::SwarmNotification::AgentCompleted {
             worktree_id: "1".into(),
             branch: "swarm/a".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         };
@@ -2045,6 +2062,7 @@ mod tests {
         let closed = swarm_watcher::SwarmNotification::AgentClosed {
             worktree_id: "1".into(),
             branch: "swarm/a".into(),
+            summary: None,
             duration: "5m".into(),
             pr_url: None,
         };
@@ -2056,5 +2074,45 @@ mod tests {
             stall_kind: swarm_watcher::StallKind::Idle { minutes: 10 },
         };
         assert!(auto_triage_prompt(&stalled).is_none());
+    }
+
+    #[test]
+    fn test_auto_triage_dedup_same_worker() {
+        // NOTIFICATION DESIGN: When PrOpened and AgentWaiting fire for the same
+        // worker in the same poll cycle, only auto-triage once per worktree to
+        // avoid duplicate assessments.
+        let pr_opened = swarm_watcher::SwarmNotification::PrOpened {
+            worktree_id: "wt-1".into(),
+            branch: "swarm/feat".into(),
+            pr_url: "https://example.com/pr/1".into(),
+            pr_title: Some("Feature".into()),
+            duration: "5m".into(),
+        };
+        let waiting = swarm_watcher::SwarmNotification::AgentWaiting {
+            worktree_id: "wt-1".into(),
+            branch: "swarm/feat".into(),
+            summary: Some("Feature".into()),
+            pr_url: Some("https://example.com/pr/1".into()),
+        };
+
+        // Simulate the dedup logic from poll_swarm Phase 4.
+        let routed: Vec<(i64, &swarm_watcher::SwarmNotification)> =
+            vec![(100, &pr_opened), (100, &waiting)];
+
+        let mut auto_triaged: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut triage_count = 0;
+
+        for (_chat_id, notification) in &routed {
+            let wt_id = notification.worktree_id().to_owned();
+            if auto_triaged.contains(&wt_id) {
+                continue;
+            }
+            if auto_triage_prompt(notification).is_some() {
+                auto_triaged.insert(wt_id);
+                triage_count += 1;
+            }
+        }
+
+        assert_eq!(triage_count, 1, "should auto-triage only once per worktree");
     }
 }
