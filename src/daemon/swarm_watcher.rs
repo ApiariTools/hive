@@ -11,6 +11,7 @@ use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// Typed swarm event notifications emitted by `SwarmWatcher::poll()`.
 #[derive(Debug, Clone)]
@@ -219,6 +220,8 @@ pub struct SwarmWatcher {
     swarm_dir: PathBuf,
     /// Stall timeout in seconds (0 = disabled).
     stall_timeout_secs: u64,
+    /// Seconds a worker must be in "waiting" before AgentWaiting fires (0 = disabled).
+    waiting_debounce_secs: u64,
     /// Workers that were already in "waiting" state at initialization.
     /// Drained on the first poll after init to re-emit AgentWaiting.
     waiting_at_init: HashSet<String>,
@@ -243,6 +246,8 @@ struct TrackedWorktree {
     pr_url: Option<String>,
     agent_session_status: Option<String>,
     summary: Option<String>,
+    /// When this worker entered "waiting" state (for debounce tracking).
+    waiting_since: Option<Instant>,
 }
 
 // Mirror types for deserializing .swarm/state.json.
@@ -317,6 +322,7 @@ impl SwarmWatcher {
             initialized: false,
             swarm_dir,
             stall_timeout_secs: 0,
+            waiting_debounce_secs: 0,
             waiting_at_init: HashSet::new(),
             pr_notified: HashSet::new(),
             prs_at_init: HashSet::new(),
@@ -327,6 +333,12 @@ impl SwarmWatcher {
     /// Set the stall detection timeout (in seconds). 0 disables stall detection.
     pub fn set_stall_timeout(&mut self, secs: u64) {
         self.stall_timeout_secs = secs;
+    }
+
+    /// Set the waiting debounce duration (in seconds). 0 disables debounce
+    /// (AgentWaiting fires immediately on transition, backwards compatible).
+    pub fn set_waiting_debounce(&mut self, secs: u64) {
+        self.waiting_debounce_secs = secs;
     }
 
     /// Set the hive directory for persisting PR notification state.
@@ -364,6 +376,7 @@ impl SwarmWatcher {
                         pr_url: wt.pr_url(),
                         agent_session_status: wt.agent_session_status.clone(),
                         summary: wt.summary.clone(),
+                        waiting_since: None, // Handled by waiting_at_init path, not debounce.
                     },
                 );
             }
@@ -431,12 +444,18 @@ impl SwarmWatcher {
                     pr_notified_changed = true;
                 }
 
-                // NOTIFICATION DESIGN: Suppress AgentWaiting when pr_url is set.
-                // If a PR is open, PrOpened is the actionable signal — sending both
-                // PrOpened and AgentWaiting creates redundant noise on Telegram.
+                // NOTIFICATION DESIGN: Debounce AgentWaiting to prevent false positives.
+                // Workers briefly enter "waiting" state between tool calls. Only emit
+                // AgentWaiting after the worker has been waiting for waiting_debounce_secs.
+                // If debounce is 0, emit immediately (backwards compatible, useful in tests).
+                // Also suppress when pr_url is set — PrOpened is the actionable signal.
+                // When debounce > 0, waiting_since is set in the known state update
+                // below. The debounce check pass will emit AgentWaiting once enough
+                // time has elapsed.
                 if prev.agent_session_status.as_deref() != Some("waiting")
                     && wt.agent_session_status.as_deref() == Some("waiting")
                     && wt.pr_url().is_none()
+                    && self.waiting_debounce_secs == 0
                 {
                     notifications.push(SwarmNotification::AgentWaiting {
                         worktree_id: id.clone(),
@@ -481,12 +500,16 @@ impl SwarmWatcher {
                         pr_notified_changed = true;
                     } else {
                         // Fast worker: appeared already waiting, no PR yet.
-                        notifications.push(SwarmNotification::AgentWaiting {
-                            worktree_id: wt.id.clone(),
-                            branch: wt.branch.clone(),
-                            summary: wt.summary.clone(),
-                            pr_url: None,
-                        });
+                        if self.waiting_debounce_secs == 0 {
+                            notifications.push(SwarmNotification::AgentWaiting {
+                                worktree_id: wt.id.clone(),
+                                branch: wt.branch.clone(),
+                                summary: wt.summary.clone(),
+                                pr_url: None,
+                            });
+                        }
+                        // When debounce > 0, waiting_since is set in the known state
+                        // update below. The debounce check pass handles the delay.
                     }
                 } else {
                     // Normal spawn: worker is running, not yet waiting.
@@ -499,9 +522,28 @@ impl SwarmWatcher {
             }
         }
 
-        // Update known state.
-        self.known.clear();
+        // Update known state, carrying forward waiting_since for debounce tracking.
+        let old_known = std::mem::take(&mut self.known);
         for wt in &state.worktrees {
+            let is_waiting = wt.agent_session_status.as_deref() == Some("waiting");
+            let old = old_known.get(&wt.id);
+            let was_waiting =
+                old.is_some_and(|o| o.agent_session_status.as_deref() == Some("waiting"));
+
+            // NOTIFICATION DESIGN: Track when a worker entered "waiting" state.
+            // - Transitioning TO waiting: record Instant::now()
+            // - Already waiting: preserve existing timestamp
+            // - Not waiting: clear (worker left waiting, debounce resets)
+            let waiting_since = if is_waiting {
+                if was_waiting {
+                    old.and_then(|o| o.waiting_since)
+                } else {
+                    Some(Instant::now())
+                }
+            } else {
+                None
+            };
+
             self.known.insert(
                 wt.id.clone(),
                 TrackedWorktree {
@@ -513,15 +555,10 @@ impl SwarmWatcher {
                     pr_url: wt.pr_url(),
                     agent_session_status: wt.agent_session_status.clone(),
                     summary: wt.summary.clone(),
+                    waiting_since,
                 },
             );
         }
-
-        // Preserve stall_notified for worktrees that were already known.
-        // (We cleared and re-built, so we need to carry forward.)
-        // Re-read previous stall state from notifications: if we just emitted
-        // AgentCompleted or AgentClosed, the worktree is gone anyway.
-        // For stall detection, check_stalls() handles the stall_notified flag.
 
         // Re-emit AgentWaiting for workers that were already waiting at init.
         // Drain ensures this only fires once (the first poll after initialization).
@@ -559,6 +596,29 @@ impl SwarmWatcher {
                     });
                     self.pr_notified.insert(pr_url.clone());
                     pr_notified_changed = true;
+                }
+            }
+        }
+
+        // NOTIFICATION DESIGN: Emit debounced AgentWaiting for workers that have
+        // been in "waiting" state long enough. This prevents false positives from
+        // brief mid-task flickers while still notifying for genuine human-input waits.
+        // A real wait is sustained across multiple polls; a tool-call gap clears
+        // within one 15s poll cycle, so waiting_since gets reset before the threshold.
+        if self.waiting_debounce_secs > 0 {
+            for (id, tracked) in &mut self.known {
+                if tracked.agent_session_status.as_deref() == Some("waiting")
+                    && tracked.pr_url.is_none()
+                    && let Some(since) = tracked.waiting_since
+                    && since.elapsed().as_secs() >= self.waiting_debounce_secs
+                {
+                    notifications.push(SwarmNotification::AgentWaiting {
+                        worktree_id: id.clone(),
+                        branch: tracked.branch.clone(),
+                        summary: tracked.summary.clone(),
+                        pr_url: None,
+                    });
+                    tracked.waiting_since = None; // fired, don't repeat
                 }
             }
         }
@@ -2049,5 +2109,257 @@ mod tests {
         );
         assert_eq!(closed.len(), 1, "AgentClosed should fire");
         assert_eq!(closed[0].worktree_id(), "1");
+    }
+
+    // --- Tests for AgentWaiting debounce ---
+
+    #[test]
+    fn test_debounce_suppresses_brief_flicker() {
+        // NOTIFICATION DESIGN: With debounce enabled, a worker that briefly enters
+        // "waiting" then returns to "active" should NOT trigger AgentWaiting.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_waiting_debounce(30); // 30s debounce
+        watcher.poll(); // Initialize
+
+        // Worker transitions to waiting (mid-task tool call gap).
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting.is_empty(),
+            "debounce should suppress immediate AgentWaiting"
+        );
+
+        // Worker returns to active (tool call resumes).
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting.is_empty(),
+            "no AgentWaiting after returning to active — flicker successfully suppressed"
+        );
+    }
+
+    #[test]
+    fn test_debounce_zero_fires_immediately() {
+        // With debounce disabled (0), AgentWaiting fires on the transition.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        // debounce defaults to 0 — explicit for clarity
+        watcher.set_waiting_debounce(0);
+        watcher.poll(); // Initialize
+
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "debounce=0 should fire AgentWaiting immediately"
+        );
+    }
+
+    #[test]
+    fn test_debounce_fast_worker_suppressed() {
+        // NOTIFICATION DESIGN: New worker appearing already in "waiting" with
+        // debounce enabled should NOT immediately fire AgentWaiting.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_waiting_debounce(30);
+        watcher.poll(); // Initialize
+
+        // New worker appears already waiting.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"fast-1","branch":"swarm/quick","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Quick task"}]}"#,
+        );
+        let notes = watcher.poll();
+
+        // Should emit AgentSpawned or nothing, but NOT AgentWaiting (debounce).
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting.is_empty(),
+            "debounce should suppress AgentWaiting for fast worker"
+        );
+    }
+
+    #[test]
+    fn test_debounce_resets_on_active_waiting_cycle() {
+        // When a worker goes waiting→active→waiting, the debounce timer resets.
+        // With debounce > 0, neither transition should fire immediately.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_waiting_debounce(30);
+        watcher.poll(); // Initialize
+
+        // First transition: active → waiting
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+        let notes = watcher.poll();
+        assert!(
+            notes
+                .iter()
+                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
+            "first transition suppressed by debounce"
+        );
+
+        // Verify waiting_since is set.
+        assert!(
+            watcher.known["1"].waiting_since.is_some(),
+            "waiting_since should be set on transition to waiting"
+        );
+
+        // Back to active.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+        watcher.poll();
+        assert!(
+            watcher.known["1"].waiting_since.is_none(),
+            "waiting_since should be cleared when leaving waiting state"
+        );
+
+        // Second transition: active → waiting again.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+        );
+        let notes = watcher.poll();
+        assert!(
+            notes
+                .iter()
+                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
+            "second transition also suppressed by debounce"
+        );
+
+        // waiting_since should be freshly set (reset, not carried from first cycle).
+        assert!(
+            watcher.known["1"].waiting_since.is_some(),
+            "waiting_since should be set again on re-entry to waiting"
+        );
+    }
+
+    #[test]
+    fn test_debounce_fires_when_threshold_reached() {
+        // NOTIFICATION DESIGN: With a very short debounce (1 second), verify that
+        // the debounce check pass fires AgentWaiting after the threshold.
+        // Note: This test uses a real sleep, so the debounce is kept very short.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_waiting_debounce(1); // 1 second debounce
+        watcher.poll(); // Initialize
+
+        // Transition to waiting.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Need input"}]}"#,
+        );
+        let notes = watcher.poll();
+        assert!(
+            notes
+                .iter()
+                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
+            "should not fire immediately with debounce=1"
+        );
+
+        // Wait for the debounce threshold.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Next poll — debounce check should fire.
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "debounce check should fire AgentWaiting after threshold"
+        );
+
+        // Subsequent poll — should NOT fire again (waiting_since cleared).
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting.is_empty(),
+            "should not re-fire after debounce already emitted"
+        );
+    }
+
+    #[test]
+    fn test_debounce_waiting_at_init_fires_regardless() {
+        // Workers waiting at daemon startup should re-emit immediately via the
+        // waiting_at_init path, even when debounce is enabled.
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/stale","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Waiting for input"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_waiting_debounce(30); // 30s debounce
+        watcher.poll(); // Initialize
+
+        // Second poll — waiting_at_init should fire regardless of debounce.
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "waiting_at_init should fire even with debounce enabled"
+        );
     }
 }
