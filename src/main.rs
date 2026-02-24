@@ -171,7 +171,12 @@ async fn main() -> Result<()> {
             duration,
             cron,
             message,
-        } => cmd_remind(&cwd, duration.as_deref(), cron.as_deref(), &message.join(" ")),
+        } => cmd_remind(
+            &cwd,
+            duration.as_deref(),
+            cron.as_deref(),
+            &message.join(" "),
+        ),
         Command::Reminders { action } => match action {
             None => cmd_list_reminders(&cwd),
             Some(RemindersAction::Cancel { id }) => cmd_cancel_reminder(&cwd, &id),
@@ -293,12 +298,7 @@ async fn cmd_start(cwd: &Path, quest_id: Option<&str>) -> Result<()> {
 }
 
 /// Schedule a reminder.
-fn cmd_remind(
-    cwd: &Path,
-    duration: Option<&str>,
-    cron: Option<&str>,
-    message: &str,
-) -> Result<()> {
+fn cmd_remind(cwd: &Path, duration: Option<&str>, cron: Option<&str>, message: &str) -> Result<()> {
     let workspace = load_workspace(cwd)?;
     let mut store = reminder::ReminderStore::load(&workspace.root);
 
@@ -306,8 +306,7 @@ fn cmd_remind(
         reminder::create_cron(cron_expr, message, None)
             .map_err(|e| color_eyre::eyre::eyre!("{e}"))?
     } else if let Some(dur) = duration {
-        reminder::create_oneshot(dur, message, None)
-            .map_err(|e| color_eyre::eyre::eyre!("{e}"))?
+        reminder::create_oneshot(dur, message, None).map_err(|e| color_eyre::eyre::eyre!("{e}"))?
     } else {
         color_eyre::eyre::bail!("either <duration> or --cron is required");
     };
@@ -322,9 +321,7 @@ fn cmd_remind(
     store.add(r);
     store.save()?;
 
-    eprintln!(
-        "[reminder] Created {kind} reminder {short_id}: \"{message}\" fires at {fire_str}"
-    );
+    eprintln!("[reminder] Created {kind} reminder {short_id}: \"{message}\" fires at {fire_str}");
     println!("Reminder set (ID: {short_id})");
     println!("Next fire: {fire_str}");
     println!("Message: {message}");

@@ -113,8 +113,12 @@ impl ReminderStore {
 
     /// Get all active (non-cancelled) reminders, sorted by next fire time.
     pub fn active(&self) -> Vec<&StoredReminder> {
-        let mut active: Vec<&StoredReminder> =
-            self.state.reminders.iter().filter(|r| !r.cancelled).collect();
+        let mut active: Vec<&StoredReminder> = self
+            .state
+            .reminders
+            .iter()
+            .filter(|r| !r.cancelled)
+            .collect();
         active.sort_by_key(|r| r.fire_at);
         active
     }
@@ -255,7 +259,11 @@ mod tests {
     #[test]
     fn test_cancel_by_prefix() {
         let mut store = empty_store();
-        store.add(make_once("abc-123-def", "test", Utc::now() + Duration::hours(1)));
+        store.add(make_once(
+            "abc-123-def",
+            "test",
+            Utc::now() + Duration::hours(1),
+        ));
         let id = store.cancel("abc").unwrap();
         assert_eq!(id, "abc-123-def");
         assert!(store.active().is_empty());
@@ -264,15 +272,27 @@ mod tests {
     #[test]
     fn test_cancel_not_found() {
         let mut store = empty_store();
-        store.add(make_once("abc-123", "test", Utc::now() + Duration::hours(1)));
+        store.add(make_once(
+            "abc-123",
+            "test",
+            Utc::now() + Duration::hours(1),
+        ));
         assert!(matches!(store.cancel("xyz"), Err(CancelError::NotFound)));
     }
 
     #[test]
     fn test_cancel_ambiguous() {
         let mut store = empty_store();
-        store.add(make_once("abc-111", "test1", Utc::now() + Duration::hours(1)));
-        store.add(make_once("abc-222", "test2", Utc::now() + Duration::hours(2)));
+        store.add(make_once(
+            "abc-111",
+            "test1",
+            Utc::now() + Duration::hours(1),
+        ));
+        store.add(make_once(
+            "abc-222",
+            "test2",
+            Utc::now() + Duration::hours(2),
+        ));
         match store.cancel("abc") {
             Err(CancelError::Ambiguous(ids)) => {
                 assert_eq!(ids.len(), 2);
@@ -284,8 +304,16 @@ mod tests {
     #[test]
     fn test_active_excludes_cancelled() {
         let mut store = empty_store();
-        store.add(make_once("abc-123", "keep", Utc::now() + Duration::hours(1)));
-        store.add(make_once("def-456", "cancel me", Utc::now() + Duration::hours(2)));
+        store.add(make_once(
+            "abc-123",
+            "keep",
+            Utc::now() + Duration::hours(1),
+        ));
+        store.add(make_once(
+            "def-456",
+            "cancel me",
+            Utc::now() + Duration::hours(2),
+        ));
         store.cancel("def").unwrap();
         let active = store.active();
         assert_eq!(active.len(), 1);
@@ -296,7 +324,11 @@ mod tests {
     fn test_check_once_fires_and_removes() {
         let mut store = empty_store();
         // Fire time in the past.
-        store.add(make_once("abc-123", "overdue", Utc::now() - Duration::seconds(10)));
+        store.add(make_once(
+            "abc-123",
+            "overdue",
+            Utc::now() - Duration::seconds(10),
+        ));
         let fired = store.check_and_advance();
         assert_eq!(fired.len(), 1);
         assert_eq!(fired[0].message, "overdue");
@@ -307,7 +339,11 @@ mod tests {
     #[test]
     fn test_check_not_yet_due() {
         let mut store = empty_store();
-        store.add(make_once("abc-123", "later", Utc::now() + Duration::hours(1)));
+        store.add(make_once(
+            "abc-123",
+            "later",
+            Utc::now() + Duration::hours(1),
+        ));
         let fired = store.check_and_advance();
         assert!(fired.is_empty());
         assert_eq!(store.active().len(), 1);

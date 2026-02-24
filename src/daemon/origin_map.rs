@@ -77,11 +77,10 @@ impl OriginMap {
 /// Looks up the originating chat in the origin map. Falls back to
 /// `alert_chat_id` when the origin is unknown or has no chat_id.
 pub fn route_notification(origin_map: &OriginMap, worktree_id: &str, alert_chat_id: i64) -> i64 {
-    origin_map.route_target(worktree_id).unwrap_or(alert_chat_id)
+    origin_map
+        .route_target(worktree_id)
+        .unwrap_or(alert_chat_id)
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -389,5 +388,4 @@ mod tests {
         // CLI origin has no chat_id, so falls back to alert_chat_id.
         assert_eq!(route_notification(&map, "wt-1", 999), 999);
     }
-
 }
