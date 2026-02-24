@@ -1364,7 +1364,7 @@ impl DaemonRunner {
                         let opts = SessionOptions {
                             system_prompt: Some(system_prompt),
                             model: Some(model),
-                            max_turns: Some(1),
+                            max_turns: Some(7),
                             no_session_persistence: true,
                             working_dir: Some(workspace_root),
                             allowed_tools: vec![
@@ -1462,7 +1462,7 @@ impl DaemonRunner {
         let opts = SessionOptions {
             system_prompt: Some("You are a concise triage assistant. Assess signals and recommend actions in 1-3 sentences.".into()),
             model: Some(self.config.model.clone()),
-            max_turns: Some(1),
+            max_turns: Some(7),
             no_session_persistence: true,
             working_dir: Some(self.workspace_root.clone()),
             ..Default::default()
