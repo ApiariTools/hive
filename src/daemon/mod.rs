@@ -89,11 +89,16 @@ pub async fn start(cwd: &Path, foreground: bool) -> Result<()> {
 
     // Check for stale PID file.
     if let Some(pid) = read_pid(root) {
-        if is_process_alive(pid) {
+        let our_pid = std::process::id();
+        if pid == our_pid {
+            // exec() restart — PID file is ours from the previous incarnation.
+            eprintln!("[daemon] Resuming after exec restart (PID {pid})");
+        } else if is_process_alive(pid) {
             color_eyre::eyre::bail!("daemon already running (PID {pid})");
+        } else {
+            eprintln!("[daemon] Removing stale PID file (PID {pid} is not running)");
+            remove_pid(root);
         }
-        eprintln!("[daemon] Removing stale PID file (PID {pid} is not running)");
-        remove_pid(root);
     }
 
     if !foreground {
