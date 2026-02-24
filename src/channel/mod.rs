@@ -41,6 +41,7 @@ pub struct OutboundMessage {
 ///
 /// Implementations run a background loop that produces `ChannelEvent`s
 /// and can send outbound messages.
+#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Channel: Send + Sync {
     /// Human-readable name for logging.

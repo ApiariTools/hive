@@ -1332,4 +1332,153 @@ mod tests {
             "waiting_at_init must remain empty after being drained"
         );
     }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn test_waiting_to_running_to_waiting_fires_twice() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Start with a running agent.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // First transition: active → waiting.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Need input 1"}]}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(waiting.len(), 1, "first waiting transition should fire");
+
+        // Back to active (user sent input).
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
+        );
+        let notes = watcher.poll();
+        assert!(
+            notes
+                .iter()
+                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
+            "should not emit when transitioning away from waiting"
+        );
+
+        // Second transition: active → waiting again.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Need input 2"}]}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "second waiting transition should also fire"
+        );
+    }
+
+    #[test]
+    fn test_pr_already_set_at_init_no_pr_opened() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Worker has pr_url from the start.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/example/pull/1"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize — pr_url is recorded in known state.
+
+        // Same state on next poll — pr_url was already Some, no None→Some transition.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/example/pull/1"}]}"#,
+        );
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(
+            pr_notes.is_empty(),
+            "should NOT emit PrOpened when pr_url was already set at initialization"
+        );
+    }
+
+    #[test]
+    fn test_multiple_workers_appear_simultaneously() {
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize with no worktrees.
+
+        // Two new workers appear in the same poll cycle.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[
+                {"id":"1","branch":"swarm/task-a","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","summary":"Task A"},
+                {"id":"2","branch":"swarm/task-b","agent":{"pane_id":"%2"},"created_at":"2026-02-22T10:01:00-08:00","summary":"Task B"}
+            ]}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert_eq!(
+            spawned.len(),
+            2,
+            "should emit AgentSpawned for both new workers"
+        );
+
+        // Verify both worktree IDs are represented.
+        let ids: Vec<&str> = spawned.iter().map(|n| n.worktree_id()).collect();
+        assert!(ids.contains(&"1"), "should have worktree 1");
+        assert!(ids.contains(&"2"), "should have worktree 2");
+    }
+
+    #[test]
+    fn test_state_file_disappears_no_panic() {
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00"}]}"#,
+        );
+
+        let path = file.path().to_path_buf();
+        let mut watcher = SwarmWatcher::new(path.clone());
+        watcher.poll(); // Initialize with one worktree.
+        assert_eq!(watcher.known.len(), 1);
+
+        // Delete the state file.
+        std::fs::remove_file(&path).unwrap();
+
+        // Should not panic, returns empty vec (load_state returns None).
+        let notes = watcher.poll();
+        assert!(
+            notes.is_empty(),
+            "should return empty notifications when state file disappears"
+        );
+
+        // Known state is preserved (stale) since poll short-circuited.
+        assert_eq!(
+            watcher.known.len(),
+            1,
+            "known state should be unchanged when file is missing"
+        );
+    }
 }
