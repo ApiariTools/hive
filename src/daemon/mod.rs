@@ -89,16 +89,11 @@ pub async fn start(cwd: &Path, foreground: bool) -> Result<()> {
 
     // Check for stale PID file.
     if let Some(pid) = read_pid(root) {
-        let our_pid = std::process::id();
-        if pid == our_pid {
-            // exec() restart — PID file is ours from the previous incarnation.
-            eprintln!("[daemon] Resuming after exec restart (PID {pid})");
-        } else if is_process_alive(pid) {
+        if is_process_alive(pid) {
             color_eyre::eyre::bail!("daemon already running (PID {pid})");
-        } else {
-            eprintln!("[daemon] Removing stale PID file (PID {pid} is not running)");
-            remove_pid(root);
         }
+        eprintln!("[daemon] Removing stale PID file (PID {pid} is not running)");
+        remove_pid(root);
     }
 
     if !foreground {
@@ -131,31 +126,15 @@ pub async fn start(cwd: &Path, foreground: bool) -> Result<()> {
     let mut runner = DaemonRunner::new(root.to_path_buf(), config)?;
     let restart = runner.run().await?;
 
-    if restart {
-        // Restart: exec a fresh binary in-place (same PID, same fds).
-        // Intentionally do NOT remove the PID file — the new process inherits it.
-        eprintln!("[daemon] Execing new binary...");
-        let exe = std::env::current_exe().wrap_err("failed to find hive executable")?;
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.args(["daemon", "start", "--foreground", "-C"]);
-        cmd.arg(root);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // exec() never returns on success — it replaces this process.
-            let err = cmd.exec();
-            color_eyre::eyre::bail!("exec() failed: {err}");
-        }
-        #[cfg(not(unix))]
-        {
-            color_eyre::eyre::bail!("restart is only supported on Unix");
-        }
-    }
-
-    // Normal shutdown — clean up PID file.
+    // Clean up PID file before exit or restart.
     remove_pid(root);
     eprintln!("[daemon] PID file removed");
+
+    if restart {
+        // Spawn a new daemon process (new PID, fresh logs).
+        eprintln!("[daemon] Spawning new daemon process...");
+        spawn_background(root, root)?;
+    }
 
     Ok(())
 }
