@@ -1318,7 +1318,8 @@ impl DaemonRunner {
             }
         }
 
-        // Phase 4: Auto-triage eligible notifications (PrOpened, AgentWaiting).
+        // Phase 4: Auto-triage eligible notifications — spawned in background
+        // so coordinator calls never block the poll loop.
         if self
             .config
             .swarm_watch
@@ -1326,10 +1327,83 @@ impl DaemonRunner {
             .is_some_and(|sw| sw.auto_triage)
         {
             for (chat_id, notification) in &routed {
-                if auto_triage_prompt(notification).is_some() {
-                    if let Err(e) = self.auto_triage_notification(notification, *chat_id).await {
-                        eprintln!("[daemon] Auto-triage error: {e}");
-                    }
+                if let Some(prompt) = auto_triage_prompt(notification) {
+                    let chat_id = *chat_id;
+                    let channel = self.channel.clone();
+                    let coordinator_prompt = self.coordinator_prompt.clone();
+                    let model = self.config.model.clone();
+                    let workspace_root = self.workspace_root.clone();
+                    let worktree_id = notification.worktree_id().to_owned();
+                    let notification_kind = match notification {
+                        swarm_watcher::SwarmNotification::PrOpened { .. } => "PrOpened",
+                        swarm_watcher::SwarmNotification::AgentWaiting { .. } => "AgentWaiting",
+                        _ => "notification",
+                    };
+                    tokio::spawn(async move {
+                        eprintln!(
+                            "[daemon] Auto-triaging {notification_kind} for {worktree_id}"
+                        );
+
+                        let system_prompt = format!(
+                            "{coordinator_prompt}\n\n## Auto-Triage Mode\n\
+                             Reply in 1-2 sentences with a specific suggested action. Be direct.",
+                        );
+
+                        let opts = SessionOptions {
+                            system_prompt: Some(system_prompt),
+                            model: Some(model),
+                            max_turns: Some(1),
+                            no_session_persistence: true,
+                            working_dir: Some(workspace_root),
+                            allowed_tools: vec![
+                                "Bash".into(),
+                                "Read".into(),
+                                "Glob".into(),
+                                "Grep".into(),
+                            ],
+                            ..Default::default()
+                        };
+
+                        let client = ClaudeClient::new();
+                        let session = match client.spawn(opts).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("[daemon] Failed to spawn auto-triage session: {e}");
+                                return;
+                            }
+                        };
+
+                        let response = match run_ephemeral_session(session, &prompt).await {
+                            Ok(text) if !text.is_empty() => text,
+                            Ok(_) => {
+                                eprintln!("[daemon] Auto-triage session produced no output");
+                                return;
+                            }
+                            Err(e) => {
+                                eprintln!("[daemon] Auto-triage session error: {e}");
+                                return;
+                            }
+                        };
+
+                        eprintln!(
+                            "[daemon] Auto-triage suggestion ({} chars): {}",
+                            response.len(),
+                            truncate(&response, 80)
+                        );
+
+                        let text = markdown::sanitize_for_telegram(&format!("💡 {response}"));
+                        for chunk in split_message(&text, 4000) {
+                            if let Err(e) = channel
+                                .send_message(&OutboundMessage {
+                                    chat_id,
+                                    text: chunk,
+                                })
+                                .await
+                            {
+                                eprintln!("[daemon] Failed to send auto-triage result: {e}");
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -1339,79 +1413,6 @@ impl DaemonRunner {
             eprintln!("[daemon] Failed to save origin map: {e}");
         }
 
-        Ok(())
-    }
-
-    /// Run auto-triage for a swarm notification: invoke the coordinator with a
-    /// short prompt and send the suggestion to the target chat.
-    async fn auto_triage_notification(
-        &self,
-        notification: &swarm_watcher::SwarmNotification,
-        chat_id: i64,
-    ) -> Result<()> {
-        let prompt = match auto_triage_prompt(notification) {
-            Some(p) => p,
-            None => return Ok(()),
-        };
-
-        eprintln!(
-            "[daemon] Auto-triaging {} for {}",
-            match notification {
-                swarm_watcher::SwarmNotification::PrOpened { .. } => "PrOpened",
-                swarm_watcher::SwarmNotification::AgentWaiting { .. } => "AgentWaiting",
-                _ => "notification",
-            },
-            notification.worktree_id()
-        );
-
-        let system_prompt = format!(
-            "{}\n\n## Auto-Triage Mode\n\
-             Reply in 1-2 sentences with a specific suggested action. Be direct.",
-            self.coordinator_prompt
-        );
-
-        let opts = SessionOptions {
-            system_prompt: Some(system_prompt),
-            model: Some(self.config.model.clone()),
-            max_turns: Some(1),
-            no_session_persistence: true,
-            working_dir: Some(self.workspace_root.clone()),
-            allowed_tools: vec![
-                "Bash".into(),
-                "Read".into(),
-                "Glob".into(),
-                "Grep".into(),
-            ],
-            ..Default::default()
-        };
-
-        let client = ClaudeClient::new();
-        let session = match client.spawn(opts).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[daemon] Failed to spawn auto-triage session: {e}");
-                return Ok(());
-            }
-        };
-
-        let response = match self.run_ephemeral_session(session, &prompt).await {
-            Ok(text) if !text.is_empty() => text,
-            Ok(_) => {
-                eprintln!("[daemon] Auto-triage session produced no output");
-                return Ok(());
-            }
-            Err(e) => {
-                eprintln!("[daemon] Auto-triage session error: {e}");
-                return Ok(());
-            }
-        };
-
-        eprintln!(
-            "[daemon] Auto-triage suggestion ({} chars): {}",
-            response.len(),
-            truncate(&response, 80)
-        );
-        self.send(chat_id, &format!("💡 {response}")).await?;
         Ok(())
     }
 
@@ -1454,7 +1455,7 @@ impl DaemonRunner {
             }
         };
 
-        match self.run_ephemeral_session(session, &prompt).await {
+        match run_ephemeral_session(session, &prompt).await {
             Ok(text) if !text.is_empty() => text,
             Ok(_) => "[Triage session produced no output]".to_owned(),
             Err(e) => {
@@ -1462,52 +1463,6 @@ impl DaemonRunner {
                 "[Triage session produced no output]".to_owned()
             }
         }
-    }
-
-    /// Run an ephemeral Claude session: send one message, collect response, return.
-    async fn run_ephemeral_session(
-        &self,
-        mut session: apiari_claude_sdk::Session,
-        prompt: &str,
-    ) -> Result<String> {
-        // Send message immediately — don't wait for system event (same deadlock issue).
-        session
-            .send_message(prompt)
-            .await
-            .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
-        session.close_stdin();
-
-        let mut text = String::new();
-        loop {
-            let event = session
-                .next_event()
-                .await
-                .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
-            match event {
-                Some(Event::Assistant { message, .. }) => {
-                    for block in &message.message.content {
-                        if let ContentBlock::Text { text: t } = block {
-                            text.push_str(t);
-                        }
-                    }
-                    if message.message.stop_reason.as_deref() == Some("end_turn") {
-                        break;
-                    }
-                }
-                Some(Event::Result(r)) => {
-                    if let Some(result_text) = &r.result
-                        && text.is_empty()
-                    {
-                        text = result_text.clone();
-                    }
-                    break;
-                }
-                Some(_) => {}
-                None => break,
-            }
-        }
-
-        Ok(text)
     }
 
     /// Send a message through the Telegram channel, splitting if too long.
@@ -1523,6 +1478,51 @@ impl DaemonRunner {
         }
         Ok(())
     }
+}
+
+/// Run an ephemeral Claude session: send one message, collect response, return.
+async fn run_ephemeral_session(
+    mut session: apiari_claude_sdk::Session,
+    prompt: &str,
+) -> Result<String> {
+    // Send message immediately — don't wait for system event (same deadlock issue).
+    session
+        .send_message(prompt)
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+    session.close_stdin();
+
+    let mut text = String::new();
+    loop {
+        let event = session
+            .next_event()
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("{e}"))?;
+        match event {
+            Some(Event::Assistant { message, .. }) => {
+                for block in &message.message.content {
+                    if let ContentBlock::Text { text: t } = block {
+                        text.push_str(t);
+                    }
+                }
+                if message.message.stop_reason.as_deref() == Some("end_turn") {
+                    break;
+                }
+            }
+            Some(Event::Result(r)) => {
+                if let Some(result_text) = &r.result
+                    && text.is_empty()
+                {
+                    text = result_text.clone();
+                }
+                break;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+
+    Ok(text)
 }
 
 /// Build an auto-triage prompt for a swarm notification, if applicable.
