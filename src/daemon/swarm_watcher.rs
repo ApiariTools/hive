@@ -279,11 +279,25 @@ struct WorktreeState {
     #[serde(default)]
     agent_kind: Option<String>,
     #[serde(default)]
-    pr_url: Option<String>,
-    #[serde(default)]
-    pr_title: Option<String>,
+    pr: Option<WtPrInfo>,
     #[serde(default)]
     agent_session_status: Option<String>,
+}
+
+impl WorktreeState {
+    fn pr_url(&self) -> Option<String> {
+        self.pr.as_ref().map(|p| p.url.clone())
+    }
+    fn pr_title(&self) -> Option<String> {
+        self.pr.as_ref().and_then(|p| p.title.clone())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WtPrInfo {
+    url: String,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,7 +374,7 @@ impl SwarmWatcher {
                         created_at: wt.created_at,
                         stall_notified: false,
                         agent_kind: wt.agent_kind.clone(),
-                        pr_url: wt.pr_url.clone(),
+                        pr_url: wt.pr_url(),
                         agent_session_status: wt.agent_session_status.clone(),
                     },
                 );
@@ -377,7 +391,7 @@ impl SwarmWatcher {
             if let Some(dir) = &self.hive_dir {
                 self.pr_notified = Self::load_pr_notified(&dir.join("pr_notified.json"));
                 for wt in &state.worktrees {
-                    if let Some(url) = &wt.pr_url {
+                    if let Some(url) = &wt.pr_url() {
                         if !self.pr_notified.contains(url) {
                             self.prs_at_init.insert(wt.id.clone());
                         }
@@ -409,19 +423,19 @@ impl SwarmWatcher {
                         worktree_id: id.clone(),
                         branch: wt.branch.clone(),
                         duration,
-                        pr_url: wt.pr_url.clone(),
+                        pr_url: wt.pr_url(),
                     });
                 }
 
                 // Check if a PR was opened (pr_url transitioned from None to Some).
-                if prev.pr_url.is_none() && wt.pr_url.is_some() {
+                if prev.pr_url.is_none() && wt.pr_url().is_some() {
                     let duration = format_duration(prev.created_at);
-                    let url = wt.pr_url.clone().unwrap();
+                    let url = wt.pr_url().unwrap();
                     notifications.push(SwarmNotification::PrOpened {
                         worktree_id: id.clone(),
                         branch: wt.branch.clone(),
                         pr_url: url.clone(),
-                        pr_title: wt.pr_title.clone(),
+                        pr_title: wt.pr_title(),
                         duration,
                     });
                     self.pr_notified.insert(url);
@@ -436,7 +450,7 @@ impl SwarmWatcher {
                         worktree_id: id.clone(),
                         branch: wt.branch.clone(),
                         summary: wt.summary.clone(),
-                        pr_url: wt.pr_url.clone(),
+                        pr_url: wt.pr_url(),
                     });
                 }
             } else {
@@ -473,7 +487,7 @@ impl SwarmWatcher {
                     created_at: wt.created_at,
                     stall_notified: false,
                     agent_kind: wt.agent_kind.clone(),
-                    pr_url: wt.pr_url.clone(),
+                    pr_url: wt.pr_url(),
                     agent_session_status: wt.agent_session_status.clone(),
                 },
             );
@@ -492,7 +506,7 @@ impl SwarmWatcher {
             for id in init_ids {
                 if let Some(wt) = current.get(&id) {
                     if wt.agent_session_status.as_deref() == Some("waiting")
-                        && wt.pr_url.is_none()
+                        && wt.pr_url().is_none()
                     {
                         notifications.push(SwarmNotification::AgentWaiting {
                             worktree_id: id,
@@ -511,12 +525,12 @@ impl SwarmWatcher {
             let init_ids: HashSet<String> = self.prs_at_init.drain().collect();
             for id in init_ids {
                 if let Some(wt) = current.get(&id) {
-                    if let Some(pr_url) = &wt.pr_url {
+                    if let Some(pr_url) = &wt.pr_url() {
                         notifications.push(SwarmNotification::PrOpened {
                             worktree_id: id,
                             branch: wt.branch.clone(),
                             pr_url: pr_url.clone(),
-                            pr_title: wt.pr_title.clone(),
+                            pr_title: wt.pr_title(),
                             duration: format_duration(wt.created_at),
                         });
                         self.pr_notified.insert(pr_url.clone());
@@ -893,7 +907,7 @@ mod tests {
         // PR appears while agent is still running.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/add-auth","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","pr_url":"https://github.com/ApiariTools/hive/pull/42","pr_title":"Add OAuth support"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/add-auth","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","pr":{"url":"https://github.com/ApiariTools/hive/pull/42","title":"Add OAuth support"}}]}"#,
         );
 
         let notes = watcher.poll();
@@ -931,7 +945,7 @@ mod tests {
         // Initial state: agent running with a PR already set.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/42"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/42"}}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -940,7 +954,7 @@ mod tests {
         // Same PR URL on next poll — should NOT emit PrOpened again.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/42"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/42"}}]}"#,
         );
 
         let notes = watcher.poll();
@@ -960,7 +974,7 @@ mod tests {
         // Initial state: agent running with a PR already set.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/42"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/42"}}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -969,7 +983,7 @@ mod tests {
         // PR URL changed — should NOT emit PrOpened (only None→Some triggers).
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/99"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/99"}}]}"#,
         );
 
         let notes = watcher.poll();
@@ -1173,7 +1187,7 @@ mod tests {
         // Agent transitions to waiting AND has a PR.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing","agent_session_status":"waiting","pr_url":"https://github.com/ApiariTools/hive/pull/77"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing","agent_session_status":"waiting","pr":{"url":"https://github.com/ApiariTools/hive/pull/77"}}]}"#,
         );
 
         let notes = watcher.poll();
@@ -1319,7 +1333,7 @@ mod tests {
         // Worker already waiting AND already has a PR.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/done-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","pr_url":"https://github.com/ApiariTools/hive/pull/99"}]}"#,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/done-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","pr":{"url":"https://github.com/ApiariTools/hive/pull/99"}}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -1514,7 +1528,7 @@ mod tests {
         // Worker has pr_url from the start.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/example/pull/1"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/example/pull/1"}}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -1523,7 +1537,7 @@ mod tests {
         // Same state on next poll — pr_url was already Some, no None→Some transition.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/example/pull/1"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/example/pull/1"}}]}"#,
         );
         let notes = watcher.poll();
         let pr_notes: Vec<_> = notes
@@ -1611,7 +1625,7 @@ mod tests {
         // Worker has pr_url from the start — no pr_notified.json exists.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/1","pr_title":"Add feature"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/1","title":"Add feature"}}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -1658,7 +1672,7 @@ mod tests {
         // Worker has the same pr_url.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/1"}]}"#,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/1"}}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -1694,7 +1708,7 @@ mod tests {
         write_state(
             &mut file,
             r#"{"worktrees":[
-                {"id":"1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/1"},
+                {"id":"1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/1"}},
                 {"id":"2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-22T11:00:00-08:00"}
             ]}"#,
         );
@@ -1715,8 +1729,8 @@ mod tests {
         write_state(
             &mut file,
             r#"{"worktrees":[
-                {"id":"1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/1"},
-                {"id":"2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-22T11:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/42","pr_title":"New feature"}
+                {"id":"1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/1"}},
+                {"id":"2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-22T11:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/42","title":"New feature"}}
             ]}"#,
         );
 
