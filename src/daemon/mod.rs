@@ -31,7 +31,7 @@ use color_eyre::eyre::{Result, WrapErr};
 use config::DaemonConfig;
 use origin_map::{OriginEntry, OriginMap, route_notification};
 use session_store::SessionStore;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -228,6 +228,65 @@ struct PendingOrigin {
     created_at: std::time::Instant,
 }
 
+/// Max number of button label mappings to keep in memory.
+const BUTTON_LABEL_CACHE_MAX: usize = 500;
+
+/// Extract a trailing ` ```buttons ... ``` ` fenced code block from coordinator text.
+///
+/// Returns the cleaned text (with the buttons block stripped) and parsed button rows.
+/// Each row is a `Vec<InlineButton>`. If no buttons block is found or JSON is invalid,
+/// returns the original text and empty buttons.
+fn extract_buttons(text: &str) -> (String, Vec<Vec<crate::channel::InlineButton>>) {
+    // Look for the last occurrence of ```buttons ... ```
+    let Some(block_start) = text.rfind("```buttons") else {
+        return (text.to_owned(), vec![]);
+    };
+
+    let after_fence = block_start + "```buttons".len();
+    // Find the closing ``` after the opening fence
+    let Some(relative_end) = text[after_fence..].find("```") else {
+        return (text.to_owned(), vec![]);
+    };
+    let block_end = after_fence + relative_end + 3; // include closing ```
+
+    let json_str = text[after_fence..after_fence + relative_end].trim();
+
+    // Parse as JSON array of [label, callback_data] pairs.
+    // Supports both flat array (single row) and nested array (multiple rows).
+    let parsed: Vec<Vec<crate::channel::InlineButton>> =
+        match serde_json::from_str::<Vec<Vec<String>>>(json_str) {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| {
+                    row.chunks(2)
+                        .filter_map(|pair| {
+                            if pair.len() == 2 {
+                                Some(crate::channel::InlineButton {
+                                    text: pair[0].clone(),
+                                    callback_data: pair[1].clone(),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .filter(|row: &Vec<crate::channel::InlineButton>| !row.is_empty())
+                .collect(),
+            Err(_) => return (text.to_owned(), vec![]),
+        };
+
+    if parsed.is_empty() {
+        return (text.to_owned(), vec![]);
+    }
+
+    // Strip the buttons block from the text.
+    let cleaned = format!("{}{}", text[..block_start].trim_end(), &text[block_end..]);
+    let cleaned = cleaned.trim().to_owned();
+
+    (cleaned, parsed)
+}
+
 /// Main daemon event loop.
 struct DaemonRunner {
     workspace_root: std::path::PathBuf,
@@ -254,6 +313,11 @@ struct DaemonRunner {
     cancel: Option<CancellationToken>,
     /// Set by `/restart` handler before cancelling the loop.
     restart_requested: Arc<AtomicBool>,
+    /// Maps callback_data → button label for resolving tapped buttons.
+    /// Bounded to BUTTON_LABEL_CACHE_MAX entries (FIFO eviction).
+    button_labels: HashMap<String, String>,
+    /// Insertion-order tracking for FIFO eviction of button_labels.
+    button_labels_order: VecDeque<String>,
 }
 
 impl DaemonRunner {
@@ -293,6 +357,23 @@ impl DaemonRunner {
         );
         coordinator_prompt.push_str("Dispatch coding work to swarm agents via `swarm create`.\n");
         coordinator_prompt.push_str("Only use Bash for: swarm commands, git status/log, cargo check, and other read-only operations.\n");
+        coordinator_prompt.push_str("\n## Interactive Buttons\n\n");
+        coordinator_prompt.push_str("You can attach inline keyboard buttons to any response by ending your message with a buttons block:\n\n");
+        coordinator_prompt.push_str("```buttons\n[[\"Button label\", \"callback:data\"], [\"Another\", \"other:data\"]]\n```\n\n");
+        coordinator_prompt.push_str(
+            "Each inner array is [label, callback_data]. Multiple inner arrays = multiple rows.\n",
+        );
+        coordinator_prompt.push_str(
+            "When the user taps a button, you will receive: \"User tapped: <label>\"\n\n",
+        );
+        coordinator_prompt
+            .push_str("Built-in actions (handled automatically, no response needed from you):\n");
+        coordinator_prompt.push_str("- merge_pr:<worktree_id> — merges the PR for that worker\n");
+        coordinator_prompt.push_str("- close_worker:<worktree_id> — closes that swarm worker\n\n");
+        coordinator_prompt.push_str(
+            "Use buttons to offer clear choices instead of asking open-ended questions.\n",
+        );
+        coordinator_prompt.push_str("Example: instead of \"Should I merge?\" write \"Should I merge?\" with [Yes] [No] buttons.\n");
 
         // Conditionally init inline buzz watchers.
         let (inline_watchers, inline_reminders, buzz_output) =
@@ -389,6 +470,8 @@ impl DaemonRunner {
             reminder_store,
             cancel: None,
             restart_requested: Arc::new(AtomicBool::new(false)),
+            button_labels: HashMap::new(),
+            button_labels_order: VecDeque::new(),
         })
     }
 
@@ -590,8 +673,16 @@ impl DaemonRunner {
         } else if let Some(worktree_id) = data.strip_prefix("close_worker:") {
             self.handle_close_worker(chat_id, worktree_id).await
         } else {
-            eprintln!("[daemon] Unknown callback data: {data}");
-            self.send(chat_id, "Unknown action.").await
+            // Route unknown callback back to coordinator as a message.
+            let label = self
+                .button_labels
+                .get(data)
+                .cloned()
+                .unwrap_or_else(|| data.to_owned());
+            let synthetic_message = format!("User tapped: \"{label}\"");
+            eprintln!("[daemon] Routing callback to coordinator: {synthetic_message}");
+            self.handle_message(chat_id, 0, "button_tap", &synthetic_message)
+                .await
         }
     }
 
@@ -972,15 +1063,28 @@ impl DaemonRunner {
         // Stop typing indicator before sending the final response.
         typing_cancel.cancel();
 
+        // Parse and strip any trailing buttons block from the response.
+        let (clean_response, buttons) = extract_buttons(&response);
+
+        // Cache button labels for callback resolution.
+        if !buttons.is_empty() {
+            self.cache_button_labels(&buttons);
+        }
+
         // Only send the final response if there's text (may be empty if all
         // content was already streamed as intermediate messages).
-        if !response.is_empty() {
+        if !clean_response.is_empty() {
             eprintln!(
                 "[daemon] Responding ({} chars): {}",
-                response.len(),
-                truncate(&response, 80)
+                clean_response.len(),
+                truncate(&clean_response, 80)
             );
-            self.send(chat_id, &response).await?;
+            if buttons.is_empty() {
+                self.send(chat_id, &clean_response).await?;
+            } else {
+                self.send_with_buttons(chat_id, &clean_response, buttons)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -1650,6 +1754,26 @@ impl DaemonRunner {
             Err(e) => {
                 eprintln!("[daemon] Triage session error: {e}");
                 "[Triage session produced no output]".to_owned()
+            }
+        }
+    }
+
+    /// Cache button labels for later lookup when callbacks arrive.
+    fn cache_button_labels(&mut self, buttons: &[Vec<crate::channel::InlineButton>]) {
+        for row in buttons {
+            for btn in row {
+                // Evict oldest entries if at capacity.
+                while self.button_labels.len() >= BUTTON_LABEL_CACHE_MAX {
+                    if let Some(old_key) = self.button_labels_order.pop_front() {
+                        self.button_labels.remove(&old_key);
+                    } else {
+                        break;
+                    }
+                }
+                self.button_labels
+                    .insert(btn.callback_data.clone(), btn.text.clone());
+                self.button_labels_order
+                    .push_back(btn.callback_data.clone());
             }
         }
     }
@@ -2447,5 +2571,65 @@ mod tests {
         assert!(prompt.contains(details));
         assert!(prompt.contains("Based on the above"));
         assert!(prompt.contains("ready to merge"));
+    }
+
+    // --- extract_buttons tests ---
+
+    #[test]
+    fn test_extract_buttons_valid_block() {
+        // Each [label, data] pair is one row with one button.
+        let input = "Want me to merge this PR?\n\n```buttons\n[[\"✅ Yes, merge\", \"confirm:merge:hive-1\"], [\"❌ No thanks\", \"confirm:no\"]]\n```";
+        let (text, buttons) = extract_buttons(input);
+        assert_eq!(text, "Want me to merge this PR?");
+        assert_eq!(buttons.len(), 2); // two rows, one button each
+        assert_eq!(buttons[0][0].text, "✅ Yes, merge");
+        assert_eq!(buttons[0][0].callback_data, "confirm:merge:hive-1");
+        assert_eq!(buttons[1][0].text, "❌ No thanks");
+        assert_eq!(buttons[1][0].callback_data, "confirm:no");
+    }
+
+    #[test]
+    fn test_extract_buttons_multiple_rows() {
+        // Each inner array [label, data] is one row with one button.
+        // Three inner arrays = three rows.
+        let input = "Choose:\n\n```buttons\n[[\"A\", \"a\"], [\"B\", \"b\"], [\"C\", \"c\"]]\n```";
+        let (text, buttons) = extract_buttons(input);
+        assert_eq!(text, "Choose:");
+        assert_eq!(buttons.len(), 3); // three rows
+        assert_eq!(buttons[0][0].text, "A");
+        assert_eq!(buttons[1][0].text, "B");
+        assert_eq!(buttons[2][0].text, "C");
+    }
+
+    #[test]
+    fn test_extract_buttons_no_block() {
+        let input = "Just a regular message with no buttons.";
+        let (text, buttons) = extract_buttons(input);
+        assert_eq!(text, input);
+        assert!(buttons.is_empty());
+    }
+
+    #[test]
+    fn test_extract_buttons_malformed_json() {
+        let input = "Some text\n\n```buttons\nnot valid json\n```";
+        let (text, buttons) = extract_buttons(input);
+        assert_eq!(text, input);
+        assert!(buttons.is_empty());
+    }
+
+    #[test]
+    fn test_extract_buttons_unclosed_fence() {
+        let input = "Some text\n\n```buttons\n[[\"A\", \"a\"]]";
+        let (text, buttons) = extract_buttons(input);
+        assert_eq!(text, input);
+        assert!(buttons.is_empty());
+    }
+
+    #[test]
+    fn test_extract_buttons_empty_array() {
+        let input = "Some text\n\n```buttons\n[]\n```";
+        let (text, buttons) = extract_buttons(input);
+        assert_eq!(text, input);
+        assert!(buttons.is_empty());
     }
 }
