@@ -1345,8 +1345,14 @@ impl DaemonRunner {
                         );
 
                         let system_prompt = format!(
-                            "{coordinator_prompt}\n\n## Auto-Triage Mode\n\
-                             Reply in 1-2 sentences with a specific suggested action. Be direct.",
+                            "{coordinator_prompt}\n\n\
+                             ## Auto-Triage Mode\n\
+                             You are doing an automated background check triggered by a swarm event.\n\
+                             Use your tools to inspect the situation (check PR status with `gh pr view`, read relevant files, etc).\n\
+                             Then respond in this exact format:\n\
+                             1. One sentence stating what you found (e.g. \"PR #27 has 88 additions, all tests passing, clean diff fixing X\")\n\
+                             2. One clear yes/no question (e.g. \"Want me to merge and close the worker?\")\n\
+                             Do NOT say \"I will\" or \"let me\" — you are writing a summary, not starting a task.",
                         );
 
                         let opts = SessionOptions {
@@ -1391,7 +1397,17 @@ impl DaemonRunner {
                             truncate(&response, 80)
                         );
 
-                        let text = markdown::sanitize_for_telegram(&format!("💡 {response}"));
+                        let header = match notification_kind {
+                            "PrOpened" => {
+                                format!("🤖 *Auto\\-triage* — `{worktree_id}` opened a PR")
+                            }
+                            "AgentWaiting" => {
+                                format!("🤖 *Auto\\-triage* — `{worktree_id}` is waiting")
+                            }
+                            _ => format!("🤖 *Auto\\-triage* — `{worktree_id}`"),
+                        };
+                        let body = markdown::sanitize_for_telegram(&response);
+                        let text = format!("{header}\n\n{body}");
                         for chunk in split_message(&text, 4000) {
                             if let Err(e) = channel
                                 .send_message(&OutboundMessage {
@@ -1539,8 +1555,9 @@ fn auto_triage_prompt(notification: &swarm_watcher::SwarmNotification) -> Option
         } => {
             let title = pr_title.as_deref().unwrap_or("untitled");
             Some(format!(
-                "Worker {worktree_id} opened PR: \"{title}\" ({pr_url}). \
-                 Should I review and merge it, or is there anything to check first?"
+                "Worker {worktree_id} opened PR: \"{title}\" ({pr_url}).\n\
+                 Check the PR (use `gh pr view {pr_url}`) and give a brief assessment: \
+                 is it ready to merge?"
             ))
         }
         swarm_watcher::SwarmNotification::AgentWaiting {
@@ -1549,12 +1566,13 @@ fn auto_triage_prompt(notification: &swarm_watcher::SwarmNotification) -> Option
             ..
         } => match pr_url {
             Some(url) => Some(format!(
-                "Worker {worktree_id} is waiting and has an open PR ({url}). \
-                 Want me to merge the PR and close the worker?"
+                "Worker {worktree_id} is waiting and has an open PR ({url}).\n\
+                 Check the PR status (use `gh pr view {url}`) and summarize: \
+                 is it ready to merge?"
             )),
             None => Some(format!(
-                "Worker {worktree_id} is waiting for input. \
-                 Want me to nudge it, or should I close it?"
+                "Worker {worktree_id} is waiting for input with no open PR.\n\
+                 Is this likely done (should be closed) or still in progress (needs a nudge)?"
             )),
         },
         _ => None,
@@ -1964,7 +1982,8 @@ mod tests {
         assert!(prompt.contains("hive-3"));
         assert!(prompt.contains("Add OAuth support"));
         assert!(prompt.contains("https://github.com/ApiariTools/hive/pull/22"));
-        assert!(prompt.contains("review and merge"));
+        assert!(prompt.contains("gh pr view"));
+        assert!(prompt.contains("ready to merge"));
     }
 
     #[test]
@@ -1991,7 +2010,8 @@ mod tests {
         let prompt = auto_triage_prompt(&n).unwrap();
         assert!(prompt.contains("hive-2"));
         assert!(prompt.contains("https://github.com/example/pull/5"));
-        assert!(prompt.contains("merge the PR"));
+        assert!(prompt.contains("gh pr view"));
+        assert!(prompt.contains("ready to merge"));
     }
 
     #[test]
@@ -2005,7 +2025,8 @@ mod tests {
         let prompt = auto_triage_prompt(&n).unwrap();
         assert!(prompt.contains("hive-4"));
         assert!(prompt.contains("waiting for input"));
-        assert!(prompt.contains("nudge"));
+        assert!(prompt.contains("should be closed"));
+        assert!(prompt.contains("needs a nudge"));
     }
 
     #[test]
