@@ -108,10 +108,10 @@ fn load_from_file(path: &Path, root: &Path) -> Result<Workspace> {
 
     // If .hive/soul.md exists, use it instead of the inline soul field.
     let soul_path = root.join(".hive/soul.md");
-    if let Ok(soul) = std::fs::read_to_string(&soul_path) {
-        if !soul.trim().is_empty() {
-            workspace.soul = Some(soul);
-        }
+    if let Ok(soul) = std::fs::read_to_string(&soul_path)
+        && !soul.trim().is_empty()
+    {
+        workspace.soul = Some(soul);
     }
 
     Ok(workspace)

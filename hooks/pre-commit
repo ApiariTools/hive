@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -e
+
+echo "[hook] Running cargo fmt check..."
+cargo fmt -p hive --check || {
+  echo "[hook] Formatting issues found. Run: cargo fmt -p hive"
+  exit 1
+}
+
+echo "[hook] Running cargo clippy..."
+cargo clippy -p hive -- -D warnings || {
+  echo "[hook] Clippy errors found."
+  exit 1
+}
+
+echo "[hook] All checks passed."
