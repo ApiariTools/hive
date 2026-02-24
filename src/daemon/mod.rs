@@ -653,19 +653,10 @@ impl DaemonRunner {
                 }
                 self.send(chat_id, &text).await
             }
-            "restart" => {
-                self.send(chat_id, "Restarting daemon...").await?;
-                self.restart_requested.store(true, Ordering::Relaxed);
-                if let Some(cancel) = &self.cancel {
-                    cancel.cancel();
-                }
-                Ok(())
-            }
             "remind" => self.handle_remind_command(chat_id, args).await,
             "reminders" => self.handle_reminders_command(chat_id, args).await,
             "help" => {
-                self.send(
-                    chat_id,
+                let mut text = String::from(
                     "Commands:\n\
                      /reset — Archive current session, start fresh\n\
                      /history — List previous sessions\n\
@@ -675,11 +666,21 @@ impl DaemonRunner {
                      /remind --cron \"expr\" <msg> — Cron reminder\n\
                      /reminders — List pending reminders\n\
                      /reminders cancel <id> — Cancel a reminder\n\
-                     /restart — Restart the daemon (picks up new binary)\n\
-                     /help — Show this message\n\n\
-                     Send any other message to chat with the coordinator.",
-                )
-                .await
+                     /help — Show this message",
+                );
+                // Append custom commands.
+                for (name, cmd) in &self.config.commands {
+                    let desc = cmd
+                        .description
+                        .as_deref()
+                        .unwrap_or(cmd.run.as_str());
+                    text.push_str(&format!("\n/{name} — {desc}"));
+                }
+                text.push_str("\n\nSend any other message to chat with the coordinator.");
+                self.send(chat_id, &text).await
+            }
+            _ if self.config.commands.contains_key(command) => {
+                self.run_custom_command(chat_id, command).await
             }
             _ => {
                 self.send(
@@ -689,6 +690,79 @@ impl DaemonRunner {
                 .await
             }
         }
+    }
+
+    /// Run a user-defined custom command from `[commands]` config.
+    async fn run_custom_command(&mut self, chat_id: i64, command: &str) -> Result<()> {
+        let cmd = self.config.commands.get(command).cloned().unwrap();
+        self.send(chat_id, &format!("Running /{command}...")).await?;
+
+        let output = tokio::process::Command::new("sh")
+            .args(["-c", &cmd.run])
+            .current_dir(&self.workspace_root)
+            .output()
+            .await;
+
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let mut reply = String::new();
+                if !stdout.is_empty() {
+                    reply.push_str(&stdout);
+                }
+                if !stderr.is_empty() {
+                    if !reply.is_empty() {
+                        reply.push('\n');
+                    }
+                    reply.push_str(&stderr);
+                }
+                if out.status.success() {
+                    let msg = if reply.is_empty() {
+                        format!("/{command} completed.")
+                    } else {
+                        // Truncate long output for Telegram.
+                        let truncated = if reply.len() > 3500 {
+                            format!("{}...\n(truncated)", &reply[..3500])
+                        } else {
+                            reply
+                        };
+                        format!("/{command} completed:\n```\n{truncated}\n```")
+                    };
+                    self.send(chat_id, &msg).await?;
+                } else {
+                    let code = out.status.code().unwrap_or(-1);
+                    let msg = if reply.is_empty() {
+                        format!("/{command} failed (exit {code}).")
+                    } else {
+                        let truncated = if reply.len() > 3500 {
+                            format!("{}...\n(truncated)", &reply[..3500])
+                        } else {
+                            reply
+                        };
+                        format!("/{command} failed (exit {code}):\n```\n{truncated}\n```")
+                    };
+                    self.send(chat_id, &msg).await?;
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                self.send(chat_id, &format!("/{command} error: {e}"))
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        // Handle post-action.
+        if cmd.then_action.as_deref() == Some("restart") {
+            self.send(chat_id, "Restarting daemon...").await?;
+            self.restart_requested.store(true, Ordering::Relaxed);
+            if let Some(cancel) = &self.cancel {
+                cancel.cancel();
+            }
+        }
+
+        Ok(())
     }
 
     /// Handle a regular text message — route to Claude session.

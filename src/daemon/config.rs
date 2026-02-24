@@ -1,6 +1,7 @@
 //! Daemon configuration loaded from `.hive/daemon.toml`.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level daemon configuration.
@@ -44,6 +45,26 @@ pub struct DaemonConfig {
     /// Swarm agent completion watcher (optional).
     #[serde(default)]
     pub swarm_watch: Option<SwarmWatchConfig>,
+
+    /// Custom slash commands. Each key is the command name (without `/`).
+    /// Example: `[commands.restart]` → `/restart` in Telegram.
+    #[serde(default)]
+    pub commands: HashMap<String, CustomCommand>,
+}
+
+/// A user-defined slash command.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomCommand {
+    /// Shell command to execute. Runs via `sh -c`. Working dir is workspace root.
+    pub run: String,
+
+    /// Optional description shown in `/help`.
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// Post-action after the command finishes. Currently supported: `"restart"`.
+    #[serde(default, rename = "then")]
+    pub then_action: Option<String>,
 }
 
 /// Telegram-specific configuration.
@@ -442,5 +463,48 @@ alert_chat_id = 42
         let config: DaemonConfig = toml::from_str(toml).unwrap();
         assert!(config.buzz.is_none());
         assert!(config.swarm_watch.is_none());
+    }
+
+    #[test]
+    fn test_custom_commands_default_empty() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert!(config.commands.is_empty());
+    }
+
+    #[test]
+    fn test_custom_commands_parsed() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[commands.restart]
+run = "./install.sh"
+description = "Pull, build, and restart"
+then = "restart"
+
+[commands.deploy]
+run = "./deploy.sh"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.commands.len(), 2);
+
+        let restart = &config.commands["restart"];
+        assert_eq!(restart.run, "./install.sh");
+        assert_eq!(
+            restart.description.as_deref(),
+            Some("Pull, build, and restart")
+        );
+        assert_eq!(restart.then_action.as_deref(), Some("restart"));
+
+        let deploy = &config.commands["deploy"];
+        assert_eq!(deploy.run, "./deploy.sh");
+        assert!(deploy.description.is_none());
+        assert!(deploy.then_action.is_none());
     }
 }
