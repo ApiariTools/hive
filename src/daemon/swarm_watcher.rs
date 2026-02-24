@@ -93,7 +93,9 @@ impl SwarmNotification {
                     .as_deref()
                     .map(|url| format!("\nPR: {url}"))
                     .unwrap_or_default();
-                format!("🐝 *Agent completed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}")
+                format!(
+                    "🐝 *Agent completed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}"
+                )
             }
             Self::AgentClosed {
                 branch,
@@ -106,7 +108,9 @@ impl SwarmNotification {
                     .as_deref()
                     .map(|url| format!("\nPR: {url}"))
                     .unwrap_or_default();
-                format!("🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}")
+                format!(
+                    "🐝 *Agent closed* — {short}\nBranch: `{branch}`\nDuration: {duration}{pr_line}"
+                )
             }
             Self::PrOpened {
                 branch,
@@ -120,9 +124,7 @@ impl SwarmNotification {
                     .as_deref()
                     .map(|t| format!("\n{t}"))
                     .unwrap_or_default();
-                format!(
-                    "🔗 *PR opened* — {short}{title_line}\n{pr_url}\nDuration: {duration}"
-                )
+                format!("🔗 *PR opened* — {short}{title_line}\n{pr_url}\nDuration: {duration}")
             }
             Self::AgentStalled {
                 branch, stall_kind, ..
@@ -170,9 +172,7 @@ impl SwarmNotification {
                     None => format!("New agent spawned — {short}"),
                 }
             }
-            Self::AgentCompleted {
-                branch, pr_url, ..
-            } => {
+            Self::AgentCompleted { branch, pr_url, .. } => {
                 let short = short_branch(branch);
                 match pr_url {
                     Some(url) => format!("Agent completed — {short} (PR: {url})"),
@@ -183,9 +183,7 @@ impl SwarmNotification {
                 let short = short_branch(branch);
                 format!("Agent closed — {short}")
             }
-            Self::PrOpened {
-                branch, pr_url, ..
-            } => {
+            Self::PrOpened { branch, pr_url, .. } => {
                 let short = short_branch(branch);
                 format!("PR opened — {short} ({pr_url})")
             }
@@ -391,10 +389,10 @@ impl SwarmWatcher {
             if let Some(dir) = &self.hive_dir {
                 self.pr_notified = Self::load_pr_notified(&dir.join("pr_notified.json"));
                 for wt in &state.worktrees {
-                    if let Some(url) = &wt.pr_url() {
-                        if !self.pr_notified.contains(url) {
-                            self.prs_at_init.insert(wt.id.clone());
-                        }
+                    if let Some(url) = &wt.pr_url()
+                        && !self.pr_notified.contains(url)
+                    {
+                        self.prs_at_init.insert(wt.id.clone());
                     }
                 }
             }
@@ -504,17 +502,16 @@ impl SwarmWatcher {
         if !self.waiting_at_init.is_empty() {
             let init_ids: HashSet<String> = self.waiting_at_init.drain().collect();
             for id in init_ids {
-                if let Some(wt) = current.get(&id) {
-                    if wt.agent_session_status.as_deref() == Some("waiting")
-                        && wt.pr_url().is_none()
-                    {
-                        notifications.push(SwarmNotification::AgentWaiting {
-                            worktree_id: id,
-                            branch: wt.branch.clone(),
-                            summary: wt.summary.clone(),
-                            pr_url: None,
-                        });
-                    }
+                if let Some(wt) = current.get(&id)
+                    && wt.agent_session_status.as_deref() == Some("waiting")
+                    && wt.pr_url().is_none()
+                {
+                    notifications.push(SwarmNotification::AgentWaiting {
+                        worktree_id: id,
+                        branch: wt.branch.clone(),
+                        summary: wt.summary.clone(),
+                        pr_url: None,
+                    });
                 }
             }
         }
@@ -524,18 +521,18 @@ impl SwarmWatcher {
         if !self.prs_at_init.is_empty() {
             let init_ids: HashSet<String> = self.prs_at_init.drain().collect();
             for id in init_ids {
-                if let Some(wt) = current.get(&id) {
-                    if let Some(pr_url) = &wt.pr_url() {
-                        notifications.push(SwarmNotification::PrOpened {
-                            worktree_id: id,
-                            branch: wt.branch.clone(),
-                            pr_url: pr_url.clone(),
-                            pr_title: wt.pr_title(),
-                            duration: format_duration(wt.created_at),
-                        });
-                        self.pr_notified.insert(pr_url.clone());
-                        pr_notified_changed = true;
-                    }
+                if let Some(wt) = current.get(&id)
+                    && let Some(pr_url) = &wt.pr_url()
+                {
+                    notifications.push(SwarmNotification::PrOpened {
+                        worktree_id: id,
+                        branch: wt.branch.clone(),
+                        pr_url: pr_url.clone(),
+                        pr_title: wt.pr_title(),
+                        duration: format_duration(wt.created_at),
+                    });
+                    self.pr_notified.insert(pr_url.clone());
+                    pr_notified_changed = true;
                 }
             }
         }
@@ -1062,7 +1059,11 @@ mod tests {
             .iter()
             .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
             .collect();
-        assert_eq!(waiting_notes.len(), 1, "should emit exactly one AgentWaiting");
+        assert_eq!(
+            waiting_notes.len(),
+            1,
+            "should emit exactly one AgentWaiting"
+        );
 
         let msg = waiting_notes[0].format_telegram();
         assert!(msg.contains("Worker waiting"));
@@ -1195,7 +1196,11 @@ mod tests {
             .iter()
             .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
             .collect();
-        assert_eq!(waiting_notes.len(), 1, "should emit exactly one AgentWaiting");
+        assert_eq!(
+            waiting_notes.len(),
+            1,
+            "should emit exactly one AgentWaiting"
+        );
 
         let msg = waiting_notes[0].format_telegram();
         assert!(msg.contains("Worker waiting"));
@@ -1638,7 +1643,11 @@ mod tests {
             .iter()
             .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
             .collect();
-        assert_eq!(pr_notes.len(), 1, "should emit PrOpened for existing PR on startup");
+        assert_eq!(
+            pr_notes.len(),
+            1,
+            "should emit PrOpened for existing PR on startup"
+        );
 
         if let SwarmNotification::PrOpened {
             pr_url, pr_title, ..
@@ -1757,5 +1766,4 @@ mod tests {
         assert!(content.contains("https://github.com/ApiariTools/hive/pull/1"));
         assert!(content.contains("https://github.com/ApiariTools/hive/pull/42"));
     }
-
 }

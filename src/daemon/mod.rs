@@ -566,7 +566,10 @@ impl DaemonRunner {
                 text,
                 ..
             } => {
-                eprintln!("[daemon] Message from {user_name} (chat={chat_id}): {}", truncate(&text, 80));
+                eprintln!(
+                    "[daemon] Message from {user_name} (chat={chat_id}): {}",
+                    truncate(&text, 80)
+                );
                 self.handle_message(chat_id, user_id, &user_name, &text)
                     .await
             }
@@ -1118,9 +1121,7 @@ impl DaemonRunner {
         if let Some(rest) = args.strip_prefix("cancel") {
             let id_prefix = rest.trim();
             if id_prefix.is_empty() {
-                return self
-                    .send(chat_id, "Usage: /reminders cancel <id>")
-                    .await;
+                return self.send(chat_id, "Usage: /reminders cancel <id>").await;
             }
             match self.reminder_store.cancel(id_prefix) {
                 Ok(cancelled_id) => {
@@ -1253,7 +1254,9 @@ impl DaemonRunner {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
                 if let Err(e) = self.send(*chat_id, text).await {
-                    eprintln!("[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id");
+                    eprintln!(
+                        "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
+                    );
                     if *chat_id != alert_chat_id {
                         let _ = self.send(alert_chat_id, text).await;
                     }
@@ -1380,7 +1383,6 @@ impl DaemonRunner {
     }
 }
 
-
 /// Format a batch of swarm notifications into a single summary message.
 ///
 /// Used when 3+ notifications arrive in one poll cycle for the same chat,
@@ -1452,7 +1454,11 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
 
 /// Truncate a string for display.
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..floor_char_boundary(s, max)] }
+    if s.len() <= max {
+        s
+    } else {
+        &s[..floor_char_boundary(s, max)]
+    }
 }
 
 /// Find the largest byte index `<= max` that is a valid char boundary.
@@ -1467,11 +1473,11 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     i
 }
 
-
 /// Dispatch routed swarm notifications through a channel.
 ///
 /// Groups by chat_id, batches 3+ per chat into one summary message, sends
 /// individually otherwise. Falls back to `alert_chat_id` on send failure.
+#[cfg(test)]
 pub(crate) async fn dispatch_notifications(
     channel: &dyn Channel,
     routed: &[(i64, &swarm_watcher::SwarmNotification)],
@@ -1581,7 +1587,9 @@ mod tests {
         let batch = format_swarm_batch(&[&spawned, &completed, &pr, &stalled]);
         assert!(batch.starts_with("🐝 4 swarm updates:"));
         assert!(batch.contains("• New agent spawned — feat-1"));
-        assert!(batch.contains("• Agent completed — feat-2 (PR: https://github.com/example/pull/7)"));
+        assert!(
+            batch.contains("• Agent completed — feat-2 (PR: https://github.com/example/pull/7)")
+        );
         assert!(batch.contains("• PR opened — feat-3 (https://github.com/example/pull/8)"));
         assert!(batch.contains("• Agent stalled — feat-4 (idle 20m)"));
     }

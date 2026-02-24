@@ -102,16 +102,16 @@ pub fn parse_cron_args(s: &str) -> Result<(String, String), String> {
     let s = s.trim();
 
     // Look for quoted cron expression.
-    let (cron_expr, rest) = if s.starts_with('"') {
-        let end = s[1..]
+    let (cron_expr, rest) = if let Some(inner) = s.strip_prefix('"') {
+        let end = inner
             .find('"')
             .ok_or("missing closing quote for cron expression")?;
-        (&s[1..end + 1], s[end + 2..].trim())
-    } else if s.starts_with('\'') {
-        let end = s[1..]
+        (&inner[..end], inner[end + 1..].trim())
+    } else if let Some(inner) = s.strip_prefix('\'') {
+        let end = inner
             .find('\'')
             .ok_or("missing closing quote for cron expression")?;
-        (&s[1..end + 1], s[end + 2..].trim())
+        (&inner[..end], inner[end + 1..].trim())
     } else {
         return Err("cron expression must be quoted (e.g. \"0 9 * * *\")".into());
     };

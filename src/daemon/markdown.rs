@@ -152,7 +152,12 @@ fn convert_bold(text: &str) -> String {
         }
 
         // Only convert ** outside code.
-        if !in_code_block && !in_inline_code && i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+        if !in_code_block
+            && !in_inline_code
+            && i + 1 < len
+            && chars[i] == '*'
+            && chars[i + 1] == '*'
+        {
             result.push('*');
             i += 2;
             continue;
