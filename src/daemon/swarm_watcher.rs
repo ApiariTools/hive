@@ -230,6 +230,13 @@ pub struct SwarmWatcher {
     /// Workers that were already in "waiting" state at initialization.
     /// Drained on the first poll after init to re-emit AgentWaiting.
     waiting_at_init: HashSet<String>,
+    /// Persisted set of pr_urls that have already triggered a PrOpened notification.
+    pr_notified: HashSet<String>,
+    /// Worktree IDs with unnotified pr_urls at init.
+    /// Drained on the first poll after init to emit PrOpened (handles daemon restarts).
+    prs_at_init: HashSet<String>,
+    /// Directory for persisting `pr_notified.json` (e.g. `.hive/`).
+    hive_dir: Option<PathBuf>,
 }
 
 /// Snapshot of a worktree's state for diffing between polls.
@@ -304,12 +311,22 @@ impl SwarmWatcher {
             swarm_dir,
             stall_timeout_secs: 0,
             waiting_at_init: HashSet::new(),
+            pr_notified: HashSet::new(),
+            prs_at_init: HashSet::new(),
+            hive_dir: None,
         }
     }
 
     /// Set the stall detection timeout (in seconds). 0 disables stall detection.
     pub fn set_stall_timeout(&mut self, secs: u64) {
         self.stall_timeout_secs = secs;
+    }
+
+    /// Set the hive directory for persisting PR notification state.
+    /// When set, loads/saves `pr_notified.json` to track which PrOpened
+    /// notifications have already been sent, avoiding duplicates across restarts.
+    pub fn set_hive_dir(&mut self, dir: PathBuf) {
+        self.hive_dir = Some(dir);
     }
 
     /// Poll the swarm state file and return typed notifications for any transitions.
@@ -349,6 +366,18 @@ impl SwarmWatcher {
                     self.waiting_at_init.insert(wt.id.clone());
                 }
             }
+            // Load persisted PR notification set and track unnotified PRs at init.
+            // Only active when hive_dir is set (i.e. running as daemon).
+            if let Some(dir) = &self.hive_dir {
+                self.pr_notified = Self::load_pr_notified(&dir.join("pr_notified.json"));
+                for wt in &state.worktrees {
+                    if let Some(url) = &wt.pr_url {
+                        if !self.pr_notified.contains(url) {
+                            self.prs_at_init.insert(wt.id.clone());
+                        }
+                    }
+                }
+            }
             if !self.known.is_empty() {
                 eprintln!(
                     "[swarm-watcher] Initialized with {} worktree(s)",
@@ -359,6 +388,7 @@ impl SwarmWatcher {
         }
 
         let mut notifications = Vec::new();
+        let mut pr_notified_changed = false;
 
         // Check for agent completions (agent pane disappeared) and removals.
         let previous_ids: Vec<String> = self.known.keys().cloned().collect();
@@ -380,13 +410,16 @@ impl SwarmWatcher {
                 // Check if a PR was opened (pr_url transitioned from None to Some).
                 if prev.pr_url.is_none() && wt.pr_url.is_some() {
                     let duration = format_duration(prev.created_at);
+                    let url = wt.pr_url.clone().unwrap();
                     notifications.push(SwarmNotification::PrOpened {
                         worktree_id: id.clone(),
                         branch: wt.branch.clone(),
-                        pr_url: wt.pr_url.clone().unwrap(),
+                        pr_url: url.clone(),
                         pr_title: wt.pr_title.clone(),
                         duration,
                     });
+                    self.pr_notified.insert(url);
+                    pr_notified_changed = true;
                 }
 
                 // Check if agent transitioned to "waiting" (needs user input).
@@ -464,9 +497,34 @@ impl SwarmWatcher {
             }
         }
 
+        // Re-emit PrOpened for PRs that existed at init but weren't yet notified.
+        // Drained on first poll after init (handles daemon restarts).
+        if !self.prs_at_init.is_empty() {
+            let init_ids: HashSet<String> = self.prs_at_init.drain().collect();
+            for id in init_ids {
+                if let Some(wt) = current.get(&id) {
+                    if let Some(pr_url) = &wt.pr_url {
+                        notifications.push(SwarmNotification::PrOpened {
+                            worktree_id: id,
+                            branch: wt.branch.clone(),
+                            pr_url: pr_url.clone(),
+                            pr_title: wt.pr_title.clone(),
+                            duration: format_duration(wt.created_at),
+                        });
+                        self.pr_notified.insert(pr_url.clone());
+                        pr_notified_changed = true;
+                    }
+                }
+            }
+        }
+
         // Check for stalled agents.
         if self.stall_timeout_secs > 0 {
             notifications.extend(self.check_stalls());
+        }
+
+        if pr_notified_changed {
+            self.save_pr_notified();
         }
 
         notifications
@@ -558,6 +616,22 @@ impl SwarmWatcher {
     fn load_state(path: &Path) -> Option<SwarmState> {
         let content = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&content).ok()
+    }
+
+    fn load_pr_notified(path: &Path) -> HashSet<String> {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_pr_notified(&self) {
+        if let Some(dir) = &self.hive_dir {
+            let path = dir.join("pr_notified.json");
+            if let Ok(json) = serde_json::to_string_pretty(&self.pr_notified) {
+                let _ = std::fs::write(&path, json);
+            }
+        }
     }
 }
 
@@ -1480,6 +1554,149 @@ mod tests {
             1,
             "known state should be unchanged when file is missing"
         );
+    }
+
+    // --- Tests for PR notification on daemon startup ---
+
+    #[test]
+    fn test_pr_opened_fires_on_startup_for_existing_pr() {
+        let mut file = NamedTempFile::new().unwrap();
+        let hive_dir = tempfile::tempdir().unwrap();
+
+        // Worker has pr_url from the start — no pr_notified.json exists.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/1","pr_title":"Add feature"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_hive_dir(hive_dir.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Second poll — should emit PrOpened for the unnotified PR.
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert_eq!(pr_notes.len(), 1, "should emit PrOpened for existing PR on startup");
+
+        if let SwarmNotification::PrOpened {
+            pr_url, pr_title, ..
+        } = &pr_notes[0]
+        {
+            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/1");
+            assert_eq!(pr_title.as_deref(), Some("Add feature"));
+        }
+
+        // Verify pr_notified.json was written.
+        let notified_path = hive_dir.path().join("pr_notified.json");
+        assert!(notified_path.exists(), "pr_notified.json should be created");
+        let content: HashSet<String> =
+            serde_json::from_str(&std::fs::read_to_string(&notified_path).unwrap()).unwrap();
+        assert!(content.contains("https://github.com/ApiariTools/hive/pull/1"));
+    }
+
+    #[test]
+    fn test_pr_opened_not_duplicated_after_restart() {
+        let mut file = NamedTempFile::new().unwrap();
+        let hive_dir = tempfile::tempdir().unwrap();
+
+        // Pre-populate pr_notified.json with the URL (simulates previous daemon run).
+        let notified_path = hive_dir.path().join("pr_notified.json");
+        std::fs::write(
+            &notified_path,
+            r#"["https://github.com/ApiariTools/hive/pull/1"]"#,
+        )
+        .unwrap();
+
+        // Worker has the same pr_url.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/1"}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_hive_dir(hive_dir.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // Second poll — should NOT emit PrOpened (already notified).
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(
+            pr_notes.is_empty(),
+            "should NOT emit PrOpened for already-notified PR"
+        );
+    }
+
+    #[test]
+    fn test_pr_opened_fires_for_new_pr_after_restart() {
+        let mut file = NamedTempFile::new().unwrap();
+        let hive_dir = tempfile::tempdir().unwrap();
+
+        // Pre-populate pr_notified.json with one URL.
+        let notified_path = hive_dir.path().join("pr_notified.json");
+        std::fs::write(
+            &notified_path,
+            r#"["https://github.com/ApiariTools/hive/pull/1"]"#,
+        )
+        .unwrap();
+
+        // Two workers: one with already-notified PR, one without any PR.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[
+                {"id":"1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/1"},
+                {"id":"2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-22T11:00:00-08:00"}
+            ]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_hive_dir(hive_dir.path().to_path_buf());
+        watcher.poll(); // Initialize
+
+        // No PrOpened on second poll (old PR is notified, new worker has no PR yet).
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(pr_notes.is_empty(), "no new PRs yet");
+
+        // New PR appears on worker 2 (None→Some transition).
+        write_state(
+            &mut file,
+            r#"{"worktrees":[
+                {"id":"1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/1"},
+                {"id":"2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-22T11:00:00-08:00","pr_url":"https://github.com/ApiariTools/hive/pull/42","pr_title":"New feature"}
+            ]}"#,
+        );
+
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert_eq!(pr_notes.len(), 1, "should emit PrOpened for new PR only");
+
+        if let SwarmNotification::PrOpened {
+            worktree_id,
+            pr_url,
+            ..
+        } = &pr_notes[0]
+        {
+            assert_eq!(worktree_id, "2");
+            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/42");
+        }
+
+        // Verify pr_notified.json now contains both URLs.
+        let content: HashSet<String> =
+            serde_json::from_str(&std::fs::read_to_string(&notified_path).unwrap()).unwrap();
+        assert!(content.contains("https://github.com/ApiariTools/hive/pull/1"));
+        assert!(content.contains("https://github.com/ApiariTools/hive/pull/42"));
     }
 
 }

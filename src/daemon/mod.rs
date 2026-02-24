@@ -359,6 +359,7 @@ impl DaemonRunner {
                 );
                 let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
                 watcher.set_stall_timeout(stall_timeout);
+                watcher.set_hive_dir(workspace_root.join(".hive"));
                 Some(watcher)
             } else {
                 None
