@@ -471,6 +471,16 @@ impl SwarmWatcher {
                     branch: wt.branch.clone(),
                     summary: wt.summary.clone(),
                 });
+                // If the worker is already in waiting state on first sight, emit AgentWaiting
+                // immediately — it completed within one poll window so the transition was missed.
+                if wt.agent_session_status.as_deref() == Some("waiting") {
+                    notifications.push(SwarmNotification::AgentWaiting {
+                        worktree_id: wt.id.clone(),
+                        branch: wt.branch.clone(),
+                        summary: wt.summary.clone(),
+                        pr_url: wt.pr_url(),
+                    });
+                }
             }
         }
 
@@ -1765,5 +1775,76 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&notified_path).unwrap()).unwrap();
         assert!(content.contains("https://github.com/ApiariTools/hive/pull/1"));
         assert!(content.contains("https://github.com/ApiariTools/hive/pull/42"));
+    }
+
+    // --- Tests for fast-worker AgentWaiting miss ---
+
+    #[test]
+    fn test_new_worker_already_waiting_fires_agent_waiting() {
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize with no worktrees.
+
+        // New worker appears already in "waiting" state (completed within one poll window).
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"fast-1","branch":"swarm/quick-fix","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Quick fix"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+
+        assert_eq!(spawned.len(), 1, "should emit AgentSpawned");
+        assert_eq!(
+            waiting.len(),
+            1,
+            "should emit AgentWaiting for new worker already in waiting state"
+        );
+        assert_eq!(waiting[0].worktree_id(), "fast-1");
+
+        let msg = waiting[0].format_telegram();
+        assert!(msg.contains("Worker waiting"));
+        assert!(msg.contains("quick-fix"));
+        assert!(msg.contains("Quick fix"));
+    }
+
+    #[test]
+    fn test_new_worker_not_waiting_no_premature_agent_waiting() {
+        let mut file = NamedTempFile::new().unwrap();
+        write_state(&mut file, r#"{"worktrees":[]}"#);
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.poll(); // Initialize with no worktrees.
+
+        // New worker appears in "running" state (still working).
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"run-1","branch":"swarm/long-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active","summary":"Long task"}]}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+
+        assert_eq!(spawned.len(), 1, "should emit AgentSpawned");
+        assert!(
+            waiting.is_empty(),
+            "should NOT emit AgentWaiting for worker in running state"
+        );
     }
 }
