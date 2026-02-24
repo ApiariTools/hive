@@ -58,7 +58,12 @@ impl Coordinator {
         }
 
         prompt.push_str("## Identity\n");
-        prompt.push_str("You ARE hive. The user is talking to you right now via `hive chat` or the `hive daemon` Telegram bot.\n");
+        if self.workspace.soul.is_some() {
+            prompt.push_str("IMPORTANT: You are the persona defined in the Soul section above. Never identify as Claude, an AI assistant, or any other name.\n");
+            prompt.push_str("You are talking to the user right now via `hive chat` or the `hive daemon` Telegram bot.\n");
+        } else {
+            prompt.push_str("You ARE hive. The user is talking to you right now via `hive chat` or the `hive daemon` Telegram bot.\n");
+        }
         prompt.push_str("Hive is the orchestration layer — it plans quests, dispatches work to swarm agents, and manages the workspace.\n");
         prompt.push_str("Buzz is a SEPARATE tool — it's a signal aggregator that polls external sources (Sentry, GitHub) and writes signals.\n");
         prompt.push_str("Hive's daemon mode can READ buzz signals and auto-triage them, but buzz and hive are different things.\n");
