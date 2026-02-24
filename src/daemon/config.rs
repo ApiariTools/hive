@@ -111,6 +111,11 @@ pub struct SwarmWatchConfig {
     #[serde(default = "default_stall_timeout")]
     pub stall_timeout_secs: u64,
 
+    /// Seconds a worker must be in "waiting" state before AgentWaiting fires.
+    /// Prevents false positives from brief mid-task flickers. Default: 30. 0 = disabled.
+    #[serde(default = "default_waiting_debounce")]
+    pub waiting_debounce_secs: u64,
+
     /// When enabled, automatically invoke the coordinator after certain swarm
     /// notifications (PrOpened, AgentWaiting) to suggest a next action.
     #[serde(default)]
@@ -155,6 +160,10 @@ fn default_swarm_state_path() -> PathBuf {
 
 fn default_stall_timeout() -> u64 {
     300
+}
+
+fn default_waiting_debounce() -> u64 {
+    30
 }
 
 impl DaemonConfig {
@@ -405,6 +414,7 @@ state_path = ".swarm/custom.json"
         assert_eq!(sw.poll_interval_secs, 30);
         assert_eq!(sw.state_path, PathBuf::from(".swarm/custom.json"));
         assert_eq!(sw.stall_timeout_secs, 300); // default
+        assert_eq!(sw.waiting_debounce_secs, 30); // default
     }
 
     #[test]
@@ -420,6 +430,51 @@ stall_timeout_secs = 600
         let config: DaemonConfig = toml::from_str(toml).unwrap();
         let sw = config.swarm_watch.unwrap();
         assert_eq!(sw.stall_timeout_secs, 600);
+    }
+
+    #[test]
+    fn test_waiting_debounce_default() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+enabled = true
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let sw = config.swarm_watch.unwrap();
+        assert_eq!(sw.waiting_debounce_secs, 30, "default should be 30");
+    }
+
+    #[test]
+    fn test_waiting_debounce_custom() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+waiting_debounce_secs = 60
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let sw = config.swarm_watch.unwrap();
+        assert_eq!(sw.waiting_debounce_secs, 60);
+    }
+
+    #[test]
+    fn test_waiting_debounce_disabled() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[swarm_watch]
+waiting_debounce_secs = 0
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let sw = config.swarm_watch.unwrap();
+        assert_eq!(sw.waiting_debounce_secs, 0, "0 should disable debounce");
     }
 
     #[test]

@@ -331,24 +331,31 @@ impl DaemonRunner {
             };
 
         // Conditionally init swarm watcher.
-        let swarm_watcher_instance =
-            if let Some(state_path) = config.resolved_swarm_state_path(&workspace_root) {
-                let stall_timeout = config
-                    .swarm_watch
-                    .as_ref()
-                    .map(|sw| sw.stall_timeout_secs)
-                    .unwrap_or(300);
-                eprintln!(
-                    "[daemon] Swarm watcher enabled (state: {}, stall_timeout: {stall_timeout}s)",
-                    state_path.display()
-                );
-                let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
-                watcher.set_stall_timeout(stall_timeout);
-                watcher.set_hive_dir(workspace_root.join(".hive"));
-                Some(watcher)
-            } else {
-                None
-            };
+        let swarm_watcher_instance = if let Some(state_path) =
+            config.resolved_swarm_state_path(&workspace_root)
+        {
+            let stall_timeout = config
+                .swarm_watch
+                .as_ref()
+                .map(|sw| sw.stall_timeout_secs)
+                .unwrap_or(300);
+            let waiting_debounce = config
+                .swarm_watch
+                .as_ref()
+                .map(|sw| sw.waiting_debounce_secs)
+                .unwrap_or(30);
+            eprintln!(
+                "[daemon] Swarm watcher enabled (state: {}, stall_timeout: {stall_timeout}s, waiting_debounce: {waiting_debounce}s)",
+                state_path.display()
+            );
+            let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
+            watcher.set_stall_timeout(stall_timeout);
+            watcher.set_waiting_debounce(waiting_debounce);
+            watcher.set_hive_dir(workspace_root.join(".hive"));
+            Some(watcher)
+        } else {
+            None
+        };
 
         // Load origin map for notification routing.
         let origin_map = OriginMap::load(&workspace_root);
