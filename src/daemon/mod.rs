@@ -369,7 +369,11 @@ impl DaemonRunner {
         coordinator_prompt
             .push_str("Built-in actions (handled automatically, no response needed from you):\n");
         coordinator_prompt.push_str("- merge_pr:<worktree_id> — merges the PR for that worker\n");
-        coordinator_prompt.push_str("- close_worker:<worktree_id> — closes that swarm worker\n\n");
+        coordinator_prompt.push_str("- close_worker:<worktree_id> — closes that swarm worker\n");
+        coordinator_prompt
+            .push_str("- ci_pending:<worktree_id> — tells user CI is still running\n");
+        coordinator_prompt
+            .push_str("- ci_failing_merge:<worktree_id> — merges PR despite failing CI\n\n");
         coordinator_prompt.push_str(
             "Use buttons to offer clear choices instead of asking open-ended questions.\n",
         );
@@ -669,6 +673,11 @@ impl DaemonRunner {
     /// Handle an inline keyboard button press.
     async fn handle_callback(&mut self, chat_id: i64, data: &str) -> Result<()> {
         if let Some(worktree_id) = data.strip_prefix("merge_pr:") {
+            self.handle_merge_pr(chat_id, worktree_id).await
+        } else if let Some(_worktree_id) = data.strip_prefix("ci_pending:") {
+            self.send(chat_id, "CI is still running, wait for it to finish.")
+                .await
+        } else if let Some(worktree_id) = data.strip_prefix("ci_failing_merge:") {
             self.handle_merge_pr(chat_id, worktree_id).await
         } else if let Some(worktree_id) = data.strip_prefix("close_worker:") {
             self.handle_close_worker(chat_id, worktree_id).await
@@ -1554,8 +1563,23 @@ impl DaemonRunner {
                     if !first_send {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
-                    let text = n.format_telegram();
-                    let buttons = n.inline_buttons();
+                    // For PrOpened, fetch CI status and use CI-aware formatting/buttons.
+                    let ci_status =
+                        if let swarm_watcher::SwarmNotification::PrOpened { pr_url, .. } = n {
+                            let ci = swarm_watcher::fetch_ci_status(pr_url).await;
+                            if let Some(ref status) = ci {
+                                eprintln!(
+                                    "[daemon] CI status for {}: {}",
+                                    n.worktree_id(),
+                                    status.status_line()
+                                );
+                            }
+                            ci
+                        } else {
+                            None
+                        };
+                    let text = n.format_telegram_with_ci(ci_status.as_ref());
+                    let buttons = n.inline_buttons_with_ci(ci_status.as_ref());
                     let result = if buttons.is_empty() {
                         self.send(*chat_id, &text).await
                     } else {

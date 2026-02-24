@@ -11,7 +11,102 @@ use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// CI check status for a PR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CiStatus {
+    /// All checks passed.
+    Passing,
+    /// At least one check failed.
+    Failing,
+    /// At least one check is still pending/in-progress (none failing).
+    Pending,
+}
+
+impl CiStatus {
+    /// Format as a one-line CI status string for Telegram.
+    pub fn status_line(&self) -> &'static str {
+        match self {
+            Self::Passing => "CI: ✅ passing",
+            Self::Failing => "CI: ❌ failing",
+            Self::Pending => "CI: ⏳ running",
+        }
+    }
+}
+
+/// Fetch CI check status for a PR URL using `gh pr checks`.
+///
+/// Returns `None` if the command fails, times out, or there are no checks.
+/// Uses a 10-second timeout to avoid blocking notifications.
+pub async fn fetch_ci_status(pr_url: &str) -> Option<CiStatus> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new("gh")
+            .args([
+                "pr",
+                "checks",
+                pr_url,
+                "--json",
+                "name,state,conclusion",
+                "--jq",
+                "[.[] | {name,conclusion}]",
+            ])
+            .output(),
+    )
+    .await
+    .ok()? // timeout
+    .ok()?; // command error
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let checks: Vec<CiCheck> = serde_json::from_str(stdout.trim()).ok()?;
+
+    if checks.is_empty() {
+        return None;
+    }
+
+    let has_failure = checks.iter().any(|c| {
+        matches!(
+            c.conclusion.as_deref(),
+            Some("failure")
+                | Some("FAILURE")
+                | Some("cancelled")
+                | Some("CANCELLED")
+                | Some("timed_out")
+                | Some("TIMED_OUT")
+                | Some("action_required")
+                | Some("ACTION_REQUIRED")
+                | Some("startup_failure")
+                | Some("STARTUP_FAILURE")
+        )
+    });
+    if has_failure {
+        return Some(CiStatus::Failing);
+    }
+
+    let has_pending = checks.iter().any(|c| {
+        matches!(
+            c.conclusion.as_deref(),
+            None | Some("") | Some("pending") | Some("PENDING")
+        )
+    });
+    if has_pending {
+        return Some(CiStatus::Pending);
+    }
+
+    Some(CiStatus::Passing)
+}
+
+#[derive(Debug, Deserialize)]
+struct CiCheck {
+    #[allow(dead_code)]
+    name: Option<String>,
+    conclusion: Option<String>,
+}
 
 /// Typed swarm event notifications emitted by `SwarmWatcher::poll()`.
 #[derive(Debug, Clone)]
@@ -254,6 +349,65 @@ impl SwarmNotification {
             | Self::PrOpened { worktree_id, .. }
             | Self::AgentStalled { worktree_id, .. }
             | Self::AgentWaiting { worktree_id, .. } => worktree_id,
+        }
+    }
+
+    /// Format a PrOpened notification with CI status appended.
+    /// For non-PrOpened notifications, falls back to `format_telegram()`.
+    pub fn format_telegram_with_ci(&self, ci: Option<&CiStatus>) -> String {
+        match self {
+            Self::PrOpened {
+                branch,
+                pr_url,
+                pr_title,
+                duration,
+                ..
+            } => {
+                let lead = pr_title.as_deref().unwrap_or_else(|| short_branch(branch));
+                let ci_line = ci
+                    .map(|s| format!("\n{}", s.status_line()))
+                    .unwrap_or_default();
+                format!(
+                    "🔗 *PR opened* — {lead}\n{pr_url}\nBranch: `{branch}` · {duration}{ci_line}"
+                )
+            }
+            _ => self.format_telegram(),
+        }
+    }
+
+    /// Return inline keyboard buttons for a PrOpened notification with CI awareness.
+    /// For non-PrOpened notifications, falls back to `inline_buttons()`.
+    pub fn inline_buttons_with_ci(
+        &self,
+        ci: Option<&CiStatus>,
+    ) -> Vec<Vec<crate::channel::InlineButton>> {
+        use crate::channel::InlineButton;
+
+        match self {
+            Self::PrOpened { worktree_id, .. } => {
+                let merge_btn = match ci {
+                    Some(CiStatus::Passing) | None => InlineButton {
+                        text: "✅ Merge PR".into(),
+                        callback_data: format!("merge_pr:{worktree_id}"),
+                    },
+                    Some(CiStatus::Pending) => InlineButton {
+                        text: "⏳ CI still running".into(),
+                        callback_data: format!("ci_pending:{worktree_id}"),
+                    },
+                    Some(CiStatus::Failing) => InlineButton {
+                        text: "❌ CI failing — merge anyway?".into(),
+                        callback_data: format!("ci_failing_merge:{worktree_id}"),
+                    },
+                };
+                vec![vec![
+                    merge_btn,
+                    InlineButton {
+                        text: "🗑 Close Worker".into(),
+                        callback_data: format!("close_worker:{worktree_id}"),
+                    },
+                ]]
+            }
+            _ => self.inline_buttons(),
         }
     }
 }
@@ -2410,5 +2564,155 @@ mod tests {
             1,
             "waiting_at_init should fire even with debounce enabled"
         );
+    }
+
+    // --- Tests for CI status ---
+
+    #[test]
+    fn test_ci_status_line() {
+        assert_eq!(CiStatus::Passing.status_line(), "CI: ✅ passing");
+        assert_eq!(CiStatus::Failing.status_line(), "CI: ❌ failing");
+        assert_eq!(CiStatus::Pending.status_line(), "CI: ⏳ running");
+    }
+
+    #[test]
+    fn test_format_telegram_with_ci_passing() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "1".into(),
+            branch: "swarm/add-auth".into(),
+            pr_url: "https://github.com/ApiariTools/hive/pull/42".into(),
+            pr_title: Some("Add OAuth support".into()),
+            duration: "15m".into(),
+        };
+        let msg = pr.format_telegram_with_ci(Some(&CiStatus::Passing));
+        assert_eq!(
+            msg,
+            "🔗 *PR opened* — Add OAuth support\nhttps://github.com/ApiariTools/hive/pull/42\nBranch: `swarm/add-auth` · 15m\nCI: ✅ passing"
+        );
+    }
+
+    #[test]
+    fn test_format_telegram_with_ci_failing() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "1".into(),
+            branch: "swarm/fix".into(),
+            pr_url: "https://github.com/example/pull/1".into(),
+            pr_title: None,
+            duration: "5m".into(),
+        };
+        let msg = pr.format_telegram_with_ci(Some(&CiStatus::Failing));
+        assert!(msg.contains("CI: ❌ failing"));
+    }
+
+    #[test]
+    fn test_format_telegram_with_ci_pending() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "1".into(),
+            branch: "swarm/fix".into(),
+            pr_url: "https://github.com/example/pull/1".into(),
+            pr_title: None,
+            duration: "5m".into(),
+        };
+        let msg = pr.format_telegram_with_ci(Some(&CiStatus::Pending));
+        assert!(msg.contains("CI: ⏳ running"));
+    }
+
+    #[test]
+    fn test_format_telegram_with_ci_none() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "1".into(),
+            branch: "swarm/fix".into(),
+            pr_url: "https://github.com/example/pull/1".into(),
+            pr_title: None,
+            duration: "5m".into(),
+        };
+        let msg = pr.format_telegram_with_ci(None);
+        // Should be identical to format_telegram when CI is None.
+        assert_eq!(msg, pr.format_telegram());
+        assert!(!msg.contains("CI:"));
+    }
+
+    #[test]
+    fn test_format_telegram_with_ci_non_pr_falls_back() {
+        let spawned = SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/task".into(),
+            summary: Some("Do stuff".into()),
+        };
+        assert_eq!(
+            spawned.format_telegram_with_ci(Some(&CiStatus::Passing)),
+            spawned.format_telegram()
+        );
+    }
+
+    #[test]
+    fn test_inline_buttons_with_ci_passing() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "test-1".into(),
+            branch: "swarm/feat".into(),
+            pr_url: "https://example.com/pull/1".into(),
+            pr_title: None,
+            duration: "1m".into(),
+        };
+        let buttons = pr.inline_buttons_with_ci(Some(&CiStatus::Passing));
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].len(), 2);
+        assert_eq!(buttons[0][0].callback_data, "merge_pr:test-1");
+        assert!(buttons[0][0].text.contains("Merge PR"));
+    }
+
+    #[test]
+    fn test_inline_buttons_with_ci_pending() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "test-1".into(),
+            branch: "swarm/feat".into(),
+            pr_url: "https://example.com/pull/1".into(),
+            pr_title: None,
+            duration: "1m".into(),
+        };
+        let buttons = pr.inline_buttons_with_ci(Some(&CiStatus::Pending));
+        assert_eq!(buttons[0][0].callback_data, "ci_pending:test-1");
+        assert!(buttons[0][0].text.contains("CI still running"));
+    }
+
+    #[test]
+    fn test_inline_buttons_with_ci_failing() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "test-1".into(),
+            branch: "swarm/feat".into(),
+            pr_url: "https://example.com/pull/1".into(),
+            pr_title: None,
+            duration: "1m".into(),
+        };
+        let buttons = pr.inline_buttons_with_ci(Some(&CiStatus::Failing));
+        assert_eq!(buttons[0][0].callback_data, "ci_failing_merge:test-1");
+        assert!(buttons[0][0].text.contains("CI failing"));
+    }
+
+    #[test]
+    fn test_inline_buttons_with_ci_none_shows_merge() {
+        let pr = SwarmNotification::PrOpened {
+            worktree_id: "test-1".into(),
+            branch: "swarm/feat".into(),
+            pr_url: "https://example.com/pull/1".into(),
+            pr_title: None,
+            duration: "1m".into(),
+        };
+        let buttons = pr.inline_buttons_with_ci(None);
+        // None CI → show normal merge button (same as no CI info).
+        assert_eq!(buttons[0][0].callback_data, "merge_pr:test-1");
+    }
+
+    #[test]
+    fn test_inline_buttons_with_ci_non_pr_falls_back() {
+        let waiting = SwarmNotification::AgentWaiting {
+            worktree_id: "test-1".into(),
+            branch: "swarm/feat".into(),
+            summary: None,
+            pr_url: Some("https://example.com/pull/1".into()),
+        };
+        let buttons_ci = waiting.inline_buttons_with_ci(Some(&CiStatus::Passing));
+        let buttons_plain = waiting.inline_buttons();
+        assert_eq!(buttons_ci.len(), buttons_plain.len());
     }
 }
