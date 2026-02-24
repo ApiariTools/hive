@@ -80,6 +80,9 @@ pub fn route_notification(origin_map: &OriginMap, worktree_id: &str, alert_chat_
     origin_map.route_target(worktree_id).unwrap_or(alert_chat_id)
 }
 
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,4 +340,54 @@ mod tests {
         assert_eq!(entry.branch.as_deref(), Some("swarm/serialize-test"));
         assert_eq!(entry.created_at, now);
     }
+
+    #[test]
+    fn test_route_notification_to_origin_chat() {
+        let mut map = OriginMap::default();
+        map.insert(
+            "wt-1".into(),
+            OriginEntry {
+                origin: TaskOrigin {
+                    channel: "telegram".into(),
+                    chat_id: Some(100),
+                    user_name: Some("alice".into()),
+                    user_id: Some(1),
+                },
+                quest_id: None,
+                task_id: None,
+                branch: None,
+                created_at: Utc::now(),
+            },
+        );
+        assert_eq!(route_notification(&map, "wt-1", 999), 100);
+    }
+
+    #[test]
+    fn test_route_notification_falls_back_to_alert() {
+        let map = OriginMap::default();
+        assert_eq!(route_notification(&map, "unknown", 999), 999);
+    }
+
+    #[test]
+    fn test_route_notification_cli_origin_falls_back() {
+        let mut map = OriginMap::default();
+        map.insert(
+            "wt-1".into(),
+            OriginEntry {
+                origin: TaskOrigin {
+                    channel: "cli".into(),
+                    chat_id: None,
+                    user_name: None,
+                    user_id: None,
+                },
+                quest_id: None,
+                task_id: None,
+                branch: None,
+                created_at: Utc::now(),
+            },
+        );
+        // CLI origin has no chat_id, so falls back to alert_chat_id.
+        assert_eq!(route_notification(&map, "wt-1", 999), 999);
+    }
+
 }

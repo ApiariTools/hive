@@ -1374,48 +1374,6 @@ impl DaemonRunner {
     }
 }
 
-/// Send grouped swarm notifications through a channel, with batching and fallback.
-///
-/// Faithful extraction of `poll_swarm`'s Phase 3 logic for testability.
-/// - Batches 3+ notifications per chat into a single summary message
-/// - Falls back to `alert_chat_id` if sending to the target chat fails
-/// - Adds 500ms delay between consecutive sends to avoid rate limits
-async fn dispatch_grouped_notifications(
-    channel: &dyn Channel,
-    by_chat: &[(i64, Vec<&swarm_watcher::SwarmNotification>)],
-    alert_chat_id: i64,
-) {
-    let mut first_send = true;
-    for (chat_id, group) in by_chat {
-        let texts: Vec<String> = if group.len() >= 3 {
-            vec![format_swarm_batch(group)]
-        } else {
-            group.iter().map(|n| n.format_telegram()).collect()
-        };
-        for text in &texts {
-            if !first_send {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-            let msg = OutboundMessage {
-                chat_id: *chat_id,
-                text: text.clone(),
-            };
-            if let Err(e) = channel.send_message(&msg).await {
-                eprintln!(
-                    "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
-                );
-                if *chat_id != alert_chat_id {
-                    let fallback_msg = OutboundMessage {
-                        chat_id: alert_chat_id,
-                        text: text.clone(),
-                    };
-                    let _ = channel.send_message(&fallback_msg).await;
-                }
-            }
-            first_send = false;
-        }
-    }
-}
 
 /// Format a batch of swarm notifications into a single summary message.
 ///
@@ -1503,187 +1461,64 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     i
 }
 
+
+/// Dispatch routed swarm notifications through a channel.
+///
+/// Groups by chat_id, batches 3+ per chat into one summary message, sends
+/// individually otherwise. Falls back to `alert_chat_id` on send failure.
+pub(crate) async fn dispatch_notifications(
+    channel: &dyn Channel,
+    routed: &[(i64, &swarm_watcher::SwarmNotification)],
+    alert_chat_id: i64,
+) {
+    // Group by chat_id, preserving insertion order.
+    let mut by_chat: Vec<(i64, Vec<&swarm_watcher::SwarmNotification>)> = Vec::new();
+    for &(chat_id, notification) in routed {
+        if let Some((_, group)) = by_chat.iter_mut().find(|(id, _)| *id == chat_id) {
+            group.push(notification);
+        } else {
+            by_chat.push((chat_id, vec![notification]));
+        }
+    }
+
+    let mut first_send = true;
+    for (chat_id, group) in &by_chat {
+        let texts: Vec<String> = if group.len() >= 3 {
+            vec![format_swarm_batch(group)]
+        } else {
+            group.iter().map(|n| n.format_telegram()).collect()
+        };
+        for text in &texts {
+            if !first_send {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            if let Err(e) = channel
+                .send_message(&OutboundMessage {
+                    chat_id: *chat_id,
+                    text: text.clone(),
+                })
+                .await
+            {
+                eprintln!(
+                    "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
+                );
+                if *chat_id != alert_chat_id {
+                    let _ = channel
+                        .send_message(&OutboundMessage {
+                            chat_id: alert_chat_id,
+                            text: text.clone(),
+                        })
+                        .await;
+                }
+            }
+            first_send = false;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::MockChannel;
-    use crate::quest::TaskOrigin;
-
-    // --- route_notification tests ---
-
-    #[test]
-    fn test_notification_routed_to_origin_chat() {
-        let mut map = OriginMap::default();
-        map.insert(
-            "wt-1".into(),
-            OriginEntry {
-                origin: TaskOrigin {
-                    channel: "telegram".into(),
-                    chat_id: Some(42),
-                    user_name: Some("josh".into()),
-                    user_id: Some(1),
-                },
-                quest_id: None,
-                task_id: None,
-                branch: None,
-                created_at: chrono::Utc::now(),
-            },
-        );
-        assert_eq!(route_notification(&map, "wt-1", 999), 42);
-    }
-
-    #[test]
-    fn test_notification_falls_back_to_alert_chat_when_origin_missing() {
-        let map = OriginMap::default();
-        assert_eq!(route_notification(&map, "unknown-wt", 999), 999);
-    }
-
-    // --- dispatch tests (mock channel) ---
-
-    #[tokio::test(start_paused = true)]
-    async fn test_notification_falls_back_when_send_fails() {
-        let mut mock = MockChannel::new();
-        let mut seq = mockall::Sequence::new();
-
-        // First send to origin chat fails.
-        mock.expect_send_message()
-            .times(1)
-            .in_sequence(&mut seq)
-            .withf(|msg: &OutboundMessage| msg.chat_id == 42)
-            .returning(|_| Err(color_eyre::eyre::eyre!("chat not found")));
-
-        // Fallback to alert chat succeeds.
-        mock.expect_send_message()
-            .times(1)
-            .in_sequence(&mut seq)
-            .withf(|msg: &OutboundMessage| msg.chat_id == 999)
-            .returning(|_| Ok(()));
-
-        let notification = swarm_watcher::SwarmNotification::AgentCompleted {
-            worktree_id: "1".into(),
-            branch: "swarm/fix-bug".into(),
-            duration: "5m".into(),
-            pr_url: None,
-        };
-
-        let by_chat = vec![(42i64, vec![&notification])];
-        dispatch_grouped_notifications(&mock, &by_chat, 999).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_batch_sends_single_message_for_three_or_more() {
-        let mut mock = MockChannel::new();
-
-        // Should receive exactly 1 batched message.
-        mock.expect_send_message()
-            .times(1)
-            .withf(|msg: &OutboundMessage| {
-                msg.chat_id == 100 && msg.text.contains("3 swarm updates")
-            })
-            .returning(|_| Ok(()));
-
-        let n1 = swarm_watcher::SwarmNotification::AgentSpawned {
-            worktree_id: "1".into(),
-            branch: "swarm/task-a".into(),
-            summary: Some("task a".into()),
-        };
-        let n2 = swarm_watcher::SwarmNotification::AgentSpawned {
-            worktree_id: "2".into(),
-            branch: "swarm/task-b".into(),
-            summary: None,
-        };
-        let n3 = swarm_watcher::SwarmNotification::AgentCompleted {
-            worktree_id: "3".into(),
-            branch: "swarm/task-c".into(),
-            duration: "10m".into(),
-            pr_url: None,
-        };
-
-        let by_chat = vec![(100i64, vec![&n1, &n2, &n3])];
-        dispatch_grouped_notifications(&mock, &by_chat, 999).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_batch_sends_individually_for_fewer_than_three() {
-        let mut mock = MockChannel::new();
-        let mut seq = mockall::Sequence::new();
-
-        // Should receive 2 individual messages (not batched).
-        mock.expect_send_message()
-            .times(1)
-            .in_sequence(&mut seq)
-            .withf(|msg: &OutboundMessage| {
-                msg.chat_id == 100 && msg.text.contains("New agent spawned")
-            })
-            .returning(|_| Ok(()));
-
-        mock.expect_send_message()
-            .times(1)
-            .in_sequence(&mut seq)
-            .withf(|msg: &OutboundMessage| {
-                msg.chat_id == 100 && msg.text.contains("Agent completed")
-            })
-            .returning(|_| Ok(()));
-
-        let n1 = swarm_watcher::SwarmNotification::AgentSpawned {
-            worktree_id: "1".into(),
-            branch: "swarm/task-a".into(),
-            summary: None,
-        };
-        let n2 = swarm_watcher::SwarmNotification::AgentCompleted {
-            worktree_id: "2".into(),
-            branch: "swarm/task-b".into(),
-            duration: "5m".into(),
-            pr_url: None,
-        };
-
-        let by_chat = vec![(100i64, vec![&n1, &n2])];
-        dispatch_grouped_notifications(&mock, &by_chat, 999).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_all_notifications_sent_even_if_one_fails() {
-        let mut mock = MockChannel::new();
-        let mut seq = mockall::Sequence::new();
-
-        // First chat (42) fails.
-        mock.expect_send_message()
-            .times(1)
-            .in_sequence(&mut seq)
-            .withf(|msg: &OutboundMessage| msg.chat_id == 42)
-            .returning(|_| Err(color_eyre::eyre::eyre!("stale chat")));
-
-        // Fallback to alert chat (999).
-        mock.expect_send_message()
-            .times(1)
-            .in_sequence(&mut seq)
-            .withf(|msg: &OutboundMessage| msg.chat_id == 999)
-            .returning(|_| Ok(()));
-
-        // Second chat (100) still gets its notification.
-        mock.expect_send_message()
-            .times(1)
-            .in_sequence(&mut seq)
-            .withf(|msg: &OutboundMessage| msg.chat_id == 100)
-            .returning(|_| Ok(()));
-
-        let n1 = swarm_watcher::SwarmNotification::AgentSpawned {
-            worktree_id: "1".into(),
-            branch: "swarm/task-a".into(),
-            summary: None,
-        };
-        let n2 = swarm_watcher::SwarmNotification::AgentCompleted {
-            worktree_id: "2".into(),
-            branch: "swarm/task-b".into(),
-            duration: "5m".into(),
-            pr_url: None,
-        };
-
-        let by_chat = vec![(42i64, vec![&n1]), (100i64, vec![&n2])];
-        dispatch_grouped_notifications(&mock, &by_chat, 999).await;
-    }
-
-    // --- existing batch formatting tests ---
 
     #[test]
     fn test_format_swarm_batch_three_notifications() {
@@ -1743,5 +1578,182 @@ mod tests {
         assert!(batch.contains("• Agent completed — feat-2 (PR: https://github.com/example/pull/7)"));
         assert!(batch.contains("• PR opened — feat-3 (https://github.com/example/pull/8)"));
         assert!(batch.contains("• Agent stalled — feat-4 (idle 20m)"));
+    }
+
+    // --- Notification dispatch tests (mockall-backed) ---
+
+    use crate::channel::MockChannel;
+    use crate::daemon::origin_map::route_notification;
+
+    fn make_notification(wt_id: &str, branch: &str) -> swarm_watcher::SwarmNotification {
+        swarm_watcher::SwarmNotification::AgentCompleted {
+            worktree_id: wt_id.into(),
+            branch: branch.into(),
+            duration: "5m".into(),
+            pr_url: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_notification_routed_to_origin_chat() {
+        let mut om = origin_map::OriginMap::default();
+        om.insert(
+            "wt-1".into(),
+            origin_map::OriginEntry {
+                origin: crate::quest::TaskOrigin {
+                    channel: "telegram".into(),
+                    chat_id: Some(100),
+                    user_name: None,
+                    user_id: None,
+                },
+                quest_id: None,
+                task_id: None,
+                branch: None,
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        let alert_chat_id = 999;
+        let target = route_notification(&om, "wt-1", alert_chat_id);
+        assert_eq!(target, 100, "should route to origin chat");
+
+        let notification = make_notification("wt-1", "swarm/fix-bug");
+        let routed = vec![(target, &notification)];
+
+        let mut mock = MockChannel::new();
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| msg.chat_id == 100)
+            .times(1)
+            .returning(|_| Ok(()));
+
+        dispatch_notifications(&mock, &routed, alert_chat_id).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_notification_falls_back_to_alert_chat_when_origin_missing() {
+        let om = origin_map::OriginMap::default();
+        let alert_chat_id = 999;
+
+        let target = route_notification(&om, "unknown-wt", alert_chat_id);
+        assert_eq!(target, 999, "should fall back to alert chat");
+
+        let notification = make_notification("unknown-wt", "swarm/task");
+        let routed = vec![(target, &notification)];
+
+        let mut mock = MockChannel::new();
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| msg.chat_id == 999)
+            .times(1)
+            .returning(|_| Ok(()));
+
+        dispatch_notifications(&mock, &routed, alert_chat_id).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_notification_falls_back_when_send_fails() {
+        let notification = make_notification("wt-1", "swarm/fix");
+        let routed = vec![(100_i64, &notification)];
+
+        let mut mock = MockChannel::new();
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| msg.chat_id == 100)
+            .times(1)
+            .returning(|_| Err(color_eyre::eyre::eyre!("chat not found")));
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| msg.chat_id == 999)
+            .times(1)
+            .returning(|_| Ok(()));
+
+        dispatch_notifications(&mock, &routed, 999).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_batch_sends_single_message_for_three_or_more() {
+        let n1 = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/a".into(),
+            summary: None,
+        };
+        let n2 = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "2".into(),
+            branch: "swarm/b".into(),
+            summary: None,
+        };
+        let n3 = swarm_watcher::SwarmNotification::AgentCompleted {
+            worktree_id: "3".into(),
+            branch: "swarm/c".into(),
+            duration: "5m".into(),
+            pr_url: None,
+        };
+
+        let routed = vec![(100_i64, &n1), (100_i64, &n2), (100_i64, &n3)];
+
+        let mut mock = MockChannel::new();
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| {
+                msg.chat_id == 100 && msg.text.contains("3 swarm updates:")
+            })
+            .times(1)
+            .returning(|_| Ok(()));
+
+        dispatch_notifications(&mock, &routed, 999).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_batch_sends_individually_for_fewer_than_three() {
+        let n1 = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/a".into(),
+            summary: None,
+        };
+        let n2 = swarm_watcher::SwarmNotification::AgentCompleted {
+            worktree_id: "2".into(),
+            branch: "swarm/b".into(),
+            duration: "5m".into(),
+            pr_url: None,
+        };
+
+        let routed = vec![(100_i64, &n1), (100_i64, &n2)];
+
+        let mut mock = MockChannel::new();
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| msg.chat_id == 100)
+            .times(2)
+            .returning(|_| Ok(()));
+
+        dispatch_notifications(&mock, &routed, 999).await;
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_all_notifications_sent_even_if_one_fails() {
+        let n1 = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "1".into(),
+            branch: "swarm/a".into(),
+            summary: None,
+        };
+        let n2 = swarm_watcher::SwarmNotification::AgentCompleted {
+            worktree_id: "2".into(),
+            branch: "swarm/b".into(),
+            duration: "5m".into(),
+            pr_url: None,
+        };
+
+        let routed = vec![(100_i64, &n1), (200_i64, &n2)];
+
+        let mut mock = MockChannel::new();
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| msg.chat_id == 100)
+            .times(1)
+            .returning(|_| Err(color_eyre::eyre::eyre!("error")));
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| msg.chat_id == 999)
+            .times(1)
+            .returning(|_| Ok(()));
+        mock.expect_send_message()
+            .withf(|msg: &OutboundMessage| msg.chat_id == 200)
+            .times(1)
+            .returning(|_| Ok(()));
+
+        dispatch_notifications(&mock, &routed, 999).await;
     }
 }
