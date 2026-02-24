@@ -33,6 +33,15 @@ struct TgResponse<T> {
 struct TgUpdate {
     update_id: i64,
     message: Option<TgMessage>,
+    callback_query: Option<TgCallbackQuery>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TgCallbackQuery {
+    id: String,
+    from: TgUser,
+    message: Option<TgMessage>,
+    data: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,30 +186,64 @@ impl TelegramChannel {
     }
 
     /// Send a text message, chunking if necessary.
-    async fn send_text(&self, chat_id: i64, text: &str) -> Result<()> {
+    /// If `buttons` is non-empty, attaches an inline keyboard to the *last* chunk only.
+    async fn send_text(
+        &self,
+        chat_id: i64,
+        text: &str,
+        buttons: &[Vec<super::InlineButton>],
+    ) -> Result<()> {
         let chunks = chunk_message(text);
-        for chunk in chunks {
+        let last_idx = chunks.len().saturating_sub(1);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut payload = serde_json::json!({
+                "chat_id": chat_id,
+                "text": chunk,
+                "parse_mode": "Markdown",
+            });
+
+            // Attach inline keyboard to the last chunk only.
+            if i == last_idx && !buttons.is_empty() {
+                let keyboard: Vec<Vec<serde_json::Value>> = buttons
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|btn| {
+                                serde_json::json!({
+                                    "text": btn.text,
+                                    "callback_data": btn.callback_data,
+                                })
+                            })
+                            .collect()
+                    })
+                    .collect();
+                payload["reply_markup"] = serde_json::json!({
+                    "inline_keyboard": keyboard,
+                });
+            }
+
             let resp = self
                 .client
                 .post(self.api_url("sendMessage"))
-                .json(&serde_json::json!({
-                    "chat_id": chat_id,
-                    "text": chunk,
-                    "parse_mode": "Markdown",
-                }))
+                .json(&payload)
                 .send()
                 .await?;
 
             let body: TgResponse<serde_json::Value> = resp.json().await?;
             if !body.ok {
                 // Retry without Markdown if parse_mode fails.
+                let mut fallback = serde_json::json!({
+                    "chat_id": chat_id,
+                    "text": chunk,
+                });
+                if i == last_idx && !buttons.is_empty() {
+                    fallback["reply_markup"] = payload["reply_markup"].clone();
+                }
+
                 let resp = self
                     .client
                     .post(self.api_url("sendMessage"))
-                    .json(&serde_json::json!({
-                        "chat_id": chat_id,
-                        "text": chunk,
-                    }))
+                    .json(&fallback)
                     .send()
                     .await?;
 
@@ -212,6 +255,22 @@ impl TelegramChannel {
             }
         }
         Ok(())
+    }
+
+    /// Acknowledge a callback query to dismiss the Telegram loading spinner.
+    pub async fn answer_callback(&self, callback_query_id: &str) {
+        let resp = self
+            .client
+            .post(self.api_url("answerCallbackQuery"))
+            .json(&serde_json::json!({
+                "callback_query_id": callback_query_id,
+            }))
+            .send()
+            .await;
+
+        if let Err(e) = resp {
+            eprintln!("[telegram] answerCallbackQuery failed: {e}");
+        }
     }
 }
 
@@ -246,6 +305,33 @@ impl Channel for TelegramChannel {
             for update in updates {
                 offset = update.update_id + 1;
 
+                // Handle callback queries from inline keyboard buttons.
+                if let Some(cq) = update.callback_query {
+                    if !self.is_user_allowed(cq.from.id) {
+                        eprintln!(
+                            "[telegram] Ignoring callback query from unauthorized user {}",
+                            cq.from.id
+                        );
+                        continue;
+                    }
+
+                    let chat_id = cq.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
+                    let user_name = cq.from.username.unwrap_or(cq.from.first_name);
+
+                    if let Some(data) = cq.data {
+                        let event = ChannelEvent::CallbackQuery {
+                            chat_id,
+                            user_name,
+                            data,
+                            callback_query_id: cq.id,
+                        };
+                        if tx.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                    continue;
+                }
+
                 let Some(msg) = update.message else {
                     continue;
                 };
@@ -272,7 +358,11 @@ impl Channel for TelegramChannel {
     }
 
     async fn send_message(&self, msg: &OutboundMessage) -> Result<()> {
-        self.send_text(msg.chat_id, &msg.text).await
+        self.send_text(msg.chat_id, &msg.text, &msg.buttons).await
+    }
+
+    async fn answer_callback_query(&self, callback_query_id: &str) {
+        self.answer_callback(callback_query_id).await;
     }
 }
 

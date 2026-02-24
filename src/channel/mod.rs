@@ -28,6 +28,21 @@ pub enum ChannelEvent {
         command: String,
         args: String,
     },
+
+    /// An inline keyboard button press (Telegram callback query).
+    CallbackQuery {
+        chat_id: i64,
+        user_name: String,
+        data: String,
+        callback_query_id: String,
+    },
+}
+
+/// A button in an inline keyboard row.
+#[derive(Debug, Clone)]
+pub struct InlineButton {
+    pub text: String,
+    pub callback_data: String,
 }
 
 /// A message to send back through a channel.
@@ -35,6 +50,8 @@ pub enum ChannelEvent {
 pub struct OutboundMessage {
     pub chat_id: i64,
     pub text: String,
+    /// Optional inline keyboard buttons (rows of buttons).
+    pub buttons: Vec<Vec<InlineButton>>,
 }
 
 /// Trait for messaging channel integrations.
@@ -54,4 +71,7 @@ pub trait Channel: Send + Sync {
 
     /// Send a message through this channel.
     async fn send_message(&self, msg: &OutboundMessage) -> color_eyre::Result<()>;
+
+    /// Acknowledge a callback query (required by Telegram to dismiss spinner).
+    async fn answer_callback_query(&self, callback_query_id: &str);
 }
