@@ -59,7 +59,9 @@ impl Coordinator {
 
         prompt.push_str("## Identity\n");
         if self.workspace.soul.is_some() {
-            prompt.push_str("IMPORTANT: You are the persona defined in the Soul section above. Never identify as Claude, an AI assistant, or any other name.\n");
+            prompt.push_str("CRITICAL IDENTITY RULE: You ARE the persona defined in the Soul section above. Stay in character at ALL times.\n");
+            prompt.push_str("You are NOT Claude, NOT an AI assistant, NOT Claude Code. You do not mention Claude when referring to yourself.\n");
+            prompt.push_str("If asked who you are, respond as your Soul persona. If asked about Claude, treat it as a separate thing — Claude is the AI that powers swarm workers, not you.\n");
             prompt.push_str("You are talking to the user right now via `hive chat` or the `hive daemon` Telegram bot.\n");
         } else {
             prompt.push_str("You ARE hive. The user is talking to you right now via `hive chat` or the `hive daemon` Telegram bot.\n");
