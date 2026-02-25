@@ -7,6 +7,79 @@ use color_eyre::eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+// ── Global Workspace Registry ────────────────────────────
+
+/// Entry in the global workspace registry (`~/.config/hive/workspaces.toml`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Wrapper for the TOML file format.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct Registry {
+    #[serde(default)]
+    workspaces: Vec<RegistryEntry>,
+}
+
+/// Path to the global workspace registry file.
+fn registry_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("hive")
+        .join("workspaces.toml")
+}
+
+/// Load all registered workspaces from `~/.config/hive/workspaces.toml`.
+pub fn load_registry() -> Vec<RegistryEntry> {
+    let path = registry_path();
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let registry: Registry = toml::from_str(&contents).unwrap_or_default();
+    registry.workspaces
+}
+
+/// Register a workspace path in the global registry.
+///
+/// Adds the entry if not already present (match by canonical path).
+/// Creates the registry file and parent directories if needed.
+pub fn register_workspace(path: &Path, name: &str) -> Result<()> {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    let reg_path = registry_path();
+    let mut registry: Registry = reg_path
+        .exists()
+        .then(|| std::fs::read_to_string(&reg_path).ok())
+        .flatten()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default();
+
+    // Check if already registered (by canonical path).
+    let already = registry
+        .workspaces
+        .iter()
+        .any(|e| std::fs::canonicalize(&e.path).unwrap_or_else(|_| e.path.clone()) == canonical);
+    if already {
+        return Ok(());
+    }
+
+    registry.workspaces.push(RegistryEntry {
+        name: name.to_owned(),
+        path: canonical,
+    });
+
+    if let Some(parent) = reg_path.parent() {
+        std::fs::create_dir_all(parent).wrap_err("failed to create registry directory")?;
+    }
+    let toml_str =
+        toml::to_string_pretty(&registry).wrap_err("failed to serialize workspace registry")?;
+    std::fs::write(&reg_path, toml_str).wrap_err("failed to write workspace registry")?;
+
+    Ok(())
+}
+
 /// Workspace configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
@@ -147,6 +220,9 @@ pub fn init_workspace(dir: &Path) -> Result<PathBuf> {
     // Also create the quests directory.
     let quests_dir = hive_dir.join("quests");
     std::fs::create_dir_all(&quests_dir).wrap_err("failed to create quests directory")?;
+
+    // Register in the global workspace registry.
+    let _ = register_workspace(dir, &default.name);
 
     Ok(config_path)
 }

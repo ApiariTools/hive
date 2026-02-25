@@ -13,6 +13,7 @@ mod keeper;
 mod quest;
 mod reminder;
 pub(crate) mod signal;
+mod ui;
 mod worker;
 mod workspace;
 
@@ -83,6 +84,9 @@ enum Command {
         #[arg(long)]
         output: Option<String>,
     },
+
+    /// Launch the unified hive TUI (chat + workers + tabs).
+    Ui,
 
     /// Launch the read-only dashboard TUI.
     Dashboard {
@@ -166,6 +170,7 @@ async fn main() -> Result<()> {
             config,
             output,
         } => buzz::run(&config, &cwd, daemon, once, output.as_deref()).await,
+        Command::Ui => ui::run(&cwd).await,
         Command::Dashboard { once } => keeper::run(once).await,
         Command::Remind {
             duration,
