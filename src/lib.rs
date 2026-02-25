@@ -3,3 +3,4 @@
 pub mod buzz;
 pub mod quest;
 pub mod signal;
+pub mod workspace;
