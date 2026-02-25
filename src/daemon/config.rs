@@ -75,6 +75,11 @@ pub struct TelegramConfig {
 
     /// Chat ID where buzz triage alerts are sent.
     pub alert_chat_id: i64,
+
+    /// Forum topic ID for notifications. When set, outbound alerts and
+    /// auto-triage messages are sent to this topic within the alert chat.
+    #[serde(default)]
+    pub topic_id: Option<i64>,
 }
 
 /// Inline buzz watcher configuration for daemon mode.

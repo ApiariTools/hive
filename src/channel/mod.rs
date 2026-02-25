@@ -17,6 +17,8 @@ pub enum ChannelEvent {
         user_id: i64,
         user_name: String,
         text: String,
+        /// Forum topic ID, if the message was sent in a topic.
+        topic_id: Option<i64>,
     },
 
     /// A slash command from a user (e.g. /reset, /history).
@@ -27,6 +29,8 @@ pub enum ChannelEvent {
         user_name: String,
         command: String,
         args: String,
+        /// Forum topic ID, if the command was sent in a topic.
+        topic_id: Option<i64>,
     },
 
     /// An inline keyboard button press (Telegram callback query).
@@ -52,6 +56,8 @@ pub struct OutboundMessage {
     pub text: String,
     /// Optional inline keyboard buttons (rows of buttons).
     pub buttons: Vec<Vec<InlineButton>>,
+    /// Forum topic ID. When set, the message is sent to this topic.
+    pub topic_id: Option<i64>,
 }
 
 /// Trait for messaging channel integrations.

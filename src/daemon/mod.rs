@@ -318,6 +318,9 @@ struct DaemonRunner {
     button_labels: HashMap<String, String>,
     /// Insertion-order tracking for FIFO eviction of button_labels.
     button_labels_order: VecDeque<String>,
+    /// Topic ID for the current event being handled (from incoming message).
+    /// Used by `send()` to reply in the same topic.
+    active_topic_id: Option<i64>,
 }
 
 impl DaemonRunner {
@@ -476,6 +479,7 @@ impl DaemonRunner {
             restart_requested: Arc::new(AtomicBool::new(false)),
             button_labels: HashMap::new(),
             button_labels_order: VecDeque::new(),
+            active_topic_id: None,
         })
     }
 
@@ -619,17 +623,19 @@ impl DaemonRunner {
             return self.handle_callback(chat_id, &data).await;
         }
 
-        let (chat_id, message_id) = match &event {
+        let (chat_id, message_id, topic_id) = match &event {
             ChannelEvent::Command {
                 chat_id,
                 message_id,
+                topic_id,
                 ..
             }
             | ChannelEvent::Message {
                 chat_id,
                 message_id,
+                topic_id,
                 ..
-            } => (*chat_id, *message_id),
+            } => (*chat_id, *message_id, *topic_id),
             ChannelEvent::CallbackQuery { .. } => unreachable!(),
         };
 
@@ -638,13 +644,16 @@ impl DaemonRunner {
             return Ok(());
         }
 
+        // Set topic context so send() replies in the same topic.
+        self.active_topic_id = topic_id;
+
         // React immediately so the user knows we received their message.
         self.channel.send_reaction(chat_id, message_id, "👀").await;
 
         // Touch the telegram channel so presence routing knows telegram is active.
         let _ = crate::presence::touch_channel(&self.workspace_root, "telegram");
 
-        match event {
+        let result = match event {
             ChannelEvent::Command {
                 chat_id,
                 user_name,
@@ -670,7 +679,11 @@ impl DaemonRunner {
                     .await
             }
             ChannelEvent::CallbackQuery { .. } => unreachable!(),
-        }
+        };
+
+        // Clear topic context after handling.
+        self.active_topic_id = None;
+        result
     }
 
     /// Handle an inline keyboard button press.
@@ -1019,6 +1032,7 @@ impl DaemonRunner {
         // Build a callback that sends intermediate text blocks to Telegram immediately,
         // splitting long messages to stay within Telegram's 4096-char limit.
         let channel = self.channel.clone();
+        let topic_id = self.active_topic_id;
         let send_fn = move |text: String| {
             let channel = channel.clone();
             async move {
@@ -1028,6 +1042,7 @@ impl DaemonRunner {
                             chat_id,
                             text: chunk,
                             buttons: vec![],
+                            topic_id,
                         })
                         .await?;
                 }
@@ -1286,12 +1301,15 @@ impl DaemonRunner {
 
         eprintln!("[daemon] {} new buzz signal(s) to triage", important.len());
 
+        // Use configured notification topic for background alerts.
+        self.active_topic_id = self.config.telegram.topic_id;
         for signal in important {
             let assessment = self.triage_signal(signal).await;
             let alert = format_triage_alert(signal, &assessment);
             let alert_chat_id = self.config.telegram.alert_chat_id;
             self.send(alert_chat_id, &alert).await?;
         }
+        self.active_topic_id = None;
 
         self.sessions.save()?;
         Ok(())
@@ -1370,6 +1388,8 @@ impl DaemonRunner {
 
         eprintln!("[daemon] {} reminder(s) fired", fired.len());
 
+        // Use configured notification topic for background reminders.
+        self.active_topic_id = self.config.telegram.topic_id;
         for r in &fired {
             let chat_id = r.chat_id.unwrap_or(self.config.telegram.alert_chat_id);
             let text = format!("🔔 Reminder: {}", r.message);
@@ -1379,6 +1399,7 @@ impl DaemonRunner {
                 r.message, chat_id
             );
         }
+        self.active_topic_id = None;
 
         self.reminder_store.save()?;
         Ok(())
@@ -1609,7 +1630,8 @@ impl DaemonRunner {
             }
         }
 
-        // Send the Telegram portion.
+        // Send the Telegram portion (use configured notification topic).
+        self.active_topic_id = self.config.telegram.topic_id;
         let mut first_send = true;
         for (chat_id, group) in &telegram_by_chat {
             if group.len() >= 3 {
@@ -1668,6 +1690,8 @@ impl DaemonRunner {
             }
         }
 
+        self.active_topic_id = None;
+
         // Phase 4: Auto-triage eligible notifications — spawned in background
         // so coordinator calls never block the poll loop.
         if self
@@ -1702,6 +1726,7 @@ impl DaemonRunner {
                     auto_triaged.insert(wt_id);
                     let chat_id = *chat_id;
                     let channel = self.channel.clone();
+                    let notification_topic_id = self.config.telegram.topic_id;
                     let coordinator_prompt = self.coordinator_prompt.clone();
                     let model = self.config.model.clone();
                     let workspace_root = self.workspace_root.clone();
@@ -1786,6 +1811,7 @@ impl DaemonRunner {
                                 .send_message(&OutboundMessage {
                                     chat_id,
                                     text: chunk,
+                                    topic_id: notification_topic_id,
                                     buttons: if i == last_idx {
                                         buttons.clone()
                                     } else {
@@ -1888,6 +1914,7 @@ impl DaemonRunner {
                     chat_id,
                     text: chunk,
                     buttons: vec![],
+                    topic_id: self.active_topic_id,
                 })
                 .await?;
         }
@@ -1914,6 +1941,7 @@ impl DaemonRunner {
                     } else {
                         vec![]
                     },
+                    topic_id: self.active_topic_id,
                 })
                 .await?;
         }
@@ -2269,6 +2297,7 @@ pub(crate) async fn dispatch_notifications(
                     chat_id: *chat_id,
                     text: text.clone(),
                     buttons: vec![],
+                    topic_id: None,
                 })
                 .await
             {
@@ -2281,6 +2310,7 @@ pub(crate) async fn dispatch_notifications(
                             chat_id: alert_chat_id,
                             text: text.clone(),
                             buttons: vec![],
+                            topic_id: None,
                         })
                         .await;
                 }

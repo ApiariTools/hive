@@ -50,6 +50,9 @@ struct TgMessage {
     chat: TgChat,
     from: Option<TgUser>,
     text: Option<String>,
+    /// Forum topic thread ID (present when message is in a topic).
+    #[serde(default)]
+    message_thread_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +104,8 @@ impl TelegramChannel {
             .clone()
             .unwrap_or_else(|| user.first_name.clone());
 
+        let topic_id = msg.message_thread_id;
+
         if let Some(rest) = text.strip_prefix('/') {
             // Split command from args: "/reset abc" -> ("reset", "abc")
             let (command, args) = match rest.split_once(' ') {
@@ -116,6 +121,7 @@ impl TelegramChannel {
                 user_name,
                 command: command.to_owned(),
                 args: args.trim().to_owned(),
+                topic_id,
             })
         } else {
             Some(ChannelEvent::Message {
@@ -124,6 +130,7 @@ impl TelegramChannel {
                 user_id: user.id,
                 user_name,
                 text: text.to_owned(),
+                topic_id,
             })
         }
     }
@@ -192,6 +199,7 @@ impl TelegramChannel {
         chat_id: i64,
         text: &str,
         buttons: &[Vec<super::InlineButton>],
+        topic_id: Option<i64>,
     ) -> Result<()> {
         let chunks = chunk_message(text);
         let last_idx = chunks.len().saturating_sub(1);
@@ -201,6 +209,9 @@ impl TelegramChannel {
                 "text": chunk,
                 "parse_mode": "Markdown",
             });
+            if let Some(tid) = topic_id {
+                payload["message_thread_id"] = serde_json::json!(tid);
+            }
 
             // Attach inline keyboard to the last chunk only.
             if i == last_idx && !buttons.is_empty() {
@@ -236,6 +247,9 @@ impl TelegramChannel {
                     "chat_id": chat_id,
                     "text": chunk,
                 });
+                if let Some(tid) = topic_id {
+                    fallback["message_thread_id"] = serde_json::json!(tid);
+                }
                 if i == last_idx && !buttons.is_empty() {
                     fallback["reply_markup"] = payload["reply_markup"].clone();
                 }
@@ -358,7 +372,8 @@ impl Channel for TelegramChannel {
     }
 
     async fn send_message(&self, msg: &OutboundMessage) -> Result<()> {
-        self.send_text(msg.chat_id, &msg.text, &msg.buttons).await
+        self.send_text(msg.chat_id, &msg.text, &msg.buttons, msg.topic_id)
+            .await
     }
 
     async fn answer_callback_query(&self, callback_query_id: &str) {
@@ -466,6 +481,7 @@ mod tests {
                 username: Some("josh".into()),
             }),
             text: Some("/reset now".into()),
+            message_thread_id: None,
         };
         let event = TelegramChannel::parse_message(&msg).unwrap();
         match event {
@@ -488,6 +504,7 @@ mod tests {
                 username: None,
             }),
             text: Some("/status@mybot".into()),
+            message_thread_id: None,
         };
         let event = TelegramChannel::parse_message(&msg).unwrap();
         match event {
@@ -509,6 +526,7 @@ mod tests {
                 username: Some("josh".into()),
             }),
             text: Some("hello world".into()),
+            message_thread_id: None,
         };
         let event = TelegramChannel::parse_message(&msg).unwrap();
         match event {
@@ -560,6 +578,7 @@ mod tests {
                 username: None,
             }),
             text: Some("  ".into()),
+            message_thread_id: None,
         };
         assert!(TelegramChannel::parse_message(&msg).is_none());
     }
@@ -575,7 +594,56 @@ mod tests {
                 username: None,
             }),
             text: None,
+            message_thread_id: None,
         };
         assert!(TelegramChannel::parse_message(&msg).is_none());
+    }
+
+    #[test]
+    fn test_parse_message_in_topic() {
+        let msg = TgMessage {
+            message_id: 1,
+            chat: TgChat { id: 100 },
+            from: Some(TgUser {
+                id: 1,
+                first_name: "Josh".into(),
+                username: Some("josh".into()),
+            }),
+            text: Some("hello from topic".into()),
+            message_thread_id: Some(42),
+        };
+        let event = TelegramChannel::parse_message(&msg).unwrap();
+        match event {
+            ChannelEvent::Message { topic_id, text, .. } => {
+                assert_eq!(topic_id, Some(42));
+                assert_eq!(text, "hello from topic");
+            }
+            _ => panic!("expected Message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_command_in_topic() {
+        let msg = TgMessage {
+            message_id: 1,
+            chat: TgChat { id: 100 },
+            from: Some(TgUser {
+                id: 1,
+                first_name: "Josh".into(),
+                username: Some("josh".into()),
+            }),
+            text: Some("/status".into()),
+            message_thread_id: Some(99),
+        };
+        let event = TelegramChannel::parse_message(&msg).unwrap();
+        match event {
+            ChannelEvent::Command {
+                topic_id, command, ..
+            } => {
+                assert_eq!(topic_id, Some(99));
+                assert_eq!(command, "status");
+            }
+            _ => panic!("expected Command"),
+        }
     }
 }
