@@ -1706,14 +1706,21 @@ impl DaemonRunner {
                             }
                             _ => format!("🤖 *Auto\\-triage* — `{worktree_id}`"),
                         };
-                        let body = markdown::sanitize_for_telegram(&response);
+                        let (clean_response, buttons) = extract_buttons(&response);
+                        let body = markdown::sanitize_for_telegram(&clean_response);
                         let text = format!("{header}\n\n{body}");
-                        for chunk in split_message(&text, 4000) {
+                        let chunks = split_message(&text, 4000);
+                        let last_idx = chunks.len().saturating_sub(1);
+                        for (i, chunk) in chunks.into_iter().enumerate() {
                             if let Err(e) = channel
                                 .send_message(&OutboundMessage {
                                     chat_id,
                                     text: chunk,
-                                    buttons: vec![],
+                                    buttons: if i == last_idx {
+                                        buttons.clone()
+                                    } else {
+                                        vec![]
+                                    },
                                 })
                                 .await
                             {
