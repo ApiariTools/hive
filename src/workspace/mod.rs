@@ -33,8 +33,12 @@ fn registry_path() -> PathBuf {
 
 /// Load all registered workspaces from `~/.config/hive/workspaces.toml`.
 pub fn load_registry() -> Vec<RegistryEntry> {
-    let path = registry_path();
-    let Ok(contents) = std::fs::read_to_string(&path) else {
+    load_registry_at(&registry_path())
+}
+
+/// Load registered workspaces from a specific registry file path.
+pub fn load_registry_at(path: &Path) -> Vec<RegistryEntry> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let registry: Registry = toml::from_str(&contents).unwrap_or_default();
@@ -46,12 +50,16 @@ pub fn load_registry() -> Vec<RegistryEntry> {
 /// Adds the entry if not already present (match by canonical path).
 /// Creates the registry file and parent directories if needed.
 pub fn register_workspace(path: &Path, name: &str) -> Result<()> {
+    register_workspace_at(&registry_path(), path, name)
+}
+
+/// Register a workspace in a specific registry file.
+pub fn register_workspace_at(reg_path: &Path, path: &Path, name: &str) -> Result<()> {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
-    let reg_path = registry_path();
     let mut registry: Registry = reg_path
         .exists()
-        .then(|| std::fs::read_to_string(&reg_path).ok())
+        .then(|| std::fs::read_to_string(reg_path).ok())
         .flatten()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default();
@@ -75,7 +83,7 @@ pub fn register_workspace(path: &Path, name: &str) -> Result<()> {
     }
     let toml_str =
         toml::to_string_pretty(&registry).wrap_err("failed to serialize workspace registry")?;
-    std::fs::write(&reg_path, toml_str).wrap_err("failed to write workspace registry")?;
+    std::fs::write(reg_path, toml_str).wrap_err("failed to write workspace registry")?;
 
     Ok(())
 }

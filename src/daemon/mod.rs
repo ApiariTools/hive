@@ -1171,11 +1171,18 @@ impl DaemonRunner {
 
                     let is_end_turn = message.message.stop_reason.as_deref() == Some("end_turn");
 
-                    // Collect text blocks from this event.
+                    // Collect text blocks and log tool calls from this event.
                     let mut block_text = String::new();
                     for block in &message.message.content {
-                        if let ContentBlock::Text { text } = block {
-                            block_text.push_str(text);
+                        match block {
+                            ContentBlock::Text { text } => block_text.push_str(text),
+                            ContentBlock::ToolUse { name, input, .. } => {
+                                eprintln!(
+                                    "[daemon] Coordinator tool call: {name}({})",
+                                    truncate(&input.to_string(), 120)
+                                );
+                            }
+                            _ => {}
                         }
                     }
 
@@ -1217,7 +1224,28 @@ impl DaemonRunner {
                         eprintln!("[daemon] Rate limit status: {info}");
                     }
                 }
-                Some(_) => {}
+                Some(Event::System(sys)) => {
+                    let sid = sys
+                        .data
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let model = sys
+                        .data
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    eprintln!("[daemon] Coordinator session: session_id={sid}, model={model}",);
+                    if session_id.is_empty() {
+                        session_id = sid.to_owned();
+                    }
+                }
+                Some(Event::User(_)) => {
+                    // Echo of our own prompt — nothing to do.
+                }
+                Some(Event::Stream { .. }) => {
+                    // Partial streaming tokens — not used in daemon mode.
+                }
                 None => break,
             }
         }
