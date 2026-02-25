@@ -535,7 +535,7 @@ impl Coordinator {
         let opts = SessionOptions {
             system_prompt: Some(planning_prompt),
             model: Some("sonnet".into()),
-            max_turns: Some(3),
+            max_turns: Some(7),
             working_dir: Some(self.workspace.root.clone()),
             ..Default::default()
         };
