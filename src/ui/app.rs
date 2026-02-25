@@ -2,7 +2,10 @@
 
 use crate::keeper::discovery::{self, SwarmSession};
 use crate::workspace::RegistryEntry;
+use std::path::PathBuf;
 use std::time::Instant;
+
+use super::history;
 
 /// Which panel has focus.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,25 +44,49 @@ pub struct App {
     // Scroll offset for chat (lines from bottom)
     pub chat_scroll: u16,
 
+    // Workspace root for history/inbox persistence
+    pub workspace_root: PathBuf,
+
+    // UI inbox file position for incremental polling
+    pub inbox_pos: u64,
+
     // Periodic refresh
     last_worker_refresh: Instant,
 }
 
 impl App {
-    pub fn new(workspaces: Vec<RegistryEntry>, active_tab: usize) -> Self {
+    pub fn new(workspaces: Vec<RegistryEntry>, active_tab: usize, workspace_root: PathBuf) -> Self {
+        // Load persisted chat history.
+        let saved = history::load_history(&workspace_root, 50);
+        let mut chat_history: Vec<ChatLine> = vec![ChatLine::System(
+            "Welcome to hive ui. Type a message to chat with the coordinator.".into(),
+        )];
+        for msg in &saved {
+            match msg.role.as_str() {
+                "user" => chat_history.push(ChatLine::User(msg.content.clone())),
+                "assistant" => chat_history.push(ChatLine::Assistant(msg.content.clone())),
+                _ => {}
+            }
+        }
+
+        // Skip to end of inbox file so we only see new events.
+        let inbox_pos = std::fs::metadata(workspace_root.join(".hive/ui_inbox.jsonl"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+
         Self {
             workspaces,
             active_tab,
             sessions: Vec::new(),
             selected_worker: 0,
-            chat_history: vec![ChatLine::System(
-                "Welcome to hive ui. Type a message to chat with the coordinator.".into(),
-            )],
+            chat_history,
             input: String::new(),
             input_cursor: 0,
             streaming: false,
             focus: Panel::Chat,
             chat_scroll: 0,
+            workspace_root,
+            inbox_pos,
             last_worker_refresh: Instant::now(),
         }
     }

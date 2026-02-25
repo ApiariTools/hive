@@ -641,6 +641,9 @@ impl DaemonRunner {
         // React immediately so the user knows we received their message.
         self.channel.send_reaction(chat_id, message_id, "👀").await;
 
+        // Touch the telegram channel so presence routing knows telegram is active.
+        let _ = crate::presence::touch_channel(&self.workspace_root, "telegram");
+
         match event {
             ChannelEvent::Command {
                 chat_id,
@@ -1483,6 +1486,11 @@ impl DaemonRunner {
         }
     }
 
+    /// Check if the hive UI is the active channel (for notification routing).
+    fn should_use_ui(&self) -> bool {
+        crate::presence::active_channel(&self.workspace_root) == "ui"
+    }
+
     /// Poll swarm state for agent completion notifications.
     ///
     /// To avoid Telegram rate-limiting (~1 msg/sec per chat), notifications are
@@ -1565,11 +1573,39 @@ impl DaemonRunner {
             }
         }
 
-        // Phase 3: Send — batch 3+ notifications per chat, else send with 500ms delays.
-        // If a send fails (e.g. stale chat_id from origin map), fall back to alert_chat_id.
-        // Individual notifications get inline keyboard buttons; batches do not.
+        // Phase 3: Send — route to UI inbox when TUI is active, else Telegram.
+        // Stalls (urgent) always go to Telegram regardless of routing.
+        // When using Telegram: batch 3+ per chat into one summary, else send
+        // individually with inline buttons and 500ms delays.
+        let use_ui = self.should_use_ui();
+        let mut telegram_by_chat: Vec<(i64, Vec<&swarm_watcher::SwarmNotification>)> = Vec::new();
+
+        if use_ui {
+            for (chat_id, group) in &by_chat {
+                let mut telegram_group: Vec<&swarm_watcher::SwarmNotification> = Vec::new();
+                for n in group {
+                    let is_stall =
+                        matches!(n, swarm_watcher::SwarmNotification::AgentStalled { .. });
+                    // Route to UI inbox.
+                    if let Some(ui_event) = notification_to_ui_event(n) {
+                        let _ = crate::ui::inbox::push_event(&self.workspace_root, &ui_event);
+                    }
+                    // Stalls also go to Telegram (urgent).
+                    if is_stall {
+                        telegram_group.push(n);
+                    }
+                }
+                if !telegram_group.is_empty() {
+                    telegram_by_chat.push((*chat_id, telegram_group));
+                }
+            }
+        } else {
+            telegram_by_chat = by_chat.clone();
+        }
+
+        // Send the Telegram portion.
         let mut first_send = true;
-        for (chat_id, group) in &by_chat {
+        for (chat_id, group) in &telegram_by_chat {
             if group.len() >= 3 {
                 // Batched — no buttons.
                 let text = format_swarm_batch(group);
@@ -2065,6 +2101,46 @@ fn read_pr_url_from_swarm(workspace_root: &Path, worktree_id: &str) -> Option<St
 ///
 /// Used when 3+ notifications arrive in one poll cycle for the same chat,
 /// to avoid spamming Telegram with rapid-fire messages.
+/// Convert a `SwarmNotification` to a `UiEvent` for routing to the TUI inbox.
+/// Returns `None` for notification types that don't map (e.g. AgentSpawned).
+fn notification_to_ui_event(
+    n: &swarm_watcher::SwarmNotification,
+) -> Option<crate::ui::inbox::UiEvent> {
+    match n {
+        swarm_watcher::SwarmNotification::PrOpened {
+            worktree_id,
+            pr_url,
+            pr_title,
+            ..
+        } => Some(crate::ui::inbox::UiEvent::PrOpened {
+            worktree_id: worktree_id.clone(),
+            pr_url: pr_url.clone(),
+            pr_title: pr_title.clone().unwrap_or_default(),
+        }),
+        swarm_watcher::SwarmNotification::AgentWaiting { worktree_id, .. } => {
+            Some(crate::ui::inbox::UiEvent::AgentWaiting {
+                worktree_id: worktree_id.clone(),
+            })
+        }
+        swarm_watcher::SwarmNotification::AgentStalled { worktree_id, .. } => {
+            Some(crate::ui::inbox::UiEvent::AgentStalled {
+                worktree_id: worktree_id.clone(),
+            })
+        }
+        swarm_watcher::SwarmNotification::AgentCompleted { worktree_id, .. } => {
+            Some(crate::ui::inbox::UiEvent::AgentCompleted {
+                worktree_id: worktree_id.clone(),
+            })
+        }
+        swarm_watcher::SwarmNotification::AgentClosed { worktree_id, .. } => {
+            Some(crate::ui::inbox::UiEvent::AgentClosed {
+                worktree_id: worktree_id.clone(),
+            })
+        }
+        swarm_watcher::SwarmNotification::AgentSpawned { .. } => None,
+    }
+}
+
 fn format_swarm_batch(notifications: &[&swarm_watcher::SwarmNotification]) -> String {
     let mut text = format!("🐝 {} swarm updates:", notifications.len());
     for n in notifications {

@@ -10,6 +10,7 @@ mod daemon;
 #[allow(dead_code)]
 mod github;
 mod keeper;
+mod presence;
 mod quest;
 mod reminder;
 pub(crate) mod signal;

@@ -1,6 +1,8 @@
 //! Unified hive TUI — workers panel + coordinator chat + workspace tabs.
 
 pub mod app;
+pub mod history;
+pub mod inbox;
 pub mod render;
 
 use app::{App, ChatLine, Panel};
@@ -16,6 +18,7 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::presence;
 use crate::workspace::{self, load_workspace};
 
 /// Messages sent from the coordinator background task back to the TUI.
@@ -51,7 +54,8 @@ pub async fn run(cwd: &Path) -> Result<()> {
         })
         .unwrap_or(0);
 
-    let mut app = App::new(workspaces, active_tab);
+    let workspace_root = canonical_cwd.clone();
+    let mut app = App::new(workspaces, active_tab, workspace_root.clone());
     app.refresh_workers();
 
     // Channels for coordinator communication.
@@ -62,6 +66,20 @@ pub async fn run(cwd: &Path) -> Result<()> {
     let coord_cwd = cwd.to_path_buf();
     tokio::spawn(coordinator_task(coord_cwd, user_rx, coord_tx));
 
+    // Spawn presence heartbeat — touch "ui" channel every 5 seconds.
+    let heartbeat_root = workspace_root.clone();
+    let heartbeat_cancel = tokio_util::sync::CancellationToken::new();
+    let heartbeat_token = heartbeat_cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            let _ = presence::touch_channel(&heartbeat_root, "ui");
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                _ = heartbeat_token.cancelled() => break,
+            }
+        }
+    });
+
     // Terminal setup.
     stdout().execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
@@ -70,6 +88,9 @@ pub async fn run(cwd: &Path) -> Result<()> {
     terminal.clear()?;
 
     let result = event_loop(&mut terminal, &mut app, &user_tx, coord_rx).await;
+
+    // Stop heartbeat.
+    heartbeat_cancel.cancel();
 
     // Terminal teardown.
     disable_raw_mode()?;
@@ -100,6 +121,17 @@ async fn event_loop(
                     app.chat_scroll = 0;
                 }
                 CoordResponse::Done => {
+                    // Persist the completed assistant response.
+                    if let Some(ChatLine::Assistant(s)) = app.chat_history.last() {
+                        let _ = history::save_message(
+                            &app.workspace_root,
+                            &history::ChatMessage {
+                                role: "assistant".into(),
+                                content: s.clone(),
+                                ts: chrono::Utc::now(),
+                            },
+                        );
+                    }
                     app.streaming = false;
                 }
                 CoordResponse::Error(e) => {
@@ -125,9 +157,21 @@ async fn event_loop(
                     KeyCode::Enter => {
                         if !app.input.is_empty() && !app.streaming {
                             let text = app.take_input();
-                            app.chat_history.push(ChatLine::User(text.clone()));
+                            // Persist user message.
+                            let _ = history::save_message(
+                                &app.workspace_root,
+                                &history::ChatMessage {
+                                    role: "user".into(),
+                                    content: text.clone(),
+                                    ts: chrono::Utc::now(),
+                                },
+                            );
+                            // Build prompt with recent history context.
+                            let recent = history::load_history(&app.workspace_root, 20);
+                            let prompt = build_prompt_with_history(&recent, &text);
+                            app.chat_history.push(ChatLine::User(text));
                             app.streaming = true;
-                            let _ = user_tx.send(text).await;
+                            let _ = user_tx.send(prompt).await;
                         }
                     }
                     KeyCode::Backspace => app.backspace(),
@@ -152,8 +196,15 @@ async fn event_loop(
             }
         }
 
-        // Periodic refresh.
+        // Periodic refresh (workers).
         app.tick();
+
+        // Poll UI inbox for daemon-routed notifications.
+        let events = inbox::poll_events(&app.workspace_root, &mut app.inbox_pos);
+        for event in events {
+            app.chat_history.push(ChatLine::System(event.display()));
+            app.chat_scroll = 0;
+        }
     }
 
     Ok(())
@@ -261,6 +312,19 @@ async fn run_coordinator_message(
     }
 
     Ok(text)
+}
+
+/// Build a user message with recent conversation history prepended as context.
+fn build_prompt_with_history(history: &[history::ChatMessage], user_input: &str) -> String {
+    if history.is_empty() {
+        return user_input.to_string();
+    }
+    let mut parts = vec!["[Recent conversation]".to_string()];
+    for msg in history.iter().rev().take(20).rev() {
+        parts.push(format!("{}: {}", msg.role, msg.content));
+    }
+    parts.push(format!("\nCurrent message: {user_input}"));
+    parts.join("\n")
 }
 
 /// Build the coordinator system prompt from workspace config.
