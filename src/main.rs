@@ -13,6 +13,8 @@ mod keeper;
 mod presence;
 mod quest;
 mod reminder;
+#[allow(dead_code)]
+mod routing;
 pub(crate) mod signal;
 mod ui;
 mod worker;

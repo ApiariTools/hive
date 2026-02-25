@@ -1573,34 +1573,40 @@ impl DaemonRunner {
             }
         }
 
-        // Phase 3: Send — route to UI inbox when TUI is active, else Telegram.
-        // Stalls (urgent) always go to Telegram regardless of routing.
+        // Phase 3: Send — use routing::decide() for each notification to determine
+        // whether it goes to the TUI inbox, Telegram, or both.
         // When using Telegram: batch 3+ per chat into one summary, else send
         // individually with inline buttons and 500ms delays.
-        let use_ui = self.should_use_ui();
+        let ui_active = self.should_use_ui();
         let mut telegram_by_chat: Vec<(i64, Vec<&swarm_watcher::SwarmNotification>)> = Vec::new();
 
-        if use_ui {
-            for (chat_id, group) in &by_chat {
-                let mut telegram_group: Vec<&swarm_watcher::SwarmNotification> = Vec::new();
-                for n in group {
-                    let is_stall =
-                        matches!(n, swarm_watcher::SwarmNotification::AgentStalled { .. });
-                    // Route to UI inbox.
-                    if let Some(ui_event) = notification_to_ui_event(n) {
-                        let _ = crate::ui::inbox::push_event(&self.workspace_root, &ui_event);
-                    }
-                    // Stalls also go to Telegram (urgent).
-                    if is_stall {
-                        telegram_group.push(n);
-                    }
+        for (chat_id, group) in &by_chat {
+            let mut telegram_group: Vec<&swarm_watcher::SwarmNotification> = Vec::new();
+            for n in group {
+                let urgent = matches!(n, swarm_watcher::SwarmNotification::AgentStalled { .. });
+                let decision = crate::routing::decide(ui_active, urgent);
+
+                // Write to UI inbox when routed there.
+                if matches!(
+                    decision,
+                    crate::routing::RoutingDecision::UiOnly | crate::routing::RoutingDecision::Both
+                ) && let Some(ui_event) = notification_to_ui_event(n)
+                {
+                    let _ = crate::ui::inbox::push_event(&self.workspace_root, &ui_event);
                 }
-                if !telegram_group.is_empty() {
-                    telegram_by_chat.push((*chat_id, telegram_group));
+
+                // Send to Telegram when routed there.
+                if matches!(
+                    decision,
+                    crate::routing::RoutingDecision::TelegramOnly
+                        | crate::routing::RoutingDecision::Both
+                ) {
+                    telegram_group.push(n);
                 }
             }
-        } else {
-            telegram_by_chat = by_chat.clone();
+            if !telegram_group.is_empty() {
+                telegram_by_chat.push((*chat_id, telegram_group));
+            }
         }
 
         // Send the Telegram portion.
@@ -2766,5 +2772,102 @@ mod tests {
         let (text, buttons) = extract_buttons(input);
         assert_eq!(text, input);
         assert!(buttons.is_empty());
+    }
+
+    // -- notification_to_ui_event tests --
+
+    #[test]
+    fn test_pr_opened_to_ui_event() {
+        let n = swarm_watcher::SwarmNotification::PrOpened {
+            worktree_id: "hive-1".into(),
+            branch: "feat/test".into(),
+            pr_url: "https://github.com/test/1".into(),
+            pr_title: Some("Fix bug".into()),
+            duration: "5m".into(),
+        };
+        let event = notification_to_ui_event(&n).unwrap();
+        if let crate::ui::inbox::UiEvent::PrOpened {
+            worktree_id,
+            pr_url,
+            pr_title,
+        } = event
+        {
+            assert_eq!(worktree_id, "hive-1");
+            assert_eq!(pr_url, "https://github.com/test/1");
+            assert_eq!(pr_title, "Fix bug");
+        } else {
+            panic!("expected PrOpened");
+        }
+    }
+
+    #[test]
+    fn test_agent_waiting_to_ui_event() {
+        let n = swarm_watcher::SwarmNotification::AgentWaiting {
+            worktree_id: "hive-2".into(),
+            branch: "feat/x".into(),
+            summary: None,
+            pr_url: None,
+        };
+        let event = notification_to_ui_event(&n).unwrap();
+        assert!(matches!(
+            event,
+            crate::ui::inbox::UiEvent::AgentWaiting { worktree_id } if worktree_id == "hive-2"
+        ));
+    }
+
+    #[test]
+    fn test_agent_stalled_to_ui_event() {
+        let n = swarm_watcher::SwarmNotification::AgentStalled {
+            worktree_id: "hive-3".into(),
+            branch: "feat/y".into(),
+            stall_kind: swarm_watcher::StallKind::Idle { minutes: 10 },
+        };
+        let event = notification_to_ui_event(&n).unwrap();
+        assert!(matches!(
+            event,
+            crate::ui::inbox::UiEvent::AgentStalled { worktree_id } if worktree_id == "hive-3"
+        ));
+    }
+
+    #[test]
+    fn test_agent_completed_to_ui_event() {
+        let n = swarm_watcher::SwarmNotification::AgentCompleted {
+            worktree_id: "hive-4".into(),
+            branch: "feat/z".into(),
+            summary: None,
+            duration: "3m".into(),
+            pr_url: None,
+        };
+        let event = notification_to_ui_event(&n).unwrap();
+        assert!(matches!(
+            event,
+            crate::ui::inbox::UiEvent::AgentCompleted { worktree_id } if worktree_id == "hive-4"
+        ));
+    }
+
+    #[test]
+    fn test_agent_closed_to_ui_event() {
+        let n = swarm_watcher::SwarmNotification::AgentClosed {
+            worktree_id: "hive-5".into(),
+            branch: "feat/w".into(),
+            summary: None,
+            duration: "2m".into(),
+            pr_url: None,
+        };
+        let event = notification_to_ui_event(&n).unwrap();
+        assert!(matches!(
+            event,
+            crate::ui::inbox::UiEvent::AgentClosed { worktree_id } if worktree_id == "hive-5"
+        ));
+    }
+
+    #[test]
+    fn test_agent_spawned_returns_none() {
+        let n = swarm_watcher::SwarmNotification::AgentSpawned {
+            worktree_id: "hive-6".into(),
+            branch: "feat/v".into(),
+            summary: None,
+        };
+        assert!(notification_to_ui_event(&n).is_none());
     }
 }
