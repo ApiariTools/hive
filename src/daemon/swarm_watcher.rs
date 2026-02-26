@@ -632,8 +632,13 @@ impl SwarmWatcher {
                     });
                 }
 
-                // Check if a PR was opened (pr_url transitioned from None to Some).
-                if prev.pr_url.is_none() && wt.pr_url().is_some() {
+                // Check if a PR was opened or changed (None→Some, or URL changed).
+                let pr_changed = match (prev.pr_url.as_deref(), wt.pr_url().as_deref()) {
+                    (None, Some(_)) => true,
+                    (Some(old), Some(new)) if old != new => true,
+                    _ => false,
+                };
+                if pr_changed {
                     let duration = format_duration(prev.created_at);
                     let url = wt.pr_url().unwrap();
                     notifications.push(SwarmNotification::PrOpened {
@@ -1284,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pr_opened_changed_url_no_spam() {
+    fn test_pr_opened_fires_on_url_change() {
         let mut file = NamedTempFile::new().unwrap();
         // Initial state: agent running with a PR already set.
         write_state(
@@ -1295,7 +1300,7 @@ mod tests {
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
         watcher.poll(); // Initialize
 
-        // PR URL changed — should NOT emit PrOpened (only None→Some triggers).
+        // PR URL changed — should emit PrOpened (worker opened a second PR).
         write_state(
             &mut file,
             r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/99"}}]}"#,
@@ -1306,10 +1311,14 @@ mod tests {
             .iter()
             .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
             .collect();
-        assert!(
-            pr_notes.is_empty(),
-            "should NOT emit PrOpened when pr_url changes (Some→Some)"
+        assert_eq!(
+            pr_notes.len(),
+            1,
+            "should emit PrOpened when pr_url changes (Some→Some with different URL)"
         );
+        if let SwarmNotification::PrOpened { pr_url, .. } = pr_notes[0] {
+            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/99");
+        }
     }
 
     #[test]
