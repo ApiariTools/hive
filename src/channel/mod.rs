@@ -81,5 +81,6 @@ pub trait Channel: Send + Sync {
     async fn send_message(&self, msg: &OutboundMessage) -> color_eyre::Result<()>;
 
     /// Acknowledge a callback query (required by Telegram to dismiss spinner).
+    #[allow(dead_code)]
     async fn answer_callback_query(&self, callback_query_id: &str);
 }

@@ -25,7 +25,7 @@ struct Registry {
 }
 
 /// Path to the global workspace registry file (`~/.config/hive/workspaces.toml`).
-fn registry_path() -> PathBuf {
+pub(crate) fn registry_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
@@ -36,6 +36,25 @@ fn registry_path() -> PathBuf {
 /// Load all registered workspaces from `~/.config/hive/workspaces.toml`.
 pub fn load_registry() -> Vec<RegistryEntry> {
     load_registry_at(&registry_path())
+}
+
+/// Load all registered workspaces without filtering out stale entries.
+///
+/// Unlike `load_registry()`, this returns entries even if their paths no longer
+/// exist on disk — useful for diagnostics (e.g. `hive doctor`).
+#[allow(dead_code)]
+pub(crate) fn load_registry_unfiltered() -> Vec<RegistryEntry> {
+    load_registry_unfiltered_at(&registry_path())
+}
+
+/// Load all registered workspaces from a specific file without filtering.
+#[allow(dead_code)]
+pub(crate) fn load_registry_unfiltered_at(path: &Path) -> Vec<RegistryEntry> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let registry: Registry = toml::from_str(&contents).unwrap_or_default();
+    registry.workspaces
 }
 
 /// Load registered workspaces from a specific registry file path.

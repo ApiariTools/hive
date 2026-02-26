@@ -51,21 +51,11 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub commands: HashMap<String, CustomCommand>,
 
-    /// Extra workspaces that share this daemon's Telegram bot.
-    /// Each gets its own forum topic for coordinator chat.
+    /// DEPRECATED: Extra workspaces previously configured inline. Now ignored —
+    /// the global daemon discovers workspaces from `~/.config/hive/workspaces.toml`
+    /// and each workspace has its own `.hive/daemon.toml`.
     #[serde(default)]
-    pub workspaces: Vec<ExtraWorkspace>,
-}
-
-/// An additional workspace managed by the same daemon instance.
-///
-/// Messages in `topic_id` are routed to this workspace's coordinator
-/// (separate session store, system prompt, and working directory).
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExtraWorkspace {
-    pub name: String,
-    pub path: PathBuf,
-    pub topic_id: i64,
+    pub workspaces: Vec<toml::Value>,
 }
 
 /// A user-defined slash command.
@@ -221,6 +211,14 @@ impl DaemonConfig {
         })?;
         let config: DaemonConfig = toml::from_str(&content)
             .map_err(|e| color_eyre::eyre::eyre!("failed to parse {}: {e}", path.display()))?;
+        if !config.workspaces.is_empty() {
+            eprintln!(
+                "[daemon] WARNING: [[workspaces]] in {} is deprecated and ignored.\n\
+                 Each workspace should have its own .hive/daemon.toml.\n\
+                 The global daemon discovers workspaces from ~/.config/hive/workspaces.toml.",
+                path.display()
+            );
+        }
         Ok(config)
     }
 
@@ -597,7 +595,7 @@ run = "./deploy.sh"
     }
 
     #[test]
-    fn test_parse_extra_workspaces() {
+    fn test_deprecated_workspaces_still_parse() {
         let toml = r#"
 [telegram]
 bot_token = "tok"
@@ -609,17 +607,15 @@ path = "/Users/josh/Developer/mgm"
 topic_id = 99
 "#;
         let config: DaemonConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.workspaces.len(), 1);
-        assert_eq!(config.workspaces[0].name, "mgm");
         assert_eq!(
-            config.workspaces[0].path,
-            PathBuf::from("/Users/josh/Developer/mgm")
+            config.workspaces.len(),
+            1,
+            "deprecated field should still parse"
         );
-        assert_eq!(config.workspaces[0].topic_id, 99);
     }
 
     #[test]
-    fn test_extra_workspaces_default_empty() {
+    fn test_workspaces_default_empty() {
         let toml = r#"
 [telegram]
 bot_token = "tok"

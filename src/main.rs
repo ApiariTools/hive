@@ -7,6 +7,7 @@ mod buzz;
 mod channel;
 mod coordinator;
 mod daemon;
+mod doctor;
 #[allow(dead_code)]
 mod github;
 mod keeper;
@@ -117,6 +118,9 @@ enum Command {
         message: Vec<String>,
     },
 
+    /// Run diagnostic checks on workspace, daemon, and tooling health.
+    Doctor,
+
     /// List or manage pending reminders.
     Reminders {
         #[command(subcommand)]
@@ -164,11 +168,11 @@ async fn main() -> Result<()> {
         Command::Plan { description } => cmd_plan(&cwd, &description).await,
         Command::Start { quest_id } => cmd_start(&cwd, quest_id.as_deref()).await,
         Command::Daemon { action } => match action {
-            DaemonAction::Start { foreground } => daemon::start(&cwd, foreground).await,
-            DaemonAction::Stop => daemon::stop(&cwd),
+            DaemonAction::Start { foreground } => daemon::start(foreground).await,
+            DaemonAction::Stop => daemon::stop(),
             DaemonAction::Restart => {
-                let _ = daemon::stop(&cwd);
-                daemon::start(&cwd, false).await
+                let _ = daemon::stop();
+                daemon::start(false).await
             }
         },
         Command::Buzz {
@@ -200,6 +204,7 @@ async fn main() -> Result<()> {
             cron.as_deref(),
             &message.join(" "),
         ),
+        Command::Doctor => doctor::run(&cwd),
         Command::Reminders { action } => match action {
             None => cmd_list_reminders(&cwd),
             Some(RemindersAction::Cancel { id }) => cmd_cancel_reminder(&cwd, &id),

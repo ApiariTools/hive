@@ -16,7 +16,6 @@ const MAX_MESSAGE_LEN: usize = 4000;
 /// Telegram Bot API client.
 pub struct TelegramChannel {
     bot_token: String,
-    allowed_user_ids: Vec<i64>,
     client: reqwest::Client,
 }
 
@@ -70,25 +69,17 @@ struct TgUser {
 }
 
 impl TelegramChannel {
-    pub fn new(bot_token: String, allowed_user_ids: Vec<i64>) -> Self {
+    pub fn new(bot_token: String) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build reqwest client");
 
-        Self {
-            bot_token,
-            allowed_user_ids,
-            client,
-        }
+        Self { bot_token, client }
     }
 
     fn api_url(&self, method: &str) -> String {
         format!("https://api.telegram.org/bot{}/{method}", self.bot_token)
-    }
-
-    fn is_user_allowed(&self, user_id: i64) -> bool {
-        self.allowed_user_ids.is_empty() || self.allowed_user_ids.contains(&user_id)
     }
 
     /// Parse a message into a ChannelEvent.
@@ -325,14 +316,6 @@ impl Channel for TelegramChannel {
 
                 // Handle callback queries from inline keyboard buttons.
                 if let Some(cq) = update.callback_query {
-                    if !self.is_user_allowed(cq.from.id) {
-                        eprintln!(
-                            "[telegram] Ignoring callback query from unauthorized user {}",
-                            cq.from.id
-                        );
-                        continue;
-                    }
-
                     let chat_id = cq.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
                     let topic_id = cq.message.as_ref().and_then(|m| m.message_thread_id);
                     let user_name = cq.from.username.unwrap_or(cq.from.first_name);
@@ -355,17 +338,6 @@ impl Channel for TelegramChannel {
                 let Some(msg) = update.message else {
                     continue;
                 };
-
-                // Check user authorization.
-                if let Some(user) = &msg.from
-                    && !self.is_user_allowed(user.id)
-                {
-                    eprintln!(
-                        "[telegram] Ignoring message from unauthorized user {}",
-                        user.id
-                    );
-                    continue;
-                }
 
                 if let Some(event) = Self::parse_message(&msg)
                     && tx.send(event).await.is_err()

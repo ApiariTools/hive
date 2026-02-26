@@ -39,30 +39,39 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
-// PID file helpers
+// Global config directory + PID file helpers
 // ---------------------------------------------------------------------------
 
-fn pid_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".hive").join("daemon.pid")
+fn global_hive_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| ".".into())
+        .join(".config/hive")
 }
 
-fn write_pid(workspace_root: &Path) -> Result<()> {
-    let path = pid_path(workspace_root);
+pub(crate) fn pid_path() -> PathBuf {
+    global_hive_dir().join("daemon.pid")
+}
+
+fn write_pid() -> Result<()> {
+    let dir = global_hive_dir();
+    std::fs::create_dir_all(&dir)
+        .wrap_err_with(|| format!("failed to create {}", dir.display()))?;
+    let path = pid_path();
     std::fs::write(&path, std::process::id().to_string())
         .wrap_err_with(|| format!("failed to write PID file {}", path.display()))
 }
 
-fn read_pid(workspace_root: &Path) -> Option<u32> {
-    std::fs::read_to_string(pid_path(workspace_root))
+pub(crate) fn read_pid() -> Option<u32> {
+    std::fs::read_to_string(pid_path())
         .ok()
         .and_then(|s| s.trim().parse().ok())
 }
 
-fn remove_pid(workspace_root: &Path) {
-    let _ = std::fs::remove_file(pid_path(workspace_root));
+fn remove_pid() {
+    let _ = std::fs::remove_file(pid_path());
 }
 
-fn is_process_alive(pid: u32) -> bool {
+pub(crate) fn is_process_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stdout(std::process::Stdio::null())
@@ -75,76 +84,74 @@ fn is_process_alive(pid: u32) -> bool {
 // Public API: start / stop
 // ---------------------------------------------------------------------------
 
-fn log_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".hive").join("daemon.log")
+fn log_path() -> PathBuf {
+    global_hive_dir().join("daemon.log")
 }
 
 /// Start the daemon.
 ///
 /// By default, spawns a background child process with output redirected to
-/// `.hive/daemon.log` and returns immediately. With `foreground: true`, runs
-/// the event loop inline (blocking).
-pub async fn start(cwd: &Path, foreground: bool) -> Result<()> {
-    let workspace = load_workspace(cwd)?;
-    let root = &workspace.root;
-
+/// `~/.config/hive/daemon.log` and returns immediately. With `foreground: true`,
+/// runs the event loop inline (blocking).
+///
+/// The daemon discovers workspaces from the global registry
+/// (`~/.config/hive/workspaces.toml`) — no workspace root needed.
+pub async fn start(foreground: bool) -> Result<()> {
     // Check for stale PID file.
-    if let Some(pid) = read_pid(root) {
+    if let Some(pid) = read_pid() {
         if is_process_alive(pid) {
             color_eyre::eyre::bail!("daemon already running (PID {pid})");
         }
         eprintln!("[daemon] Removing stale PID file (PID {pid} is not running)");
-        remove_pid(root);
+        remove_pid();
     }
 
     if !foreground {
-        return spawn_background(root, cwd);
+        return spawn_background();
     }
 
     // Foreground mode — write PID and run inline.
-    write_pid(root)?;
+    write_pid()?;
     let pid = std::process::id();
     eprintln!("[daemon] Started (PID {pid})");
 
-    let config = DaemonConfig::load(root)?;
-    eprintln!("[daemon] Loaded config from .hive/daemon.toml");
-    eprintln!("[daemon] Model: {}", config.model);
+    // Discover workspaces from global registry.
+    let workspace_configs = discover_daemon_workspaces()?;
     eprintln!(
-        "[daemon] Buzz signals: {}",
-        config.buzz_signals_path.display()
+        "[daemon] Discovered {} workspace(s) with daemon.toml",
+        workspace_configs.len()
     );
-    eprintln!(
-        "[daemon] Buzz poll interval: {}s",
-        config.buzz_poll_interval_secs
-    );
-    if config.buzz.as_ref().is_some_and(|b| b.enabled) {
-        eprintln!("[daemon] Inline buzz watchers: enabled");
-    }
-    if config.swarm_watch.as_ref().is_some_and(|sw| sw.enabled) {
-        eprintln!("[daemon] Swarm watcher: enabled");
+    for (name, path, _config) in &workspace_configs {
+        eprintln!("[daemon]   - {name} ({})", path.display());
     }
 
-    let mut runner = DaemonRunner::new(root.to_path_buf(), config)?;
+    let mut runner = DaemonRunner::new(workspace_configs)?;
     let restart = runner.run().await?;
 
     // Clean up PID file before exit or restart.
-    remove_pid(root);
+    remove_pid();
     eprintln!("[daemon] PID file removed");
 
     if restart {
         // Spawn a new daemon process (new PID, fresh logs).
         eprintln!("[daemon] Spawning new daemon process...");
-        spawn_background(root, root)?;
+        spawn_background()?;
     }
 
     Ok(())
 }
 
 /// Spawn `hive daemon start --foreground` as a detached background process,
-/// with stdout/stderr redirected to `.hive/daemon.log`.
-fn spawn_background(workspace_root: &Path, cwd: &Path) -> Result<()> {
+/// with stdout/stderr redirected to `~/.config/hive/daemon.log`.
+fn spawn_background() -> Result<()> {
     let exe = std::env::current_exe().wrap_err("failed to find hive executable")?;
-    let log = log_path(workspace_root);
+    let log = log_path();
+
+    // Ensure the log directory exists.
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
+    }
 
     let log_file = std::fs::File::create(&log)
         .wrap_err_with(|| format!("failed to create log file {}", log.display()))?;
@@ -154,10 +161,6 @@ fn spawn_background(workspace_root: &Path, cwd: &Path) -> Result<()> {
 
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["daemon", "start", "--foreground"]);
-    // Pass through -C if the user specified a different working dir.
-    if cwd != workspace_root {
-        cmd.args(["-C", &cwd.display().to_string()]);
-    }
     cmd.stdout(log_file);
     cmd.stderr(stderr_file);
     cmd.stdin(std::process::Stdio::null());
@@ -179,11 +182,8 @@ fn spawn_background(workspace_root: &Path, cwd: &Path) -> Result<()> {
 }
 
 /// Stop the running daemon by reading its PID file and sending SIGTERM.
-pub fn stop(cwd: &Path) -> Result<()> {
-    let workspace = load_workspace(cwd)?;
-    let root = &workspace.root;
-
-    let pid = match read_pid(root) {
+pub fn stop() -> Result<()> {
+    let pid = match read_pid() {
         Some(pid) => pid,
         None => {
             eprintln!("daemon is not running (no PID file)");
@@ -193,7 +193,7 @@ pub fn stop(cwd: &Path) -> Result<()> {
 
     if !is_process_alive(pid) {
         eprintln!("daemon is not running (PID {pid} is stale), removing PID file");
-        remove_pid(root);
+        remove_pid();
         return Ok(());
     }
 
@@ -205,7 +205,7 @@ pub fn stop(cwd: &Path) -> Result<()> {
     // Wait up to 5 seconds for the process to exit.
     for _ in 0..50 {
         if !is_process_alive(pid) {
-            remove_pid(root);
+            remove_pid();
             eprintln!("daemon stopped (PID {pid})");
             return Ok(());
         }
@@ -216,10 +216,28 @@ pub fn stop(cwd: &Path) -> Result<()> {
     let _ = std::process::Command::new("kill")
         .args(["-9", &pid.to_string()])
         .status();
-    remove_pid(root);
+    remove_pid();
     eprintln!("daemon killed (PID {pid})");
 
     Ok(())
+}
+
+/// Discover workspaces with `.hive/daemon.toml` from the global registry.
+fn discover_daemon_workspaces() -> Result<Vec<(String, PathBuf, DaemonConfig)>> {
+    let entries = workspace::load_registry();
+    let mut result = Vec::new();
+    for entry in entries {
+        if let Ok(config) = DaemonConfig::load(&entry.path) {
+            result.push((entry.name, entry.path, config));
+        }
+    }
+    if result.is_empty() {
+        color_eyre::eyre::bail!(
+            "No workspaces with .hive/daemon.toml found.\n\
+             Run `hive init` in a workspace, then create .hive/daemon.toml."
+        );
+    }
+    Ok(result)
 }
 
 /// A pending origin awaiting association with a spawned worktree.
@@ -228,16 +246,20 @@ struct PendingOrigin {
     created_at: std::time::Instant,
 }
 
-/// An extra workspace managed by the same daemon instance.
-///
-/// Holds only what's needed for coordinator chat routing — the system prompt,
-/// session store, and workspace root. Swarm watcher, buzz, reminders stay
-/// home-workspace-only for now.
+/// Fully self-contained workspace managed by the global daemon.
 struct WorkspaceSlot {
     name: String,
     workspace_root: PathBuf,
+    config: DaemonConfig,
     coordinator_prompt: String,
     sessions: SessionStore,
+    buzz_reader: JsonlReader<Signal>,
+    buzz_slot: Option<BuzzSlot>,
+    swarm_watcher: Option<swarm_watcher::SwarmWatcher>,
+    origin_map: OriginMap,
+    pending_origins: Vec<PendingOrigin>,
+    reminder_store: ReminderStore,
+    bot_index: usize, // index into DaemonRunner::bots
 }
 
 /// Per-workspace buzz state — watchers, reminders, output, and sweep timer.
@@ -253,9 +275,6 @@ struct BuzzSlot {
     output: OutputMode,
     sweep_cron_expr: Option<String>,
     next_sweep_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Telegram forum topic for this workspace's notifications.
-    /// `None` = home workspace (uses config.telegram.topic_id).
-    topic_id: Option<i64>,
 }
 
 impl BuzzSlot {
@@ -270,7 +289,6 @@ impl BuzzSlot {
         name: &str,
         workspace_root: &Path,
         daemon_buzz_config: Option<&config::BuzzDaemonConfig>,
-        topic_id: Option<i64>,
     ) -> Option<Self> {
         let ws = match load_workspace(workspace_root) {
             Ok(ws) => ws,
@@ -342,9 +360,15 @@ impl BuzzSlot {
             output,
             sweep_cron_expr,
             next_sweep_at,
-            topic_id,
         })
     }
+}
+
+/// One Telegram bot instance, possibly shared by multiple workspaces.
+struct BotSlot {
+    channel: Arc<TelegramChannel>,
+    #[allow(dead_code)]
+    workspace_indices: Vec<usize>,
 }
 
 /// Max number of button label mappings to keep in memory.
@@ -504,41 +528,25 @@ fn which_swarm() -> Option<PathBuf> {
     None
 }
 
-/// Main daemon event loop.
+/// Main daemon event loop — manages multiple workspaces and bot instances.
 struct DaemonRunner {
-    workspace_root: std::path::PathBuf,
-    config: DaemonConfig,
-    channel: Arc<TelegramChannel>,
-    sessions: SessionStore,
-    buzz_reader: JsonlReader<Signal>,
-    coordinator_prompt: String,
-    /// Per-workspace buzz slots (watchers, reminders, output, sweep timers).
-    /// Non-empty when `[buzz] enabled = true`.
-    buzz_slots: Vec<BuzzSlot>,
-    /// Swarm agent completion watcher.
-    swarm_watcher: Option<swarm_watcher::SwarmWatcher>,
-    /// Maps worktree_id → who asked for it (for notification routing).
-    origin_map: OriginMap,
-    /// FIFO queue of origins waiting to be matched with newly spawned worktrees.
-    pending_origins: Vec<PendingOrigin>,
-    /// User-facing reminders (file-backed, one-shot and cron).
-    reminder_store: ReminderStore,
-    /// Cancellation token for the main event loop (set at start of `run()`).
-    cancel: Option<CancellationToken>,
-    /// Set by `/restart` handler before cancelling the loop.
-    restart_requested: Arc<AtomicBool>,
+    workspaces: Vec<WorkspaceSlot>,
+    bots: Vec<BotSlot>,
+    /// (bot_idx, chat_id, topic_id) → workspace index
+    routing_table: HashMap<(usize, i64, Option<i64>), usize>,
+    /// Index of the workspace currently being handled (set during event processing).
+    active_workspace: Option<usize>,
+    /// Resolved path to the `swarm` binary (for dispatch blocks).
+    swarm_bin: Option<PathBuf>,
     /// Maps callback_data → button label for resolving tapped buttons.
     /// Bounded to BUTTON_LABEL_CACHE_MAX entries (FIFO eviction).
     button_labels: HashMap<String, String>,
     /// Insertion-order tracking for FIFO eviction of button_labels.
     button_labels_order: VecDeque<String>,
-    /// Topic ID for the current event being handled (from incoming message).
-    /// Used by `send()` to reply in the same topic.
-    active_topic_id: Option<i64>,
-    /// Extra workspaces keyed by topic_id for multi-workspace routing.
-    extra_workspaces: HashMap<i64, WorkspaceSlot>,
-    /// Resolved path to the `swarm` binary (for dispatch blocks).
-    swarm_bin: Option<PathBuf>,
+    /// Cancellation token for the main event loop (set at start of `run()`).
+    cancel: Option<CancellationToken>,
+    /// Set by `/restart` handler before cancelling the loop.
+    restart_requested: Arc<AtomicBool>,
 }
 
 /// Build a coordinator system prompt for a workspace, with daemon-mode addendum.
@@ -561,6 +569,8 @@ fn build_coordinator_prompt(workspace_root: &Path, bot_username: Option<&str>) -
         "Do NOT modify files directly — no Write, Edit, or file-writing shell commands.\n",
     );
     prompt.push_str("Dispatch coding work to swarm agents via dispatch blocks (see below).\n");
+    prompt.push_str("CRITICAL: You do NOT have a Task tool. Never use Task() to delegate work.\n");
+    prompt.push_str("The ONLY way to create workers is via ```dispatch:repo``` code blocks in your response text.\n");
     prompt.push_str(
         "Only use Bash for: swarm status/send/close, git status/log, cargo check, and other read-only operations.\n",
     );
@@ -601,160 +611,150 @@ fn build_coordinator_prompt(workspace_root: &Path, bot_username: Option<&str>) -
 }
 
 impl DaemonRunner {
-    fn new(workspace_root: std::path::PathBuf, config: DaemonConfig) -> Result<Self> {
-        let channel = Arc::new(TelegramChannel::new(
-            config.telegram.bot_token.clone(),
-            config.allowed_user_ids.clone(),
-        ));
+    fn new(workspace_configs: Vec<(String, PathBuf, DaemonConfig)>) -> Result<Self> {
+        // Phase 1: Deduplicate bots by bot_token.
+        let mut token_to_bot_idx: HashMap<String, usize> = HashMap::new();
+        let mut bots: Vec<BotSlot> = Vec::new();
 
-        let mut sessions = SessionStore::load(&workspace_root);
-        let buzz_path = config.resolved_buzz_path(&workspace_root);
-        let mut buzz_reader = JsonlReader::<Signal>::new(&buzz_path);
-
-        // Restore buzz reader offset from persisted state.
-        let saved_offset = sessions.buzz_offset();
-        if saved_offset > 0 {
-            buzz_reader.set_offset(saved_offset);
-            eprintln!("[daemon] Restored buzz reader offset: {saved_offset}");
-        } else {
-            // On first run, skip to end so we don't triage old signals.
-            let offset = buzz_reader.skip_to_end().unwrap_or(0);
-            sessions.set_buzz_offset(offset);
-            eprintln!("[daemon] Skipped to end of buzz signals (offset: {offset})");
-        }
-
-        // Build the coordinator system prompt once, with a daemon-specific addendum.
-        let coordinator_prompt =
-            build_coordinator_prompt(&workspace_root, config.telegram.bot_username.as_deref())?;
-
-        // Conditionally init per-workspace buzz slots.
-        // When [buzz] enabled = true, discover workspaces from the global registry
-        // and create a BuzzSlot for each that has a buzz: section in workspace.yaml.
-        let buzz_slots = if config.buzz.as_ref().is_some_and(|b| b.enabled) {
-            let mut slots = Vec::new();
-
-            // Home workspace — uses daemon.toml config_path as legacy fallback.
-            // topic_id = None means "use config.telegram.topic_id" (home topic).
-            if let Some(slot) =
-                BuzzSlot::try_new("home", &workspace_root, config.buzz.as_ref(), None)
-            {
-                slots.push(slot);
-            }
-
-            // Discover other workspaces from global registry.
-            let home_canonical =
-                std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root.clone());
-            for entry in workspace::load_registry() {
-                let entry_canonical =
-                    std::fs::canonicalize(&entry.path).unwrap_or(entry.path.clone());
-                if entry_canonical == home_canonical {
-                    continue; // skip home — already handled
-                }
-                // Look up topic_id from daemon.toml [[workspaces]] by path.
-                let topic_id = config.workspaces.iter().find_map(|ws| {
-                    let ws_canonical = std::fs::canonicalize(&ws.path).unwrap_or(ws.path.clone());
-                    (ws_canonical == entry_canonical).then_some(ws.topic_id)
+        for (_name, _path, config) in &workspace_configs {
+            let token = &config.telegram.bot_token;
+            if !token_to_bot_idx.contains_key(token) {
+                let idx = bots.len();
+                bots.push(BotSlot {
+                    channel: Arc::new(TelegramChannel::new(token.clone())),
+                    workspace_indices: Vec::new(),
                 });
-                if let Some(slot) = BuzzSlot::try_new(&entry.name, &entry.path, None, topic_id) {
-                    slots.push(slot);
-                }
+                token_to_bot_idx.insert(token.clone(), idx);
             }
+        }
+        eprintln!("[daemon] {} unique Telegram bot(s)", bots.len());
 
-            if slots.is_empty() {
-                eprintln!("[daemon] Buzz enabled but no workspaces have buzz config");
+        // Phase 2: Build WorkspaceSlots.
+        let mut workspaces: Vec<WorkspaceSlot> = Vec::new();
+        let mut routing_table: HashMap<(usize, i64, Option<i64>), usize> = HashMap::new();
+        for (name, path, config) in workspace_configs {
+            let ws_idx = workspaces.len();
+            let bot_idx = token_to_bot_idx[&config.telegram.bot_token];
+
+            // Track which workspaces use which bot.
+            bots[bot_idx].workspace_indices.push(ws_idx);
+
+            // Build coordinator prompt.
+            let coordinator_prompt =
+                match build_coordinator_prompt(&path, config.telegram.bot_username.as_deref()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[daemon] Failed to build coordinator prompt for '{name}': {e}");
+                        continue;
+                    }
+                };
+
+            // Load sessions.
+            let mut sessions = SessionStore::load(&path);
+
+            // Init buzz reader.
+            let buzz_path = config.resolved_buzz_path(&path);
+            let mut buzz_reader = JsonlReader::<Signal>::new(&buzz_path);
+            let saved_offset = sessions.buzz_offset();
+            if saved_offset > 0 {
+                buzz_reader.set_offset(saved_offset);
+                eprintln!("[daemon] [{name}] Restored buzz reader offset: {saved_offset}");
             } else {
+                let offset = buzz_reader.skip_to_end().unwrap_or(0);
+                sessions.set_buzz_offset(offset);
+                eprintln!("[daemon] [{name}] Skipped to end of buzz signals (offset: {offset})");
+            }
+
+            // Init buzz slot if enabled.
+            let buzz_slot = if config.buzz.as_ref().is_some_and(|b| b.enabled) {
+                if let Some(slot) = BuzzSlot::try_new(&name, &path, config.buzz.as_ref()) {
+                    eprintln!("[daemon] [{name}] Buzz slot initialized");
+                    Some(slot)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Init swarm watcher.
+            let swarm_watcher_instance = if let Some(state_path) =
+                config.resolved_swarm_state_path(&path)
+            {
+                let stall_timeout = config
+                    .swarm_watch
+                    .as_ref()
+                    .map(|sw| sw.stall_timeout_secs)
+                    .unwrap_or(300);
+                let waiting_debounce = config
+                    .swarm_watch
+                    .as_ref()
+                    .map(|sw| sw.waiting_debounce_secs)
+                    .unwrap_or(30);
                 eprintln!(
-                    "[daemon] Buzz slots initialized: {} workspace(s)",
-                    slots.len()
+                    "[daemon] [{name}] Swarm watcher enabled (state: {}, stall_timeout: {stall_timeout}s, waiting_debounce: {waiting_debounce}s)",
+                    state_path.display()
+                );
+                let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
+                watcher.set_stall_timeout(stall_timeout);
+                watcher.set_waiting_debounce(waiting_debounce);
+                watcher.set_hive_dir(path.join(".hive"));
+                Some(watcher)
+            } else {
+                None
+            };
+
+            // Load origin map.
+            let origin_map = OriginMap::load(&path);
+            if !origin_map.entries.is_empty() {
+                eprintln!(
+                    "[daemon] [{name}] Loaded {} origin mapping(s)",
+                    origin_map.entries.len()
                 );
             }
-            slots
-        } else {
-            Vec::new()
-        };
 
-        // Conditionally init swarm watcher.
-        let swarm_watcher_instance = if let Some(state_path) =
-            config.resolved_swarm_state_path(&workspace_root)
-        {
-            let stall_timeout = config
-                .swarm_watch
-                .as_ref()
-                .map(|sw| sw.stall_timeout_secs)
-                .unwrap_or(300);
-            let waiting_debounce = config
-                .swarm_watch
-                .as_ref()
-                .map(|sw| sw.waiting_debounce_secs)
-                .unwrap_or(30);
-            eprintln!(
-                "[daemon] Swarm watcher enabled (state: {}, stall_timeout: {stall_timeout}s, waiting_debounce: {waiting_debounce}s)",
-                state_path.display()
-            );
-            let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
-            watcher.set_stall_timeout(stall_timeout);
-            watcher.set_waiting_debounce(waiting_debounce);
-            watcher.set_hive_dir(workspace_root.join(".hive"));
-            Some(watcher)
-        } else {
-            None
-        };
-
-        // Load origin map for notification routing.
-        let origin_map = OriginMap::load(&workspace_root);
-        if !origin_map.entries.is_empty() {
-            eprintln!(
-                "[daemon] Loaded {} origin mapping(s)",
-                origin_map.entries.len()
-            );
-        }
-
-        // Load user-facing reminders.
-        let reminder_store = ReminderStore::load(&workspace_root);
-        let active_reminders = reminder_store.active().len();
-        if active_reminders > 0 {
-            eprintln!("[daemon] Loaded {active_reminders} active reminder(s)");
-        }
-
-        // Initialize extra workspace slots.
-        let mut extra_workspaces = HashMap::new();
-        for ws_cfg in &config.workspaces {
-            match build_coordinator_prompt(&ws_cfg.path, config.telegram.bot_username.as_deref()) {
-                Ok(prompt) => {
-                    let ws_sessions = SessionStore::load(&ws_cfg.path);
-                    eprintln!(
-                        "[daemon] Extra workspace '{}' loaded (topic_id={}, path={})",
-                        ws_cfg.name,
-                        ws_cfg.topic_id,
-                        ws_cfg.path.display()
-                    );
-                    extra_workspaces.insert(
-                        ws_cfg.topic_id,
-                        WorkspaceSlot {
-                            name: ws_cfg.name.clone(),
-                            workspace_root: ws_cfg.path.clone(),
-                            coordinator_prompt: prompt,
-                            sessions: ws_sessions,
-                        },
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[daemon] Failed to load extra workspace '{}': {e}",
-                        ws_cfg.name
-                    );
-                }
+            // Load reminders.
+            let reminder_store = ReminderStore::load(&path);
+            let active_reminders = reminder_store.active().len();
+            if active_reminders > 0 {
+                eprintln!("[daemon] [{name}] Loaded {active_reminders} active reminder(s)");
             }
-        }
 
-        // Log sweep schedules from buzz slots.
-        for slot in &buzz_slots {
-            if let Some(ref next) = slot.next_sweep_at {
-                eprintln!(
-                    "[daemon] Sweep scheduled for '{}': next at {next}",
-                    slot.name
-                );
+            // Register routing: (bot_idx, alert_chat_id, topic_id) → ws_idx
+            routing_table.insert(
+                (
+                    bot_idx,
+                    config.telegram.alert_chat_id,
+                    config.telegram.topic_id,
+                ),
+                ws_idx,
+            );
+            // Also register without topic for DM fallback (if not already claimed).
+            if config.telegram.topic_id.is_some() {
+                routing_table
+                    .entry((bot_idx, config.telegram.alert_chat_id, None))
+                    .or_insert(ws_idx);
             }
+
+            eprintln!(
+                "[daemon] [{name}] Model: {}, max_turns: {}",
+                config.model, config.max_turns
+            );
+
+            workspaces.push(WorkspaceSlot {
+                name,
+                workspace_root: path,
+                config,
+                coordinator_prompt,
+                sessions,
+                buzz_reader,
+                buzz_slot,
+                swarm_watcher: swarm_watcher_instance,
+                origin_map,
+                pending_origins: Vec::new(),
+                reminder_store,
+                bot_index: bot_idx,
+            });
         }
 
         // Resolve swarm binary for dispatch blocks.
@@ -766,25 +766,50 @@ impl DaemonRunner {
         }
 
         Ok(Self {
-            workspace_root,
-            config,
-            channel,
-            sessions,
-            buzz_reader,
-            coordinator_prompt,
-            buzz_slots,
-            swarm_watcher: swarm_watcher_instance,
-            origin_map,
-            pending_origins: Vec::new(),
-            reminder_store,
-            cancel: None,
-            restart_requested: Arc::new(AtomicBool::new(false)),
+            workspaces,
+            bots,
+            routing_table,
+            active_workspace: None,
+            swarm_bin,
             button_labels: HashMap::new(),
             button_labels_order: VecDeque::new(),
-            active_topic_id: None,
-            extra_workspaces,
-            swarm_bin,
+            cancel: None,
+            restart_requested: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    // -- Accessors for the active workspace --
+
+    fn active_ws(&self) -> &WorkspaceSlot {
+        &self.workspaces[self.active_workspace.expect("no active workspace")]
+    }
+    fn active_ws_mut(&mut self) -> &mut WorkspaceSlot {
+        let idx = self.active_workspace.expect("no active workspace");
+        &mut self.workspaces[idx]
+    }
+    fn active_channel(&self) -> &Arc<TelegramChannel> {
+        &self.bots[self.active_ws().bot_index].channel
+    }
+    fn active_topic_id(&self) -> Option<i64> {
+        self.active_ws().config.telegram.topic_id
+    }
+
+    /// Resolve which workspace an incoming event should be routed to.
+    ///
+    /// Returns `Some(workspace_index)` if found, `None` if unregistered.
+    fn resolve_workspace(
+        &self,
+        bot_idx: usize,
+        chat_id: i64,
+        topic_id: Option<i64>,
+    ) -> Option<usize> {
+        self.routing_table
+            .get(&(bot_idx, chat_id, topic_id))
+            .copied()
+            .or_else(|| {
+                // Fall back: try without topic (DM routing).
+                topic_id.and_then(|_| self.routing_table.get(&(bot_idx, chat_id, None)).copied())
+            })
     }
 
     async fn run(&mut self) -> Result<bool> {
@@ -813,40 +838,65 @@ impl DaemonRunner {
             shutdown_cancel.cancel();
         });
 
-        // Start the Telegram polling loop in a background task.
-        let (tx, mut rx) = mpsc::channel::<ChannelEvent>(64);
-        let channel_clone = self.channel.clone();
-        let poll_cancel = cancel.clone();
-        tokio::spawn(async move {
-            channel_clone.run(tx, poll_cancel).await;
-        });
+        // Spawn one polling task per bot, all feeding into a single mpsc channel.
+        let (tx, mut rx) = mpsc::channel::<(usize, ChannelEvent)>(64);
+        for (bot_idx, bot) in self.bots.iter().enumerate() {
+            let channel = bot.channel.clone();
+            let poll_cancel = cancel.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let (inner_tx, mut inner_rx) = mpsc::channel(64);
+                let fwd = tokio::spawn({
+                    let tx = tx.clone();
+                    async move {
+                        while let Some(ev) = inner_rx.recv().await {
+                            if tx.send((bot_idx, ev)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+                channel.run(inner_tx, poll_cancel).await;
+                fwd.abort();
+            });
+        }
+        drop(tx); // Drop our copy so rx closes when all bots stop.
 
-        let buzz_interval = std::time::Duration::from_secs(self.config.buzz_poll_interval_secs);
-        let mut buzz_timer = tokio::time::interval(buzz_interval);
+        // Compute timer intervals from all workspaces.
+        let buzz_interval_secs = self
+            .workspaces
+            .iter()
+            .map(|ws| ws.config.buzz_poll_interval_secs)
+            .min()
+            .unwrap_or(30);
+        let mut buzz_timer =
+            tokio::time::interval(std::time::Duration::from_secs(buzz_interval_secs));
         buzz_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Skip the first immediate tick.
-        buzz_timer.tick().await;
+        buzz_timer.tick().await; // skip first tick
 
-        // Swarm watcher timer (only if configured).
-        let swarm_interval = self
-            .config
-            .swarm_watch
-            .as_ref()
-            .filter(|sw| sw.enabled)
-            .map(|sw| std::time::Duration::from_secs(sw.poll_interval_secs));
-        let mut swarm_timer =
-            tokio::time::interval(swarm_interval.unwrap_or(std::time::Duration::from_secs(3600)));
+        let swarm_interval_secs = self
+            .workspaces
+            .iter()
+            .filter_map(|ws| {
+                ws.config
+                    .swarm_watch
+                    .as_ref()
+                    .filter(|sw| sw.enabled)
+                    .map(|sw| sw.poll_interval_secs)
+            })
+            .min();
+        let has_swarm = swarm_interval_secs.is_some();
+        let mut swarm_timer = tokio::time::interval(std::time::Duration::from_secs(
+            swarm_interval_secs.unwrap_or(3600),
+        ));
         swarm_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Skip the first immediate tick.
-        swarm_timer.tick().await;
+        swarm_timer.tick().await; // skip first tick
 
-        // Reminder check timer (every 60 seconds).
         let mut reminder_timer = tokio::time::interval(std::time::Duration::from_secs(60));
         reminder_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // Skip the first immediate tick.
-        reminder_timer.tick().await;
+        reminder_timer.tick().await; // skip first tick
 
-        // Sweep timer — computed from sentry sweep cron schedule.
+        // Sweep timer — computed from sentry sweep cron schedule across all workspaces.
         let mut sweep_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = self
             .sweep_instant()
             .map(|i| Box::pin(tokio::time::sleep_until(i)));
@@ -862,13 +912,13 @@ impl DaemonRunner {
 
                 event = rx.recv() => {
                     match event {
-                        Some(event) => {
-                            if let Err(e) = self.handle_channel_event(event).await {
+                        Some((bot_idx, event)) => {
+                            if let Err(e) = self.handle_channel_event(bot_idx, event).await {
                                 eprintln!("[daemon] Error handling event: {e}");
                             }
                         }
                         None => {
-                            eprintln!("[daemon] Channel closed, shutting down.");
+                            eprintln!("[daemon] All channels closed, shutting down.");
                             break;
                         }
                     }
@@ -880,7 +930,7 @@ impl DaemonRunner {
                     }
                 }
 
-                _ = swarm_timer.tick(), if self.swarm_watcher.is_some() => {
+                _ = swarm_timer.tick(), if has_swarm => {
                     if let Err(e) = self.poll_swarm().await {
                         eprintln!("[daemon] Swarm poll error: {e}");
                     }
@@ -902,22 +952,21 @@ impl DaemonRunner {
             }
         }
 
-        // Persist state before exiting.
-        self.sessions.save()?;
-        for slot in self.extra_workspaces.values() {
-            if let Err(e) = slot.sessions.save() {
-                eprintln!("[daemon] Failed to save sessions for '{}': {e}", slot.name);
+        // Persist state before exiting — iterate all workspaces.
+        for ws in &self.workspaces {
+            if let Err(e) = ws.sessions.save() {
+                eprintln!("[daemon] Failed to save sessions for '{}': {e}", ws.name);
             }
-        }
-        if let Err(e) = self.reminder_store.save() {
-            eprintln!("[daemon] Failed to save reminders: {e}");
-        }
-        if let Err(e) = self.origin_map.save(&self.workspace_root) {
-            eprintln!("[daemon] Failed to save origin map: {e}");
-        }
-        // Save buzz watcher cursors for all slots.
-        for slot in &self.buzz_slots {
-            save_cursors(&slot.watchers, &slot.workspace_root);
+            if let Err(e) = ws.reminder_store.save() {
+                eprintln!("[daemon] Failed to save reminders for '{}': {e}", ws.name);
+            }
+            if let Err(e) = ws.origin_map.save(&ws.workspace_root) {
+                eprintln!("[daemon] Failed to save origin map for '{}': {e}", ws.name);
+            }
+            // Save buzz watcher cursors.
+            if let Some(ref slot) = ws.buzz_slot {
+                save_cursors(&slot.watchers, &slot.workspace_root);
+            }
         }
 
         let restart = self.restart_requested.load(Ordering::Relaxed);
@@ -929,35 +978,8 @@ impl DaemonRunner {
         Ok(restart)
     }
 
-    /// Resolve which workspace a topic belongs to.
-    ///
-    /// Returns `Some(topic_id)` for an extra workspace, `None` for home workspace.
-    /// Returns `Err(())` if the topic doesn't match any registered workspace.
-    fn resolve_topic(&self, topic_id: Option<i64>) -> std::result::Result<Option<i64>, ()> {
-        // Check extra workspaces first.
-        if let Some(tid) = topic_id
-            && self.extra_workspaces.contains_key(&tid)
-        {
-            return Ok(Some(tid));
-        }
-        // Check home workspace.
-        match self.config.telegram.topic_id {
-            Some(configured) => {
-                if topic_id == Some(configured) {
-                    Ok(None) // home workspace
-                } else if topic_id.is_none() {
-                    // No topic but home has one configured — accept for DMs/non-forum chats.
-                    Ok(None)
-                } else {
-                    Err(()) // unregistered topic
-                }
-            }
-            None => Ok(None), // no topic configured — everything goes to home
-        }
-    }
-
     /// Handle a message or command from a channel.
-    async fn handle_channel_event(&mut self, event: ChannelEvent) -> Result<()> {
+    async fn handle_channel_event(&mut self, bot_idx: usize, event: ChannelEvent) -> Result<()> {
         // Callback queries don't have message_id — handle separately.
         if let ChannelEvent::CallbackQuery {
             chat_id,
@@ -967,55 +989,91 @@ impl DaemonRunner {
             topic_id,
         } = event
         {
-            if !self.config.is_chat_allowed(chat_id) {
-                self.channel.answer_callback_query(&callback_query_id).await;
+            // Resolve workspace for routing.
+            let ws_idx = match self.resolve_workspace(bot_idx, chat_id, topic_id) {
+                Some(idx) => idx,
+                None => {
+                    self.bots[bot_idx]
+                        .channel
+                        .answer_callback(&callback_query_id)
+                        .await;
+                    return Ok(());
+                }
+            };
+
+            // Check chat auth.
+            if !self.workspaces[ws_idx].config.is_chat_allowed(chat_id) {
+                self.bots[bot_idx]
+                    .channel
+                    .answer_callback(&callback_query_id)
+                    .await;
                 return Ok(());
             }
+
+            // Check user auth.
+            // (user_id not available on callback queries — skip user check)
+
             eprintln!("[daemon] Callback from {user_name}: {data}");
-            // Always acknowledge immediately to dismiss Telegram's spinner.
-            self.channel.answer_callback_query(&callback_query_id).await;
-            // Resolve workspace for callback routing.
-            self.active_topic_id = topic_id;
+            self.bots[bot_idx]
+                .channel
+                .answer_callback(&callback_query_id)
+                .await;
+            self.active_workspace = Some(ws_idx);
             let result = self.handle_callback(chat_id, &data).await;
-            self.active_topic_id = None;
+            self.active_workspace = None;
             return result;
         }
 
-        let (chat_id, message_id, topic_id) = match &event {
+        let (chat_id, message_id, user_id, topic_id) = match &event {
             ChannelEvent::Command {
                 chat_id,
                 message_id,
+                user_id,
                 topic_id,
                 ..
             }
             | ChannelEvent::Message {
                 chat_id,
                 message_id,
+                user_id,
                 topic_id,
                 ..
-            } => (*chat_id, *message_id, *topic_id),
+            } => (*chat_id, *message_id, *user_id, *topic_id),
             ChannelEvent::CallbackQuery { .. } => unreachable!(),
         };
 
-        if !self.config.is_chat_allowed(chat_id) {
+        // Resolve workspace from routing table.
+        let ws_idx = match self.resolve_workspace(bot_idx, chat_id, topic_id) {
+            Some(idx) => idx,
+            None => {
+                eprintln!(
+                    "[daemon] Ignoring message from unroutable chat={chat_id} topic={topic_id:?}"
+                );
+                return Ok(());
+            }
+        };
+
+        // Check chat auth.
+        if !self.workspaces[ws_idx].config.is_chat_allowed(chat_id) {
             eprintln!("[daemon] Ignoring message from disallowed chat {chat_id}");
             return Ok(());
         }
 
-        // Resolve workspace from topic. Reject messages from unregistered topics.
-        if self.resolve_topic(topic_id).is_err() {
-            eprintln!("[daemon] Ignoring message from unregistered topic {topic_id:?}");
+        // Check user auth.
+        if !self.workspaces[ws_idx].config.is_user_allowed(user_id) {
+            eprintln!("[daemon] Ignoring message from unauthorized user {user_id}");
             return Ok(());
         }
 
-        // Set topic context so send() replies in the same topic.
-        self.active_topic_id = topic_id;
+        self.active_workspace = Some(ws_idx);
 
         // React immediately so the user knows we received their message.
-        self.channel.send_reaction(chat_id, message_id, "👀").await;
+        self.active_channel()
+            .send_reaction(chat_id, message_id, "👀")
+            .await;
 
         // Touch the telegram channel so presence routing knows telegram is active.
-        let _ = crate::presence::touch_channel(&self.workspace_root, "telegram");
+        let _ = crate::presence::touch_channel(&self.active_ws().workspace_root, "telegram");
 
         let result = match event {
             ChannelEvent::Command {
@@ -1045,53 +1103,9 @@ impl DaemonRunner {
             ChannelEvent::CallbackQuery { .. } => unreachable!(),
         };
 
-        // Clear topic context after handling.
-        self.active_topic_id = None;
+        // Clear workspace context after handling.
+        self.active_workspace = None;
         result
-    }
-
-    /// Get the active workspace's coordinator prompt (extra workspace or home).
-    fn active_coordinator_prompt(&self) -> &str {
-        if let Some(tid) = self.active_topic_id
-            && let Some(slot) = self.extra_workspaces.get(&tid)
-        {
-            &slot.coordinator_prompt
-        } else {
-            &self.coordinator_prompt
-        }
-    }
-
-    /// Get the active workspace's root path (extra workspace or home).
-    fn active_workspace_root(&self) -> &Path {
-        if let Some(tid) = self.active_topic_id
-            && let Some(slot) = self.extra_workspaces.get(&tid)
-        {
-            &slot.workspace_root
-        } else {
-            &self.workspace_root
-        }
-    }
-
-    /// Get a mutable reference to the active workspace's session store.
-    fn active_sessions_mut(&mut self) -> &mut SessionStore {
-        if let Some(tid) = self.active_topic_id
-            && let Some(slot) = self.extra_workspaces.get_mut(&tid)
-        {
-            &mut slot.sessions
-        } else {
-            &mut self.sessions
-        }
-    }
-
-    /// Get a reference to the active workspace's session store.
-    fn active_sessions(&self) -> &SessionStore {
-        if let Some(tid) = self.active_topic_id
-            && let Some(slot) = self.extra_workspaces.get(&tid)
-        {
-            &slot.sessions
-        } else {
-            &self.sessions
-        }
     }
 
     /// Handle an inline keyboard button press.
@@ -1121,7 +1135,7 @@ impl DaemonRunner {
 
     /// Merge a PR for the given worktree by looking up its PR URL from swarm state.
     async fn handle_merge_pr(&self, chat_id: i64, worktree_id: &str) -> Result<()> {
-        let pr_url = match read_pr_url_from_swarm(self.active_workspace_root(), worktree_id) {
+        let pr_url = match read_pr_url_from_swarm(&self.active_ws().workspace_root, worktree_id) {
             Some(url) => url,
             None => {
                 return self
@@ -1175,7 +1189,7 @@ impl DaemonRunner {
         let output = tokio::process::Command::new("swarm")
             .args([
                 "--dir",
-                &self.active_workspace_root().display().to_string(),
+                &self.active_ws().workspace_root.display().to_string(),
                 "close",
                 worktree_id,
             ])
@@ -1226,7 +1240,7 @@ impl DaemonRunner {
             return;
         };
 
-        let workspace_root = self.active_workspace_root().to_path_buf();
+        let workspace_root = self.active_ws().workspace_root.clone();
 
         for dispatch in dispatches {
             // Write prompt to a temp file.
@@ -1344,8 +1358,8 @@ impl DaemonRunner {
                 .await
             }
             "reset" => {
-                let had_session = self.active_sessions_mut().reset_session(chat_id);
-                self.active_sessions_mut().save()?;
+                let had_session = self.active_ws_mut().sessions.reset_session(chat_id);
+                self.active_ws_mut().sessions.save()?;
                 if had_session {
                     self.send(
                         chat_id,
@@ -1357,7 +1371,7 @@ impl DaemonRunner {
                 }
             }
             "history" => {
-                let history = self.active_sessions().history(chat_id);
+                let history = self.active_ws().sessions.history(chat_id);
                 if history.is_empty() {
                     return self.send(chat_id, "No previous sessions.").await;
                 }
@@ -1379,11 +1393,12 @@ impl DaemonRunner {
                         .send(chat_id, "Usage: /resume <session-id-prefix>")
                         .await;
                 }
-                match self.active_sessions().find_archived(chat_id, args) {
+                match self.active_ws().sessions.find_archived(chat_id, args) {
                     Some(session_id) => {
-                        self.active_sessions_mut()
+                        self.active_ws_mut()
+                            .sessions
                             .resume_session(chat_id, &session_id);
-                        self.active_sessions_mut().save()?;
+                        self.active_ws_mut().sessions.save()?;
                         let short = &session_id[..8.min(session_id.len())];
                         self.send(
                             chat_id,
@@ -1398,9 +1413,10 @@ impl DaemonRunner {
                 }
             }
             "status" => {
-                let ws_root = self.active_workspace_root();
-                let mut text = format!("Workspace: {}\n", ws_root.display());
-                if let Some(session) = self.active_sessions().get_active(chat_id) {
+                let ws = self.active_ws();
+                let mut text =
+                    format!("Workspace: {} ({})\n", ws.name, ws.workspace_root.display());
+                if let Some(session) = ws.sessions.get_active(chat_id) {
                     text.push_str(&format!(
                         "Active session: `{}`\nTurns: {}\nStarted: {}",
                         &session.session_id[..8.min(session.session_id.len())],
@@ -1430,14 +1446,14 @@ impl DaemonRunner {
                      /help — Show this message",
                 );
                 // Append custom commands.
-                for (name, cmd) in &self.config.commands {
+                for (name, cmd) in &self.active_ws().config.commands {
                     let desc = cmd.description.as_deref().unwrap_or(cmd.run.as_str());
                     text.push_str(&format!("\n/{name} — {desc}"));
                 }
                 text.push_str("\n\nSend any other message to chat with the coordinator.");
                 self.send(chat_id, &text).await
             }
-            _ if self.config.commands.contains_key(command) => {
+            _ if self.active_ws().config.commands.contains_key(command) => {
                 self.run_custom_command(chat_id, command).await
             }
             _ => {
@@ -1452,13 +1468,19 @@ impl DaemonRunner {
 
     /// Run a user-defined custom command from `[commands]` config.
     async fn run_custom_command(&mut self, chat_id: i64, command: &str) -> Result<()> {
-        let cmd = self.config.commands.get(command).cloned().unwrap();
+        let cmd = self
+            .active_ws()
+            .config
+            .commands
+            .get(command)
+            .cloned()
+            .unwrap();
         self.send(chat_id, &format!("Running /{command}..."))
             .await?;
 
         let output = tokio::process::Command::new("sh")
             .args(["-c", &cmd.run])
-            .current_dir(self.active_workspace_root())
+            .current_dir(&self.active_ws().workspace_root)
             .output()
             .await;
 
@@ -1534,7 +1556,7 @@ impl DaemonRunner {
     ) -> Result<()> {
         // Push a pending origin so that if the coordinator spawns a swarm agent,
         // we can associate it with this chat for notification routing.
-        self.pending_origins.push(PendingOrigin {
+        self.active_ws_mut().pending_origins.push(PendingOrigin {
             origin: TaskOrigin {
                 channel: "telegram".into(),
                 chat_id: Some(chat_id),
@@ -1544,8 +1566,8 @@ impl DaemonRunner {
             created_at: std::time::Instant::now(),
         });
         // Start typing indicator loop (expires after 5s, so we resend every 4s).
-        let channel = self.channel.clone();
-        let typing_topic_id = self.active_topic_id;
+        let channel = self.active_channel().clone();
+        let typing_topic_id = self.active_ws().config.telegram.topic_id;
         let typing_cancel = CancellationToken::new();
         let typing_token = typing_cancel.clone();
         tokio::spawn(async move {
@@ -1560,14 +1582,15 @@ impl DaemonRunner {
 
         // Check if we have an active session to resume, or start a new one.
         let resume_id = self
-            .active_sessions()
+            .active_ws()
+            .sessions
             .get_active(chat_id)
             .map(|s| s.session_id.clone());
 
         // Build a callback that sends intermediate text blocks to Telegram immediately,
         // splitting long messages to stay within Telegram's 4096-char limit.
-        let channel = self.channel.clone();
-        let topic_id = self.active_topic_id;
+        let channel = self.active_channel().clone();
+        let topic_id = self.active_ws().config.telegram.topic_id;
         let send_fn = move |text: String| {
             let channel = channel.clone();
             async move {
@@ -1592,13 +1615,17 @@ impl DaemonRunner {
             Ok((final_text, session_id, turn_dispatches)) => {
                 // If this was a new session, record it.
                 if resume_id.is_none() || resume_id.as_deref() != Some(&session_id) {
-                    self.active_sessions_mut()
+                    self.active_ws_mut()
+                        .sessions
                         .start_session(chat_id, session_id);
                 }
 
-                let threshold = self.config.nudge_turn_threshold;
-                let should_nudge = self.active_sessions_mut().record_turn(chat_id, threshold);
-                self.active_sessions_mut().save()?;
+                let threshold = self.active_ws().config.nudge_turn_threshold;
+                let should_nudge = self
+                    .active_ws_mut()
+                    .sessions
+                    .record_turn(chat_id, threshold);
+                self.active_ws_mut().sessions.save()?;
 
                 let mut full_response = final_text;
                 if should_nudge {
@@ -1612,8 +1639,8 @@ impl DaemonRunner {
                 eprintln!("[daemon] Claude session error: {e}");
                 // If session died, remove it so next message auto-reconnects.
                 if resume_id.is_some() {
-                    self.active_sessions_mut().remove_active(chat_id);
-                    self.active_sessions_mut().save()?;
+                    self.active_ws_mut().sessions.remove_active(chat_id);
+                    self.active_ws_mut().sessions.save()?;
                 }
                 (
                     format!(
@@ -1686,14 +1713,14 @@ impl DaemonRunner {
     {
         let opts = SessionOptions {
             system_prompt: if resume_id.is_none() {
-                Some(self.active_coordinator_prompt().to_owned())
+                Some(self.active_ws().coordinator_prompt.clone())
             } else {
                 None
             },
-            model: Some(self.config.model.clone()),
+            model: Some(self.active_ws().config.model.clone()),
             resume: resume_id.map(|s| s.to_owned()),
-            max_turns: Some(self.config.max_turns.into()),
-            working_dir: Some(self.active_workspace_root().to_path_buf()),
+            max_turns: Some(self.active_ws().config.max_turns.into()),
+            working_dir: Some(self.active_ws().workspace_root.clone()),
             allowed_tools: vec![
                 "Bash".into(),
                 "Read".into(),
@@ -1701,6 +1728,12 @@ impl DaemonRunner {
                 "Grep".into(),
                 "WebSearch".into(),
                 "WebFetch".into(),
+            ],
+            disallowed_tools: vec![
+                "Task".into(),
+                "Write".into(),
+                "Edit".into(),
+                "NotebookEdit".into(),
             ],
             ..Default::default()
         };
@@ -1836,24 +1869,78 @@ impl DaemonRunner {
 
     /// Poll buzz signals and auto-triage critical/warning ones.
     ///
-    /// When buzz slots are active, polls them directly and writes to JSONL
-    /// for the dashboard. Otherwise, reads new signals from the JSONL file.
+    /// Iterates all workspaces. For each: if it has a buzz_slot, polls inline
+    /// watchers; otherwise reads new signals from the JSONL file.
     async fn poll_buzz(&mut self) -> Result<()> {
-        // Each signal is paired with the topic it should be routed to.
-        let tagged: Vec<(Signal, Option<i64>)> = if !self.buzz_slots.is_empty() {
-            self.poll_inline_watchers().await
-        } else {
-            // JSONL fallback — all signals route to home topic.
-            self.poll_buzz_jsonl()
-                .into_iter()
-                .map(|s| (s, self.config.telegram.topic_id))
-                .collect()
-        };
+        // Collect (ws_idx, signal, topic) tuples across all workspaces.
+        struct TaggedSignal {
+            ws_idx: usize,
+            signal: Signal,
+        }
+        let mut tagged: Vec<TaggedSignal> = Vec::new();
+
+        for idx in 0..self.workspaces.len() {
+            let ws = &mut self.workspaces[idx];
+
+            if let Some(ref mut slot) = ws.buzz_slot {
+                // Inline watchers — poll directly.
+                let mut slot_signals = Vec::new();
+                for watcher in slot.watchers.iter_mut() {
+                    match watcher.poll().await {
+                        Ok(signals) => {
+                            if !signals.is_empty() {
+                                eprintln!(
+                                    "[daemon] [{}] {} returned {} signal(s)",
+                                    slot.name,
+                                    watcher.name(),
+                                    signals.len()
+                                );
+                            }
+                            slot_signals.extend(signals);
+                        }
+                        Err(e) => {
+                            eprintln!("[daemon] [{}] {} error: {e}", slot.name, watcher.name());
+                        }
+                    }
+                }
+
+                let reminder_signals = reminder::check_reminders(&mut slot.reminders);
+                if !reminder_signals.is_empty() {
+                    eprintln!(
+                        "[daemon] [{}] {} reminder(s) fired",
+                        slot.name,
+                        reminder_signals.len()
+                    );
+                    slot_signals.extend(reminder_signals);
+                }
+
+                save_cursors(&slot.watchers, &slot.workspace_root);
+
+                if let Err(e) = output::emit(&slot_signals, &slot.output) {
+                    eprintln!("[daemon] [{}] Failed to write buzz signals: {e}", slot.name);
+                }
+
+                let mut deduped = deduplicate(&slot_signals);
+                prioritize(&mut deduped);
+                tagged.extend(deduped.into_iter().map(|s| TaggedSignal {
+                    ws_idx: idx,
+                    signal: s,
+                }));
+            } else {
+                // JSONL fallback.
+                let signals = ws.buzz_reader.poll().unwrap_or_default();
+                ws.sessions.set_buzz_offset(ws.buzz_reader.offset());
+                tagged.extend(signals.into_iter().map(|s| TaggedSignal {
+                    ws_idx: idx,
+                    signal: s,
+                }));
+            }
+        }
 
         // Filter for important signals.
-        let important: Vec<&(Signal, Option<i64>)> = tagged
+        let important: Vec<&TaggedSignal> = tagged
             .iter()
-            .filter(|(s, _)| matches!(s.severity, Severity::Critical | Severity::Warning))
+            .filter(|t| matches!(t.signal.severity, Severity::Critical | Severity::Warning))
             .collect();
 
         if important.is_empty() {
@@ -1862,113 +1949,51 @@ impl DaemonRunner {
 
         eprintln!("[daemon] {} new buzz signal(s) to triage", important.len());
 
-        let alert_chat_id = self.config.telegram.alert_chat_id;
-        for (signal, topic) in important {
-            let assessment = self.triage_signal(signal).await;
-            let alert = format_triage_alert(signal, &assessment);
-            self.active_topic_id = *topic;
+        for t in important {
+            self.active_workspace = Some(t.ws_idx);
+            let alert_chat_id = self.active_ws().config.telegram.alert_chat_id;
+            let assessment = self.triage_signal(&t.signal).await;
+            let alert = format_triage_alert(&t.signal, &assessment);
             self.send(alert_chat_id, &alert).await?;
         }
-        self.active_topic_id = None;
+        self.active_workspace = None;
 
-        self.sessions.save()?;
         Ok(())
     }
 
-    /// Poll all buzz slots (per-workspace watchers), dedup + prioritize per slot, emit to JSONL.
-    /// Returns signals tagged with their destination topic for correct Telegram routing.
-    async fn poll_inline_watchers(&mut self) -> Vec<(Signal, Option<i64>)> {
-        let mut all_tagged = Vec::new();
-
-        for slot in &mut self.buzz_slots {
-            let mut slot_signals = Vec::new();
-
-            // Poll each watcher in this slot.
-            for watcher in slot.watchers.iter_mut() {
-                match watcher.poll().await {
-                    Ok(signals) => {
-                        if !signals.is_empty() {
-                            eprintln!(
-                                "[daemon] [{}] {} returned {} signal(s)",
-                                slot.name,
-                                watcher.name(),
-                                signals.len()
-                            );
-                        }
-                        slot_signals.extend(signals);
-                    }
-                    Err(e) => {
-                        eprintln!("[daemon] [{}] {} error: {e}", slot.name, watcher.name());
-                    }
-                }
-            }
-
-            // Check reminders for this slot.
-            let reminder_signals = reminder::check_reminders(&mut slot.reminders);
-            if !reminder_signals.is_empty() {
-                eprintln!(
-                    "[daemon] [{}] {} reminder(s) fired",
-                    slot.name,
-                    reminder_signals.len()
-                );
-                slot_signals.extend(reminder_signals);
-            }
-
-            // Save watcher cursors for this workspace.
-            save_cursors(&slot.watchers, &slot.workspace_root);
-
-            // Emit to this workspace's JSONL so the dashboard can read them.
-            if let Err(e) = output::emit(&slot_signals, &slot.output) {
-                eprintln!("[daemon] [{}] Failed to write buzz signals: {e}", slot.name);
-            }
-
-            // Dedup + prioritize within this slot.
-            let mut deduped = deduplicate(&slot_signals);
-            prioritize(&mut deduped);
-
-            // Resolve topic: slot-specific topic, or fall back to home topic from config.
-            let topic = slot.topic_id.or(self.config.telegram.topic_id);
-
-            // Tag each signal with its destination topic.
-            all_tagged.extend(deduped.into_iter().map(|s| (s, topic)));
-        }
-
-        all_tagged
-    }
-
-    /// Poll buzz signals from the JSONL file (fallback when inline watchers are disabled).
-    fn poll_buzz_jsonl(&mut self) -> Vec<Signal> {
-        let signals = self.buzz_reader.poll().unwrap_or_default();
-        self.sessions.set_buzz_offset(self.buzz_reader.offset());
-        signals
-    }
-
-    /// Poll user-facing reminders and send fired ones to Telegram.
+    /// Poll user-facing reminders across all workspaces and send fired ones to Telegram.
     async fn poll_reminders(&mut self) -> Result<()> {
-        // Reload from disk to pick up CLI-created reminders.
-        self.reminder_store = ReminderStore::load(&self.workspace_root);
+        for idx in 0..self.workspaces.len() {
+            // Reload from disk to pick up CLI-created reminders.
+            self.workspaces[idx].reminder_store =
+                ReminderStore::load(&self.workspaces[idx].workspace_root);
 
-        let fired = self.reminder_store.check_and_advance();
-        if fired.is_empty() {
-            return Ok(());
-        }
+            let fired = self.workspaces[idx].reminder_store.check_and_advance();
+            if fired.is_empty() {
+                continue;
+            }
 
-        eprintln!("[daemon] {} reminder(s) fired", fired.len());
-
-        // Use configured notification topic for background reminders.
-        self.active_topic_id = self.config.telegram.topic_id;
-        for r in &fired {
-            let chat_id = r.chat_id.unwrap_or(self.config.telegram.alert_chat_id);
-            let text = format!("🔔 Reminder: {}", r.message);
-            self.send(chat_id, &text).await?;
             eprintln!(
-                "[daemon] Reminder fired: \"{}\" -> chat {}",
-                r.message, chat_id
+                "[daemon] [{}] {} reminder(s) fired",
+                self.workspaces[idx].name,
+                fired.len()
             );
-        }
-        self.active_topic_id = None;
 
-        self.reminder_store.save()?;
+            self.active_workspace = Some(idx);
+            for r in &fired {
+                let alert_chat_id = self.active_ws().config.telegram.alert_chat_id;
+                let chat_id = r.chat_id.unwrap_or(alert_chat_id);
+                let text = format!("🔔 Reminder: {}", r.message);
+                self.send(chat_id, &text).await?;
+                eprintln!(
+                    "[daemon] Reminder fired: \"{}\" -> chat {}",
+                    r.message, chat_id
+                );
+            }
+
+            self.workspaces[idx].reminder_store.save()?;
+        }
+        self.active_workspace = None;
         Ok(())
     }
 
@@ -1992,11 +2017,12 @@ impl DaemonRunner {
         (None, None)
     }
 
-    /// Convert the earliest `next_sweep_at` across all buzz slots to a `tokio::time::Instant`.
+    /// Convert the earliest `next_sweep_at` across all workspace buzz slots to a `tokio::time::Instant`.
     fn sweep_instant(&self) -> Option<tokio::time::Instant> {
         let next = self
-            .buzz_slots
+            .workspaces
             .iter()
+            .filter_map(|ws| ws.buzz_slot.as_ref())
             .filter_map(|s| s.next_sweep_at)
             .min()?;
         let now_chrono = chrono::Utc::now();
@@ -2004,11 +2030,12 @@ impl DaemonRunner {
         Some(tokio::time::Instant::now() + duration)
     }
 
-    /// Advance sweep timers for slots where `next_sweep_at <= now`.
+    /// Advance sweep timers for workspace buzz slots where `next_sweep_at <= now`.
     fn advance_sweep_timer(&mut self) {
         let now = chrono::Utc::now();
-        for slot in &mut self.buzz_slots {
-            if let Some(next) = slot.next_sweep_at
+        for ws in &mut self.workspaces {
+            if let Some(ref mut slot) = ws.buzz_slot
+                && let Some(next) = slot.next_sweep_at
                 && next <= now
                 && let Some(ref expr) = slot.sweep_cron_expr
                 && let Ok(cron) = expr.parse::<croner::Cron>()
@@ -2021,28 +2048,31 @@ impl DaemonRunner {
         }
     }
 
-    /// Run a sweep across all due buzz slots and send a per-workspace summary digest.
+    /// Run a sweep across all due workspace buzz slots and send a per-workspace summary digest.
     /// Returns the number of signals found.
     async fn poll_sweep(&mut self) -> Result<usize> {
         let now = chrono::Utc::now();
 
-        // Phase 1: Sweep all due slots, collect results.
-        // Separated from send phase to avoid borrow conflict.
         struct SweepResult {
-            topic: Option<i64>,
+            ws_idx: usize,
             message: String,
         }
         let mut results: Vec<SweepResult> = Vec::new();
         let mut total_count = 0usize;
 
-        for slot in &mut self.buzz_slots {
+        for idx in 0..self.workspaces.len() {
+            let ws = &mut self.workspaces[idx];
+            let Some(ref mut slot) = ws.buzz_slot else {
+                continue;
+            };
+
             // Only sweep slots that are due.
             if let Some(next) = slot.next_sweep_at {
                 if next > now {
                     continue;
                 }
             } else {
-                continue; // no sweep configured for this slot
+                continue;
             }
 
             let mut slot_signals = Vec::new();
@@ -2072,7 +2102,6 @@ impl DaemonRunner {
                 }
             }
 
-            // Save watcher state (cursors + seen_issues) for this workspace.
             save_cursors(&slot.watchers, &slot.workspace_root);
 
             if slot_signals.is_empty() {
@@ -2085,22 +2114,22 @@ impl DaemonRunner {
 
             let message = build_sweep_summary(&slot.name, &slot_signals);
             eprintln!("[daemon] [{}] Sweep digest ready", slot.name);
-
-            // Write to .hive/last_sweep.md so the coordinator can read it.
             write_last_sweep(&slot.workspace_root, &message);
 
-            let topic = slot.topic_id.or(self.config.telegram.topic_id);
             total_count += slot_signals.len();
-            results.push(SweepResult { topic, message });
+            results.push(SweepResult {
+                ws_idx: idx,
+                message,
+            });
         }
 
-        // Phase 2: Send all digests to Telegram, each to its workspace's topic.
-        let alert_chat_id = self.config.telegram.alert_chat_id;
+        // Phase 2: Send all digests to Telegram.
         for r in &results {
-            self.active_topic_id = r.topic;
+            self.active_workspace = Some(r.ws_idx);
+            let alert_chat_id = self.active_ws().config.telegram.alert_chat_id;
             self.send(alert_chat_id, &r.message).await?;
         }
-        self.active_topic_id = None;
+        self.active_workspace = None;
 
         if results.is_empty() {
             eprintln!("[daemon] Sweep complete — no issues to re-triage across all workspaces");
@@ -2109,9 +2138,11 @@ impl DaemonRunner {
         Ok(total_count)
     }
 
-    /// Handle `/sweep` Telegram command — run a sweep on demand across all buzz slots.
+    /// Handle `/sweep` Telegram command — run a sweep on demand for the active workspace.
     async fn handle_sweep_command(&mut self, chat_id: i64) -> Result<()> {
-        if self.buzz_slots.is_empty() {
+        let has_buzz = self.workspaces.iter().any(|ws| ws.buzz_slot.is_some());
+
+        if !has_buzz {
             return self
                 .send(
                     chat_id,
@@ -2120,10 +2151,11 @@ impl DaemonRunner {
                 .await;
         }
 
-        let has_sweep = self
-            .buzz_slots
-            .iter()
-            .any(|s| s.watchers.iter().any(|w| w.has_sweep()));
+        let has_sweep = self.workspaces.iter().any(|ws| {
+            ws.buzz_slot
+                .as_ref()
+                .is_some_and(|s| s.watchers.iter().any(|w| w.has_sweep()))
+        });
 
         if !has_sweep {
             return self
@@ -2139,10 +2171,11 @@ impl DaemonRunner {
         // Manual sweep: clear seen issues so everything is re-evaluated as fresh,
         // then force all sweep-capable slots due.
         let past = chrono::Utc::now() - chrono::Duration::seconds(1);
-        for slot in &mut self.buzz_slots {
-            if slot.next_sweep_at.is_some() {
+        for ws in &mut self.workspaces {
+            if let Some(ref mut slot) = ws.buzz_slot
+                && slot.next_sweep_at.is_some()
+            {
                 slot.next_sweep_at = Some(past);
-                // Clear sentry seen_issues so the manual sweep shows all issues.
                 for watcher in &mut slot.watchers {
                     if let Some(sw) = watcher
                         .as_any_mut()
@@ -2154,21 +2187,21 @@ impl DaemonRunner {
             }
         }
 
-        // Save topic context — poll_sweep changes active_topic_id internally.
-        let saved_topic = self.active_topic_id;
+        // Save workspace context — poll_sweep changes active_workspace internally.
+        let saved_ws = self.active_workspace;
         match self.poll_sweep().await {
             Ok(0) => {
-                self.active_topic_id = saved_topic;
+                self.active_workspace = saved_ws;
                 self.send(chat_id, "Sweep complete — nothing to re-triage.")
                     .await?;
             }
             Ok(_count) => {
                 // Results already sent to Telegram per-workspace by poll_sweep,
                 // and written to .hive/last_sweep.md for coordinator context.
-                self.active_topic_id = saved_topic;
+                self.active_workspace = saved_ws;
             }
             Err(e) => {
-                self.active_topic_id = saved_topic;
+                self.active_workspace = saved_ws;
                 self.send(chat_id, &format!("Sweep failed: {e}")).await?;
             }
         }
@@ -2218,9 +2251,10 @@ impl DaemonRunner {
                 let msg = r.message.clone();
 
                 // Reload, add, save.
-                self.reminder_store = ReminderStore::load(&self.workspace_root);
-                self.reminder_store.add(r);
-                self.reminder_store.save()?;
+                let ws = self.active_ws_mut();
+                ws.reminder_store = ReminderStore::load(&ws.workspace_root);
+                ws.reminder_store.add(r);
+                ws.reminder_store.save()?;
 
                 eprintln!("[daemon] Created reminder {short_id} from Telegram chat {chat_id}");
                 self.send(
@@ -2239,16 +2273,19 @@ impl DaemonRunner {
 
     /// Handle `/reminders` Telegram command.
     async fn handle_reminders_command(&mut self, chat_id: i64, args: &str) -> Result<()> {
-        self.reminder_store = ReminderStore::load(&self.workspace_root);
+        {
+            let ws = self.active_ws_mut();
+            ws.reminder_store = ReminderStore::load(&ws.workspace_root);
+        }
 
         if let Some(rest) = args.strip_prefix("cancel") {
             let id_prefix = rest.trim();
             if id_prefix.is_empty() {
                 return self.send(chat_id, "Usage: /reminders cancel <id>").await;
             }
-            match self.reminder_store.cancel(id_prefix) {
+            match self.active_ws_mut().reminder_store.cancel(id_prefix) {
                 Ok(cancelled_id) => {
-                    self.reminder_store.save()?;
+                    self.active_ws_mut().reminder_store.save()?;
                     let short = &cancelled_id[..8.min(cancelled_id.len())];
                     eprintln!("[daemon] Cancelled reminder {short} from Telegram chat {chat_id}");
                     self.send(chat_id, &format!("Cancelled reminder `{short}`."))
@@ -2275,7 +2312,7 @@ impl DaemonRunner {
                 }
             }
         } else {
-            let active = self.reminder_store.active();
+            let active = self.active_ws().reminder_store.active();
             let text = user_reminder::format_reminder_list(&active);
             self.send(chat_id, &text).await
         }
@@ -2283,175 +2320,136 @@ impl DaemonRunner {
 
     /// Check if the hive UI is the active channel (for notification routing).
     fn should_use_ui(&self) -> bool {
-        crate::presence::active_channel(&self.workspace_root) == "ui"
+        crate::presence::active_channel(&self.active_ws().workspace_root) == "ui"
     }
 
-    /// Poll swarm state for agent completion notifications.
+    /// Poll swarm state for agent completion notifications across all workspaces.
     ///
     /// To avoid Telegram rate-limiting (~1 msg/sec per chat), notifications are
     /// sent with a 500ms delay between consecutive messages. When 3 or more
     /// notifications land in a single poll cycle for the same chat, they are
     /// batched into a single summary message instead of sent individually.
     async fn poll_swarm(&mut self) -> Result<()> {
-        let watcher = match self.swarm_watcher.as_mut() {
-            Some(w) => w,
-            None => return Ok(()),
-        };
+        for idx in 0..self.workspaces.len() {
+            let ws = &mut self.workspaces[idx];
+            let watcher = match ws.swarm_watcher.as_mut() {
+                Some(w) => w,
+                None => continue,
+            };
 
-        let notifications = watcher.poll();
-        if notifications.is_empty() {
-            return Ok(());
-        }
-
-        // Expire stale pending origins (older than 60 seconds).
-        self.pending_origins
-            .retain(|p| p.created_at.elapsed().as_secs() < 60);
-
-        let alert_chat_id = self.config.telegram.alert_chat_id;
-        let mut origin_map_changed = false;
-
-        // Phase 1: Process origin map and collect routed (chat_id, notification) pairs.
-        let mut routed: Vec<(i64, &swarm_watcher::SwarmNotification)> = Vec::new();
-
-        for notification in &notifications {
-            let wt_id = notification.worktree_id();
-
-            // For new agent spawns, pop a pending origin and record the mapping.
-            if let swarm_watcher::SwarmNotification::AgentSpawned {
-                worktree_id,
-                branch,
-                ..
-            } = notification
-                && let Some(pending) = self.pending_origins.pop()
-            {
-                self.origin_map.insert(
-                    worktree_id.clone(),
-                    OriginEntry {
-                        origin: pending.origin,
-                        quest_id: None,
-                        task_id: None,
-                        branch: Some(branch.clone()),
-                        created_at: chrono::Utc::now(),
-                    },
-                );
-                origin_map_changed = true;
+            let notifications = watcher.poll();
+            if notifications.is_empty() {
+                continue;
             }
 
-            // Route the notification to the originating chat, or fall back to alert_chat_id.
-            let target_chat_id = route_notification(&self.origin_map, wt_id, alert_chat_id);
-            routed.push((target_chat_id, notification));
+            // Expire stale pending origins (older than 60 seconds).
+            ws.pending_origins
+                .retain(|p| p.created_at.elapsed().as_secs() < 60);
 
-            // Clean up origin map entries for completed/closed agents.
-            // PrOpened routes to the origin chat but does NOT clean up —
-            // the agent is still running and may produce more notifications.
-            match notification {
-                swarm_watcher::SwarmNotification::AgentCompleted { worktree_id, .. }
-                | swarm_watcher::SwarmNotification::AgentClosed { worktree_id, .. } => {
-                    if self.origin_map.remove(worktree_id).is_some() {
-                        origin_map_changed = true;
-                    }
-                }
-                swarm_watcher::SwarmNotification::PrOpened { .. }
-                | swarm_watcher::SwarmNotification::AgentSpawned { .. }
-                | swarm_watcher::SwarmNotification::AgentStalled { .. }
-                | swarm_watcher::SwarmNotification::AgentWaiting { .. } => {}
-            }
-        }
+            let alert_chat_id = ws.config.telegram.alert_chat_id;
+            let mut origin_map_changed = false;
 
-        // Phase 2: Group by chat_id, preserving insertion order.
-        let mut by_chat: Vec<(i64, Vec<&swarm_watcher::SwarmNotification>)> = Vec::new();
-        for (chat_id, notification) in &routed {
-            if let Some((_, group)) = by_chat.iter_mut().find(|(id, _)| id == chat_id) {
-                group.push(notification);
-            } else {
-                by_chat.push((*chat_id, vec![notification]));
-            }
-        }
+            // Phase 1: Process origin map and collect routed (chat_id, notification) pairs.
+            let mut routed: Vec<(i64, &swarm_watcher::SwarmNotification)> = Vec::new();
 
-        // Phase 3: Send — use routing::decide() for each notification to determine
-        // whether it goes to the TUI inbox, Telegram, or both.
-        // When using Telegram: batch 3+ per chat into one summary, else send
-        // individually with inline buttons and 500ms delays.
-        let ui_active = self.should_use_ui();
-        let mut telegram_by_chat: Vec<(i64, Vec<&swarm_watcher::SwarmNotification>)> = Vec::new();
+            for notification in &notifications {
+                let wt_id = notification.worktree_id();
 
-        for (chat_id, group) in &by_chat {
-            let mut telegram_group: Vec<&swarm_watcher::SwarmNotification> = Vec::new();
-            for n in group {
-                let urgent = matches!(n, swarm_watcher::SwarmNotification::AgentStalled { .. });
-                let decision = crate::routing::decide(ui_active, urgent);
-
-                // Write to UI inbox when routed there.
-                if matches!(
-                    decision,
-                    crate::routing::RoutingDecision::UiOnly | crate::routing::RoutingDecision::Both
-                ) && let Some(ui_event) = notification_to_ui_event(n)
+                if let swarm_watcher::SwarmNotification::AgentSpawned {
+                    worktree_id,
+                    branch,
+                    ..
+                } = notification
+                    && let Some(pending) = ws.pending_origins.pop()
                 {
-                    let _ = crate::ui::inbox::push_event(&self.workspace_root, &ui_event);
-                }
-
-                // Send to Telegram when routed there.
-                if matches!(
-                    decision,
-                    crate::routing::RoutingDecision::TelegramOnly
-                        | crate::routing::RoutingDecision::Both
-                ) {
-                    telegram_group.push(n);
-                }
-            }
-            if !telegram_group.is_empty() {
-                telegram_by_chat.push((*chat_id, telegram_group));
-            }
-        }
-
-        // Send the Telegram portion (use configured notification topic).
-        self.active_topic_id = self.config.telegram.topic_id;
-        let mut first_send = true;
-        for (chat_id, group) in &telegram_by_chat {
-            if group.len() >= 3 {
-                // Batched — no buttons.
-                let text = format_swarm_batch(group);
-                if !first_send {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-                if let Err(e) = self.send(*chat_id, &text).await {
-                    eprintln!(
-                        "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
+                    ws.origin_map.insert(
+                        worktree_id.clone(),
+                        OriginEntry {
+                            origin: pending.origin,
+                            quest_id: None,
+                            task_id: None,
+                            branch: Some(branch.clone()),
+                            created_at: chrono::Utc::now(),
+                        },
                     );
-                    if *chat_id != alert_chat_id {
-                        let _ = self.send(alert_chat_id, &text).await;
+                    origin_map_changed = true;
+                }
+
+                let target_chat_id = route_notification(&ws.origin_map, wt_id, alert_chat_id);
+                routed.push((target_chat_id, notification));
+
+                match notification {
+                    swarm_watcher::SwarmNotification::AgentCompleted { worktree_id, .. }
+                    | swarm_watcher::SwarmNotification::AgentClosed { worktree_id, .. } => {
+                        if ws.origin_map.remove(worktree_id).is_some() {
+                            origin_map_changed = true;
+                        }
+                    }
+                    swarm_watcher::SwarmNotification::PrOpened { .. }
+                    | swarm_watcher::SwarmNotification::AgentSpawned { .. }
+                    | swarm_watcher::SwarmNotification::AgentStalled { .. }
+                    | swarm_watcher::SwarmNotification::AgentWaiting { .. } => {}
+                }
+            }
+
+            // Phase 2: Group by chat_id, preserving insertion order.
+            let mut by_chat: Vec<(i64, Vec<&swarm_watcher::SwarmNotification>)> = Vec::new();
+            for (chat_id, notification) in &routed {
+                if let Some((_, group)) = by_chat.iter_mut().find(|(id, _)| id == chat_id) {
+                    group.push(notification);
+                } else {
+                    by_chat.push((*chat_id, vec![notification]));
+                }
+            }
+
+            // Set active workspace for send() routing.
+            self.active_workspace = Some(idx);
+
+            // Phase 3: Send — use routing::decide() for each notification.
+            let ui_active = self.should_use_ui();
+            let mut telegram_by_chat: Vec<(i64, Vec<&swarm_watcher::SwarmNotification>)> =
+                Vec::new();
+
+            for (chat_id, group) in &by_chat {
+                let mut telegram_group: Vec<&swarm_watcher::SwarmNotification> = Vec::new();
+                for n in group {
+                    let urgent = matches!(n, swarm_watcher::SwarmNotification::AgentStalled { .. });
+                    let decision = crate::routing::decide(ui_active, urgent);
+
+                    if matches!(
+                        decision,
+                        crate::routing::RoutingDecision::UiOnly
+                            | crate::routing::RoutingDecision::Both
+                    ) && let Some(ui_event) = notification_to_ui_event(n)
+                    {
+                        let _ = crate::ui::inbox::push_event(
+                            &self.workspaces[idx].workspace_root,
+                            &ui_event,
+                        );
+                    }
+
+                    if matches!(
+                        decision,
+                        crate::routing::RoutingDecision::TelegramOnly
+                            | crate::routing::RoutingDecision::Both
+                    ) {
+                        telegram_group.push(n);
                     }
                 }
-                first_send = false;
-            } else {
-                // Individual — include inline buttons per notification type.
-                for n in group {
+                if !telegram_group.is_empty() {
+                    telegram_by_chat.push((*chat_id, telegram_group));
+                }
+            }
+
+            // Send the Telegram portion.
+            let mut first_send = true;
+            for (chat_id, group) in &telegram_by_chat {
+                if group.len() >= 3 {
+                    let text = format_swarm_batch(group);
                     if !first_send {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
-                    // For PrOpened, fetch CI status and use CI-aware formatting/buttons.
-                    let ci_status =
-                        if let swarm_watcher::SwarmNotification::PrOpened { pr_url, .. } = n {
-                            let ci = swarm_watcher::fetch_ci_status(pr_url).await;
-                            if let Some(ref status) = ci {
-                                eprintln!(
-                                    "[daemon] CI status for {}: {}",
-                                    n.worktree_id(),
-                                    status.status_line()
-                                );
-                            }
-                            ci
-                        } else {
-                            None
-                        };
-                    let text = n.format_telegram_with_ci(ci_status.as_ref());
-                    let buttons = n.inline_buttons_with_ci(ci_status.as_ref());
-                    let result = if buttons.is_empty() {
-                        self.send(*chat_id, &text).await
-                    } else {
-                        self.send_with_buttons(*chat_id, &text, buttons).await
-                    };
-                    if let Err(e) = result {
+                    if let Err(e) = self.send(*chat_id, &text).await {
                         eprintln!(
                             "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
                         );
@@ -2460,61 +2458,90 @@ impl DaemonRunner {
                         }
                     }
                     first_send = false;
+                } else {
+                    for n in group {
+                        if !first_send {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        let ci_status =
+                            if let swarm_watcher::SwarmNotification::PrOpened { pr_url, .. } = n {
+                                let ci = swarm_watcher::fetch_ci_status(pr_url).await;
+                                if let Some(ref status) = ci {
+                                    eprintln!(
+                                        "[daemon] CI status for {}: {}",
+                                        n.worktree_id(),
+                                        status.status_line()
+                                    );
+                                }
+                                ci
+                            } else {
+                                None
+                            };
+                        let text = n.format_telegram_with_ci(ci_status.as_ref());
+                        let buttons = n.inline_buttons_with_ci(ci_status.as_ref());
+                        let result = if buttons.is_empty() {
+                            self.send(*chat_id, &text).await
+                        } else {
+                            self.send_with_buttons(*chat_id, &text, buttons).await
+                        };
+                        if let Err(e) = result {
+                            eprintln!(
+                                "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
+                            );
+                            if *chat_id != alert_chat_id {
+                                let _ = self.send(alert_chat_id, &text).await;
+                            }
+                        }
+                        first_send = false;
+                    }
                 }
             }
-        }
 
-        self.active_topic_id = None;
-
-        // Phase 4: Auto-triage eligible notifications — spawned in background
-        // so coordinator calls never block the poll loop.
-        if self
-            .config
-            .swarm_watch
-            .as_ref()
-            .is_some_and(|sw| sw.auto_triage)
-        {
-            // NOTIFICATION DESIGN: Deduplicate auto-triage per worktree.
-            // When PrOpened and AgentWaiting fire for the same worker in the same
-            // poll cycle, only auto-triage once to avoid duplicate assessments.
-            let mut auto_triaged: HashSet<String> = HashSet::new();
-            for (chat_id, notification) in &routed {
-                let wt_id = notification.worktree_id().to_owned();
-                if auto_triaged.contains(&wt_id) {
-                    continue;
-                }
-                // Pre-fetch PR details synchronously so the coordinator gets
-                // the facts embedded in its prompt and can't accidentally look
-                // at the wrong PR.
-                let pr_url_for_fetch = match notification {
-                    swarm_watcher::SwarmNotification::PrOpened { pr_url, .. } => {
-                        Some(pr_url.as_str())
+            // Phase 4: Auto-triage eligible notifications.
+            if self.workspaces[idx]
+                .config
+                .swarm_watch
+                .as_ref()
+                .is_some_and(|sw| sw.auto_triage)
+            {
+                let mut auto_triaged: HashSet<String> = HashSet::new();
+                for (chat_id, notification) in &routed {
+                    let wt_id = notification.worktree_id().to_owned();
+                    if auto_triaged.contains(&wt_id) {
+                        continue;
                     }
-                    swarm_watcher::SwarmNotification::AgentWaiting {
-                        pr_url: Some(url), ..
-                    } => Some(url.as_str()),
-                    _ => None,
-                };
-                let pr_details = pr_url_for_fetch.and_then(fetch_pr_details);
-                if let Some(prompt) = auto_triage_prompt(notification, pr_details.as_deref()) {
-                    auto_triaged.insert(wt_id);
-                    let chat_id = *chat_id;
-                    let channel = self.channel.clone();
-                    let notification_topic_id = self.config.telegram.topic_id;
-                    let coordinator_prompt = self.coordinator_prompt.clone();
-                    let model = self.config.model.clone();
-                    let workspace_root = self.workspace_root.clone();
-                    let worktree_id = notification.worktree_id().to_owned();
-                    let notification_kind = match notification {
-                        swarm_watcher::SwarmNotification::PrOpened { .. } => "PrOpened",
-                        swarm_watcher::SwarmNotification::AgentWaiting { .. } => "AgentWaiting",
-                        _ => "notification",
+                    let pr_url_for_fetch = match notification {
+                        swarm_watcher::SwarmNotification::PrOpened { pr_url, .. } => {
+                            Some(pr_url.as_str())
+                        }
+                        swarm_watcher::SwarmNotification::AgentWaiting {
+                            pr_url: Some(url),
+                            ..
+                        } => Some(url.as_str()),
+                        _ => None,
                     };
-                    tokio::spawn(async move {
-                        eprintln!("[daemon] Auto-triaging {notification_kind} for {worktree_id}");
+                    let pr_details = pr_url_for_fetch.and_then(fetch_pr_details);
+                    if let Some(prompt) = auto_triage_prompt(notification, pr_details.as_deref()) {
+                        auto_triaged.insert(wt_id);
+                        let chat_id = *chat_id;
+                        let channel = self.active_channel().clone();
+                        let notification_topic_id = self.workspaces[idx].config.telegram.topic_id;
+                        let coordinator_prompt = self.workspaces[idx].coordinator_prompt.clone();
+                        let model = self.workspaces[idx].config.model.clone();
+                        let workspace_root = self.workspaces[idx].workspace_root.clone();
+                        let worktree_id = notification.worktree_id().to_owned();
+                        let notification_kind = match notification {
+                            swarm_watcher::SwarmNotification::PrOpened { .. } => "PrOpened",
+                            swarm_watcher::SwarmNotification::AgentWaiting { .. } => "AgentWaiting",
+                            _ => "notification",
+                        };
+                        tokio::spawn(async move {
+                            eprintln!(
+                                "[daemon] Auto-triaging {notification_kind} for {worktree_id}"
+                            );
 
-                        let system_prompt = format!(
-                            "{coordinator_prompt}\n\n\
+                            let system_prompt = format!(
+                                "{coordinator_prompt}\n\n\
                              ## Auto-Triage Mode\n\
                              You are doing an automated background check triggered by a swarm event.\n\
                              Use your tools to inspect the situation (check PR status with `gh pr view`, read relevant files, etc).\n\
@@ -2522,91 +2549,97 @@ impl DaemonRunner {
                              1. One sentence stating what you found (e.g. \"PR #27 has 88 additions, all tests passing, clean diff fixing X\")\n\
                              2. One clear yes/no question (e.g. \"Want me to merge and close the worker?\")\n\
                              Do NOT say \"I will\" or \"let me\" — you are writing a summary, not starting a task.",
-                        );
+                            );
 
-                        let opts = SessionOptions {
-                            system_prompt: Some(system_prompt),
-                            model: Some(model),
-                            max_turns: Some(7),
-                            no_session_persistence: true,
-                            working_dir: Some(workspace_root),
-                            allowed_tools: vec![
-                                "Bash".into(),
-                                "Read".into(),
-                                "Glob".into(),
-                                "Grep".into(),
-                            ],
-                            ..Default::default()
-                        };
+                            let opts = SessionOptions {
+                                system_prompt: Some(system_prompt),
+                                model: Some(model),
+                                max_turns: Some(7),
+                                no_session_persistence: true,
+                                working_dir: Some(workspace_root),
+                                allowed_tools: vec![
+                                    "Bash".into(),
+                                    "Read".into(),
+                                    "Glob".into(),
+                                    "Grep".into(),
+                                ],
+                                ..Default::default()
+                            };
 
-                        let client = ClaudeClient::new();
-                        let session = match client.spawn(opts).await {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("[daemon] Failed to spawn auto-triage session: {e}");
-                                return;
-                            }
-                        };
+                            let client = ClaudeClient::new();
+                            let session = match client.spawn(opts).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("[daemon] Failed to spawn auto-triage session: {e}");
+                                    return;
+                                }
+                            };
 
-                        let response = match run_ephemeral_session(session, &prompt).await {
-                            Ok(text) if !text.is_empty() => text,
-                            Ok(_) => {
-                                eprintln!("[daemon] Auto-triage session produced no output");
-                                return;
-                            }
-                            Err(e) => {
-                                eprintln!("[daemon] Auto-triage session error: {e}");
-                                return;
-                            }
-                        };
+                            let response = match run_ephemeral_session(session, &prompt).await {
+                                Ok(text) if !text.is_empty() => text,
+                                Ok(_) => {
+                                    eprintln!("[daemon] Auto-triage session produced no output");
+                                    return;
+                                }
+                                Err(e) => {
+                                    eprintln!("[daemon] Auto-triage session error: {e}");
+                                    return;
+                                }
+                            };
 
-                        eprintln!(
-                            "[daemon] Auto-triage suggestion ({} chars): {}",
-                            response.len(),
-                            truncate(&response, 80)
-                        );
+                            eprintln!(
+                                "[daemon] Auto-triage suggestion ({} chars): {}",
+                                response.len(),
+                                truncate(&response, 80)
+                            );
 
-                        let header = match notification_kind {
-                            "PrOpened" => {
-                                format!("🤖 *Auto\\-triage* — `{worktree_id}` opened a PR")
+                            let header = match notification_kind {
+                                "PrOpened" => {
+                                    format!("🤖 *Auto\\-triage* — `{worktree_id}` opened a PR")
+                                }
+                                "AgentWaiting" => {
+                                    format!("🤖 *Auto\\-triage* — `{worktree_id}` is waiting")
+                                }
+                                _ => format!("🤖 *Auto\\-triage* — `{worktree_id}`"),
+                            };
+                            let (clean_response, buttons) = extract_buttons(&response);
+                            let body = markdown::sanitize_for_telegram(&clean_response);
+                            let text = format!("{header}\n\n{body}");
+                            let chunks = split_message(&text, 4000);
+                            let last_idx = chunks.len().saturating_sub(1);
+                            for (i, chunk) in chunks.into_iter().enumerate() {
+                                if let Err(e) = channel
+                                    .send_message(&OutboundMessage {
+                                        chat_id,
+                                        text: chunk,
+                                        topic_id: notification_topic_id,
+                                        buttons: if i == last_idx {
+                                            buttons.clone()
+                                        } else {
+                                            vec![]
+                                        },
+                                    })
+                                    .await
+                                {
+                                    eprintln!("[daemon] Failed to send auto-triage result: {e}");
+                                }
                             }
-                            "AgentWaiting" => {
-                                format!("🤖 *Auto\\-triage* — `{worktree_id}` is waiting")
-                            }
-                            _ => format!("🤖 *Auto\\-triage* — `{worktree_id}`"),
-                        };
-                        let (clean_response, buttons) = extract_buttons(&response);
-                        let body = markdown::sanitize_for_telegram(&clean_response);
-                        let text = format!("{header}\n\n{body}");
-                        let chunks = split_message(&text, 4000);
-                        let last_idx = chunks.len().saturating_sub(1);
-                        for (i, chunk) in chunks.into_iter().enumerate() {
-                            if let Err(e) = channel
-                                .send_message(&OutboundMessage {
-                                    chat_id,
-                                    text: chunk,
-                                    topic_id: notification_topic_id,
-                                    buttons: if i == last_idx {
-                                        buttons.clone()
-                                    } else {
-                                        vec![]
-                                    },
-                                })
-                                .await
-                            {
-                                eprintln!("[daemon] Failed to send auto-triage result: {e}");
-                            }
-                        }
-                    });
+                        });
+                    }
                 }
             }
-        }
 
-        // Persist origin map if it changed.
-        if origin_map_changed && let Err(e) = self.origin_map.save(&self.workspace_root) {
-            eprintln!("[daemon] Failed to save origin map: {e}");
-        }
+            // Persist origin map if it changed.
+            if origin_map_changed
+                && let Err(e) = self.workspaces[idx]
+                    .origin_map
+                    .save(&self.workspaces[idx].workspace_root)
+            {
+                eprintln!("[daemon] Failed to save origin map: {e}");
+            }
+        } // end per-workspace loop
 
+        self.active_workspace = None;
         Ok(())
     }
 
@@ -2633,10 +2666,10 @@ impl DaemonRunner {
 
         let opts = SessionOptions {
             system_prompt: Some("You are a concise triage assistant. Assess signals and recommend actions in 1-3 sentences.".into()),
-            model: Some(self.config.model.clone()),
+            model: Some(self.active_ws().config.model.clone()),
             max_turns: Some(7),
             no_session_persistence: true,
-            working_dir: Some(self.workspace_root.clone()),
+            working_dir: Some(self.active_ws().workspace_root.clone()),
             ..Default::default()
         };
 
@@ -2683,12 +2716,12 @@ impl DaemonRunner {
     async fn send(&self, chat_id: i64, text: &str) -> Result<()> {
         let text = markdown::sanitize_for_telegram(text);
         for chunk in split_message(&text, 4000) {
-            self.channel
+            self.active_channel()
                 .send_message(&OutboundMessage {
                     chat_id,
                     text: chunk,
                     buttons: vec![],
-                    topic_id: self.active_topic_id,
+                    topic_id: self.active_topic_id(),
                 })
                 .await?;
         }
@@ -2706,7 +2739,7 @@ impl DaemonRunner {
         let chunks = split_message(&text, 4000);
         let last_idx = chunks.len().saturating_sub(1);
         for (i, chunk) in chunks.into_iter().enumerate() {
-            self.channel
+            self.active_channel()
                 .send_message(&OutboundMessage {
                     chat_id,
                     text: chunk,
@@ -2715,7 +2748,7 @@ impl DaemonRunner {
                     } else {
                         vec![]
                     },
-                    topic_id: self.active_topic_id,
+                    topic_id: self.active_topic_id(),
                 })
                 .await?;
         }
