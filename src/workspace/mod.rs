@@ -3,6 +3,7 @@
 //! The workspace config tells hive about the repos it manages, the default
 //! agent to use, team conventions, and any soul/memory text for the coordinator.
 
+use crate::buzz::config::BuzzConfig;
 use color_eyre::eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -23,10 +24,11 @@ struct Registry {
     workspaces: Vec<RegistryEntry>,
 }
 
-/// Path to the global workspace registry file.
+/// Path to the global workspace registry file (`~/.config/hive/workspaces.toml`).
 fn registry_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
         .join("hive")
         .join("workspaces.toml")
 }
@@ -37,12 +39,18 @@ pub fn load_registry() -> Vec<RegistryEntry> {
 }
 
 /// Load registered workspaces from a specific registry file path.
+///
+/// Filters out entries whose paths no longer exist on disk.
 pub fn load_registry_at(path: &Path) -> Vec<RegistryEntry> {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let registry: Registry = toml::from_str(&contents).unwrap_or_default();
-    registry.workspaces
+    registry
+        .workspaces
+        .into_iter()
+        .filter(|e| e.path.exists())
+        .collect()
 }
 
 /// Register a workspace path in the global registry.
@@ -112,6 +120,10 @@ pub struct Workspace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conventions: Option<String>,
 
+    /// Buzz watcher configuration (optional — omit to use .buzz/config.toml fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buzz: Option<BuzzConfig>,
+
     /// The root directory where the workspace config was found.
     #[serde(skip)]
     pub root: PathBuf,
@@ -133,6 +145,7 @@ impl Default for Workspace {
             default_agent: default_agent(),
             soul: None,
             conventions: None,
+            buzz: None,
             root: PathBuf::from("."),
         }
     }
@@ -157,7 +170,13 @@ pub fn load_workspace(start_dir: &Path) -> Result<Workspace> {
         for candidate in CONFIG_CANDIDATES {
             let path = dir.join(candidate);
             if path.exists() {
-                return load_from_file(&path, &dir);
+                match load_from_file(&path, &dir) {
+                    Ok(ws) => return Ok(ws),
+                    Err(e) => {
+                        // Not a valid hive workspace config — skip and try next candidate.
+                        eprintln!("Skipping {}: {e:#}", path.display());
+                    }
+                }
             }
         }
 
@@ -229,7 +248,9 @@ pub fn init_workspace(dir: &Path) -> Result<PathBuf> {
     let quests_dir = hive_dir.join("quests");
     std::fs::create_dir_all(&quests_dir).wrap_err("failed to create quests directory")?;
 
-    // Register in the global workspace registry.
+    // Register in the global workspace registry (skip in tests to avoid polluting
+    // the real registry with temp directory names).
+    #[cfg(not(test))]
     let _ = register_workspace(dir, &default.name);
 
     Ok(config_path)
@@ -326,5 +347,40 @@ mod tests {
         let path1 = init_workspace(dir.path()).unwrap();
         let path2 = init_workspace(dir.path()).unwrap();
         assert_eq!(path1, path2);
+    }
+
+    #[test]
+    fn load_workspace_with_buzz_section() {
+        let dir = TempDir::new().unwrap();
+        let yaml = r#"
+name: buzztest
+buzz:
+  poll_interval_secs: 90
+  sentry:
+    token: "sntryu_test"
+    org: "my-org"
+    project: "my-proj"
+  github:
+    repos: ["owner/repo1"]
+    watch_labels: ["critical"]
+"#;
+        std::fs::write(dir.path().join("workspace.yaml"), yaml).unwrap();
+        let ws = load_workspace(dir.path()).unwrap();
+        assert_eq!(ws.name, "buzztest");
+        let buzz = ws.buzz.unwrap();
+        assert_eq!(buzz.poll_interval_secs, 90);
+        let sentry = buzz.sentry.unwrap();
+        assert_eq!(sentry.token, "sntryu_test");
+        assert_eq!(sentry.org, "my-org");
+        let github = buzz.github.unwrap();
+        assert_eq!(github.repos, vec!["owner/repo1"]);
+    }
+
+    #[test]
+    fn load_workspace_without_buzz_section() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("workspace.yaml"), "name: nobuzz\n").unwrap();
+        let ws = load_workspace(dir.path()).unwrap();
+        assert!(ws.buzz.is_none());
     }
 }

@@ -22,19 +22,22 @@ use self::watcher::{Watcher, create_watchers, save_cursors};
 
 /// Run buzz with the given options.
 ///
-/// - `config_path`: path to `.buzz/config.toml`
+/// - `config_path`: optional explicit path to config file (overrides workspace.yaml)
 /// - `base`: workspace root directory for state persistence
 /// - `daemon`: run continuously, polling on interval
 /// - `once`: single poll then exit (also the default)
+/// - `sweep`: run a single sweep (re-evaluate all unresolved issues) then exit
 /// - `output_override`: CLI override for output mode (None = use config)
 pub async fn run(
-    config_path: &Path,
+    config_path: Option<&Path>,
     base: &Path,
     daemon: bool,
     once: bool,
+    sweep: bool,
     output_override: Option<&str>,
 ) -> Result<()> {
-    let config = BuzzConfig::load(config_path)?;
+    let workspace = crate::workspace::load_workspace(base)?;
+    let config = BuzzConfig::resolve(config_path, &workspace)?;
 
     let output_mode = if let Some(mode_str) = output_override
         && mode_str != "stdout"
@@ -55,7 +58,10 @@ pub async fn run(
     let mut watchers = create_watchers(&config, base);
     let mut reminders: Vec<Reminder> = config.reminders.iter().map(Reminder::from_config).collect();
 
-    if once || !daemon {
+    if sweep {
+        // Sweep mode — run a single sweep across all watchers that support it.
+        run_sweep(&mut watchers, &output_mode, base).await?;
+    } else if once || !daemon {
         // Single poll mode (also the default when neither flag is given).
         run_once(&mut watchers, &mut reminders, &output_mode, base).await?;
     } else {
@@ -72,6 +78,46 @@ pub async fn run(
             sleep(interval).await;
         }
     }
+
+    Ok(())
+}
+
+/// Execute a single sweep across all watchers that support it.
+async fn run_sweep(
+    watchers: &mut [Box<dyn Watcher>],
+    output_mode: &OutputMode,
+    base: &Path,
+) -> Result<()> {
+    let mut all_signals = Vec::new();
+
+    for watcher in watchers.iter_mut() {
+        if !watcher.has_sweep() {
+            continue;
+        }
+        match watcher.sweep().await {
+            Ok(signals) => {
+                eprintln!(
+                    "[buzz] {} sweep returned {} signal(s)",
+                    watcher.name(),
+                    signals.len()
+                );
+                all_signals.extend(signals);
+            }
+            Err(e) => {
+                eprintln!("[buzz] {} sweep error: {e}", watcher.name());
+            }
+        }
+    }
+
+    // Deduplicate and prioritize.
+    let mut signals = deduplicate(&all_signals);
+    prioritize(&mut signals);
+
+    // Emit.
+    output::emit(&signals, output_mode)?;
+
+    // Persist watcher state (cursors + seen_issues).
+    save_cursors(watchers, base);
 
     Ok(())
 }

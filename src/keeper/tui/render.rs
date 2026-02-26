@@ -617,7 +617,7 @@ fn format_event_line(event: &AgentEventEntry, max_width: usize) -> Line<'static>
         .unwrap_or_else(|| "        ".into());
 
     let (icon, detail) = match event.r#type.as_str() {
-        "text" => {
+        "assistant_text" => {
             let text = event
                 .text
                 .as_deref()
@@ -626,11 +626,7 @@ fn format_event_line(event: &AgentEventEntry, max_width: usize) -> Line<'static>
                 .next()
                 .unwrap_or("");
             let max = max_width.saturating_sub(14);
-            let display = if text.len() > max {
-                format!("{}...", &text[..max.saturating_sub(3)])
-            } else {
-                text.to_string()
-            };
+            let display = truncate(text, max);
             ("\u{270e}", display) // ✎
         }
         "tool_use" => {
@@ -639,30 +635,44 @@ fn format_event_line(event: &AgentEventEntry, max_width: usize) -> Line<'static>
         }
         "tool_result" => {
             let tool = event.tool.as_deref().unwrap_or("?");
-            ("\u{2714}", format!("{tool} done")) // ✔
+            let suffix = if event.is_error { " error" } else { " done" };
+            ("\u{2714}", format!("{tool}{suffix}")) // ✔
         }
         "error" => {
-            let msg = event.error.as_deref().unwrap_or("unknown error");
+            let msg = event
+                .message
+                .as_deref()
+                .or(event.text.as_deref())
+                .unwrap_or("unknown error");
             let max = max_width.saturating_sub(14);
-            let display = if msg.len() > max {
-                format!("{}...", &msg[..max.saturating_sub(3)])
-            } else {
-                msg.to_string()
-            };
+            let display = truncate(msg, max);
             ("\u{2718}", display) // ✘
         }
-        "cost" => {
-            let cost = event.cost.map(|c| format!("${c:.4}")).unwrap_or_default();
-            ("\u{25b3}", format!("cost: {cost}")) // △
+        "complete" => {
+            let mut parts = Vec::new();
+            if let Some(turns) = event.turns {
+                parts.push(format!("{turns} turns"));
+            }
+            if let Some(cost) = event.cost_usd {
+                parts.push(format!("${cost:.4}"));
+            }
+            let detail = if parts.is_empty() {
+                "done".to_string()
+            } else {
+                parts.join(", ")
+            };
+            ("\u{2713}", detail) // ✓
         }
-        other => ("·", other.to_string()),
+        "start" => ("\u{25b6}", "session started".to_string()), // ▶
+        other => ("\u{00b7}", other.to_string()),               // ·
     };
 
     let type_style = match event.r#type.as_str() {
         "error" => theme::severity_critical(),
         "tool_use" => theme::accent(),
         "tool_result" => theme::status_running(),
-        "cost" => theme::severity_warning(),
+        "complete" => theme::severity_warning(),
+        "start" => theme::accent(),
         _ => theme::text(),
     };
 

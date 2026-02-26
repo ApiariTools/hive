@@ -86,6 +86,10 @@ pub fn status_running() -> Style {
     Style::default().fg(MINT)
 }
 
+pub fn status_waiting() -> Style {
+    Style::default().fg(HONEY)
+}
+
 pub fn status_dead() -> Style {
     Style::default().fg(EMBER)
 }
@@ -137,3 +141,15 @@ pub fn overlay_bg() -> Style {
 pub fn divider() -> Style {
     Style::default().fg(WAX)
 }
+
+/// Bright sidebar colors for the left bar indicator (matches swarm).
+pub const SIDEBAR_COLORS: &[Color] = &[
+    Color::Rgb(180, 120, 60), // warm brown
+    Color::Rgb(60, 120, 180), // cool blue
+    Color::Rgb(60, 180, 60),  // forest green
+    Color::Rgb(140, 60, 180), // purple
+    Color::Rgb(60, 180, 180), // teal
+    Color::Rgb(180, 150, 60), // amber
+    Color::Rgb(180, 60, 120), // rose
+    Color::Rgb(100, 180, 60), // olive
+];

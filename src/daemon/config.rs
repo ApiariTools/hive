@@ -50,6 +50,22 @@ pub struct DaemonConfig {
     /// Example: `[commands.restart]` → `/restart` in Telegram.
     #[serde(default)]
     pub commands: HashMap<String, CustomCommand>,
+
+    /// Extra workspaces that share this daemon's Telegram bot.
+    /// Each gets its own forum topic for coordinator chat.
+    #[serde(default)]
+    pub workspaces: Vec<ExtraWorkspace>,
+}
+
+/// An additional workspace managed by the same daemon instance.
+///
+/// Messages in `topic_id` are routed to this workspace's coordinator
+/// (separate session store, system prompt, and working directory).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExtraWorkspace {
+    pub name: String,
+    pub path: PathBuf,
+    pub topic_id: i64,
 }
 
 /// A user-defined slash command.
@@ -76,6 +92,11 @@ pub struct TelegramConfig {
     /// Chat ID where buzz triage alerts are sent.
     pub alert_chat_id: i64,
 
+    /// Bot username (without @). Used in the system prompt so the coordinator
+    /// knows its own identity when @mentioned in group chats.
+    #[serde(default)]
+    pub bot_username: Option<String>,
+
     /// Forum topic ID for notifications. When set, outbound alerts and
     /// auto-triage messages are sent to this topic within the alert chat.
     #[serde(default)]
@@ -86,6 +107,11 @@ pub struct TelegramConfig {
 ///
 /// When enabled, the daemon runs buzz watchers directly in its event loop
 /// instead of reading from `.buzz/signals.jsonl`.
+///
+/// Config resolution order:
+/// 1. `workspace.yaml` → `buzz:` section (preferred)
+/// 2. `config_path` from this section (legacy `.buzz/config.toml`)
+/// 3. Defaults (no watchers)
 #[derive(Debug, Clone, Deserialize)]
 pub struct BuzzDaemonConfig {
     /// Whether to run buzz watchers inline (default: false).
@@ -93,6 +119,7 @@ pub struct BuzzDaemonConfig {
     pub enabled: bool,
 
     /// Path to `.buzz/config.toml` (default: ".buzz/config.toml").
+    /// Only used as fallback when workspace.yaml has no `buzz:` section.
     #[serde(default = "default_buzz_config_path")]
     pub config_path: PathBuf,
 }
@@ -207,6 +234,7 @@ impl DaemonConfig {
     }
 
     /// Resolve the buzz config path relative to the workspace root.
+    #[allow(dead_code)]
     pub fn resolved_buzz_config_path(&self, workspace_root: &Path) -> Option<PathBuf> {
         let buzz = self.buzz.as_ref()?;
         if !buzz.enabled {
@@ -566,6 +594,39 @@ run = "./deploy.sh"
         assert_eq!(deploy.run, "./deploy.sh");
         assert!(deploy.description.is_none());
         assert!(deploy.then_action.is_none());
+    }
+
+    #[test]
+    fn test_parse_extra_workspaces() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+
+[[workspaces]]
+name = "mgm"
+path = "/Users/josh/Developer/mgm"
+topic_id = 99
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.workspaces.len(), 1);
+        assert_eq!(config.workspaces[0].name, "mgm");
+        assert_eq!(
+            config.workspaces[0].path,
+            PathBuf::from("/Users/josh/Developer/mgm")
+        );
+        assert_eq!(config.workspaces[0].topic_id, 99);
+    }
+
+    #[test]
+    fn test_extra_workspaces_default_empty() {
+        let toml = r#"
+[telegram]
+bot_token = "tok"
+alert_chat_id = 42
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert!(config.workspaces.is_empty());
     }
 
     // ---- resolved_buzz_config_path ----

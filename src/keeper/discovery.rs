@@ -13,23 +13,6 @@ use std::process::Command;
 
 // ── Types mirroring swarm's state.json ────────────────────
 
-/// Agent kind, matching swarm's `AgentKind` for deserialization.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum AgentKind {
-    Claude,
-    Codex,
-}
-
-impl std::fmt::Display for AgentKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Claude => write!(f, "claude"),
-            Self::Codex => write!(f, "codex"),
-        }
-    }
-}
-
 /// Persisted pane state (subset of swarm's `PaneState`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneState {
@@ -42,7 +25,8 @@ pub struct WorktreeState {
     pub id: String,
     pub branch: String,
     pub prompt: String,
-    pub agent_kind: AgentKind,
+    #[serde(default)]
+    pub agent_kind: String,
     #[serde(default)]
     pub repo_path: Option<PathBuf>,
     pub worktree_path: PathBuf,
@@ -54,6 +38,10 @@ pub struct WorktreeState {
     pub terminals: Vec<PaneState>,
     #[serde(default)]
     pub summary: Option<String>,
+    #[serde(default)]
+    pub pr: Option<WtPrInfo>,
+    #[serde(default)]
+    pub agent_session_status: Option<String>,
 }
 
 /// All swarm state for a workspace (subset of swarm's `SwarmState`).
@@ -115,30 +103,56 @@ pub struct BuzzSummary {
 // ── Agent event types (read from `.swarm/agents/<id>/events.jsonl`) ──
 
 /// A single event from an agent's structured event log.
+///
+/// Fields match the `AgentEvent` enum in swarm's `agent_tui/events.rs`.
+/// All fields are optional/defaulted for forward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEventEntry {
-    /// Event type: "text", "tool_use", "tool_result", "error", "cost", etc.
+    /// Event type: "start", "assistant_text", "tool_use", "tool_result", "complete", "error".
     #[serde(default)]
     pub r#type: String,
     /// When the event occurred.
     #[serde(default)]
     pub timestamp: Option<DateTime<Utc>>,
-    /// For tool_use events — the tool name.
+    /// For tool_use/tool_result — the tool name.
     #[serde(default)]
     pub tool: Option<String>,
-    /// For text events — the text content (may be truncated).
+    /// For assistant_text — the text content.
     #[serde(default)]
     pub text: Option<String>,
-    /// For error events — the error message.
+    /// For tool_use — JSON string of tool input.
     #[serde(default)]
-    pub error: Option<String>,
-    /// For cost events — cumulative cost.
+    pub input: Option<String>,
+    /// For tool_result — output text.
     #[serde(default)]
-    pub cost: Option<f64>,
+    pub output: Option<String>,
+    /// For tool_result — whether the tool errored.
+    #[serde(default)]
+    pub is_error: bool,
+    /// For error — the error message.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// For start — the initial prompt.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// For start — the model name.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// For complete — number of turns.
+    #[serde(default)]
+    pub turns: Option<u64>,
+    /// For complete — total cost in USD.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// For complete — session ID.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Read recent agent events from `.swarm/agents/<id>/events.jsonl`.
 /// Returns the most recent `limit` events, newest last.
+/// Deduplicates consecutive events with same type+content within 1s,
+/// and filters out noise (e.g. TodoWrite tool events).
 pub fn read_agent_events(
     session: &SwarmSession,
     worktree_id: &str,
@@ -167,6 +181,37 @@ pub fn read_agent_events(
         })
         .collect();
 
+    // Filter out noise: TodoWrite tool events are not useful for humans.
+    events.retain(|e| {
+        if let Some(ref tool) = e.tool {
+            !tool.eq_ignore_ascii_case("todowrite")
+        } else {
+            true
+        }
+    });
+
+    // Deduplicate consecutive events with same type+content within 1 second.
+    // This fixes the double-logging from swarm (Event::Stream + Event::Assistant).
+    events.dedup_by(|b, a| {
+        if a.r#type != b.r#type {
+            return false;
+        }
+        // Check timestamps are within 1s of each other.
+        if let (Some(ta), Some(tb)) = (a.timestamp, b.timestamp) {
+            let diff = (tb - ta).num_milliseconds().unsigned_abs();
+            if diff > 1000 {
+                return false;
+            }
+        }
+        // Compare content for the event type.
+        match a.r#type.as_str() {
+            "assistant_text" => a.text == b.text,
+            "tool_use" => a.tool == b.tool && a.input == b.input,
+            "tool_result" => a.tool == b.tool,
+            _ => false,
+        }
+    });
+
     // Keep only the last `limit` events.
     if events.len() > limit {
         events.drain(..events.len() - limit);
@@ -175,9 +220,22 @@ pub fn read_agent_events(
     events
 }
 
-// ── PR info (queried from gh CLI) ─────────────────────────
+// ── PR info ───────────────────────────────────────────────
 
-/// Pull request information discovered via `gh`.
+/// PR info as serialized in swarm's state.json (`pr: {number, title, state, url}`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WtPrInfo {
+    #[serde(default)]
+    pub number: Option<u64>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// Pull request information discovered via `gh` or state.json.
 #[derive(Debug, Clone)]
 pub struct PrInfo {
     pub number: u64,
@@ -203,6 +261,7 @@ pub struct WorktreeInfo {
     pub summary: Option<String>,
     pub created_at: Option<DateTime<Local>>,
     pub pr: Option<PrInfo>,
+    pub agent_session_status: Option<String>,
 }
 
 /// A discovered swarm session with all its worktrees.
@@ -438,6 +497,20 @@ fn read_session(session_name: &str) -> Option<SwarmSession> {
                 .filter(|t| live_panes.contains(&t.pane_id))
                 .count();
 
+            // Convert WtPrInfo from state.json → PrInfo when url is present.
+            let pr = wt.pr.and_then(|wtp| {
+                let url = wtp.url?;
+                if url.is_empty() {
+                    return None;
+                }
+                Some(PrInfo {
+                    number: wtp.number.unwrap_or(0),
+                    title: wtp.title.unwrap_or_default(),
+                    state: wtp.state.unwrap_or_else(|| "OPEN".into()),
+                    url,
+                })
+            });
+
             WorktreeInfo {
                 id: wt.id,
                 branch: wt.branch,
@@ -449,7 +522,8 @@ fn read_session(session_name: &str) -> Option<SwarmSession> {
                 terminal_count,
                 summary: wt.summary,
                 created_at: wt.created_at,
-                pr: None, // PR info is populated separately via refresh_pr_info
+                pr,
+                agent_session_status: wt.agent_session_status,
             }
         })
         .collect();

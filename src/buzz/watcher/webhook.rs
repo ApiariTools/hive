@@ -4,6 +4,8 @@
 //! signals via `POST /signal` with a JSON body conforming to the Signal schema.
 //! Signals are buffered and drained on each `poll()` call.
 
+use std::any::Any;
+
 use crate::signal::Signal;
 use async_trait::async_trait;
 use color_eyre::Result;
@@ -55,6 +57,14 @@ impl WebhookWatcher {
 impl Watcher for WebhookWatcher {
     fn name(&self) -> &str {
         "webhook"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 
     async fn poll(&mut self) -> Result<Vec<Signal>> {

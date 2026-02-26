@@ -39,6 +39,8 @@ pub enum ChannelEvent {
         user_name: String,
         data: String,
         callback_query_id: String,
+        /// Forum topic ID, if the original message was in a topic.
+        topic_id: Option<i64>,
     },
 }
 

@@ -21,6 +21,7 @@ fn save_cursors_creates_state_file() {
             token: "test-token".into(),
             org: "test-org".into(),
             project: "test-project".into(),
+            sweep: None,
         }),
         ..BuzzConfig::default()
     };
@@ -63,6 +64,7 @@ fn create_watchers_restores_cursors_from_state() {
             token: "test-token".into(),
             org: "test-org".into(),
             project: "test-project".into(),
+            sweep: None,
         }),
         ..BuzzConfig::default()
     };
@@ -89,6 +91,7 @@ fn multiple_watchers_sentry_cursor_persists_github_does_not() {
             token: "tok".into(),
             org: "org".into(),
             project: "proj".into(),
+            sweep: None,
         }),
         github: Some(GithubConfig {
             repos: vec!["owner/repo".into()],
@@ -132,6 +135,7 @@ fn create_watchers_with_no_state_file_succeeds() {
             token: "tok".into(),
             org: "org".into(),
             project: "proj".into(),
+            sweep: None,
         }),
         ..BuzzConfig::default()
     };
@@ -198,6 +202,7 @@ fn save_cursors_overwrites_previous_state() {
             token: "tok".into(),
             org: "org".into(),
             project: "proj".into(),
+            sweep: None,
         }),
         ..BuzzConfig::default()
     };

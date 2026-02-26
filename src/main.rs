@@ -79,9 +79,13 @@ enum Command {
         #[arg(long)]
         once: bool,
 
-        /// Path to config file.
-        #[arg(long, default_value = ".buzz/config.toml")]
-        config: PathBuf,
+        /// Run a single sweep (re-evaluate all unresolved issues), then exit.
+        #[arg(long, conflicts_with_all = ["daemon", "once"])]
+        sweep: bool,
+
+        /// Path to config file (overrides workspace.yaml buzz section).
+        #[arg(long)]
+        config: Option<PathBuf>,
 
         /// Output mode: stdout, file, webhook.
         #[arg(long)]
@@ -170,9 +174,20 @@ async fn main() -> Result<()> {
         Command::Buzz {
             daemon,
             once,
+            sweep,
             config,
             output,
-        } => buzz::run(&config, &cwd, daemon, once, output.as_deref()).await,
+        } => {
+            buzz::run(
+                config.as_deref(),
+                &cwd,
+                daemon,
+                once,
+                sweep,
+                output.as_deref(),
+            )
+            .await
+        }
         Command::Ui => ui::run(&cwd).await,
         Command::Dashboard { once } => keeper::run(once).await,
         Command::Remind {

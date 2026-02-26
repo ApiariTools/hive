@@ -8,6 +8,7 @@ pub mod github;
 pub mod sentry;
 pub mod webhook;
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -31,6 +32,16 @@ pub trait Watcher: Send + Sync {
     /// Poll the external source and return any new signals since the last poll.
     async fn poll(&mut self) -> Result<Vec<Signal>>;
 
+    /// Run a full sweep (re-evaluate all known issues). Default: no-op.
+    async fn sweep(&mut self) -> Result<Vec<Signal>> {
+        Ok(Vec::new())
+    }
+
+    /// Whether this watcher supports sweep.
+    fn has_sweep(&self) -> bool {
+        false
+    }
+
     /// Return the current cursor value for state persistence, if any.
     fn cursor(&self) -> Option<String> {
         None
@@ -38,6 +49,12 @@ pub trait Watcher: Send + Sync {
 
     /// Restore cursor from persisted state.
     fn set_cursor(&mut self, _cursor: String) {}
+
+    /// Downcast to concrete type for type-specific state (e.g. SentryWatcher seen_issues).
+    fn as_any(&self) -> &dyn Any;
+
+    /// Mutable downcast to concrete type.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 /// Persisted state for all watchers — maps watcher name to its cursor string.
@@ -45,6 +62,9 @@ pub trait Watcher: Send + Sync {
 pub struct WatcherState {
     /// Map of watcher name -> cursor value.
     pub cursors: HashMap<String, String>,
+    /// Per-issue metadata for sweep re-triage (keyed by Sentry issue ID).
+    #[serde(default)]
+    pub seen_issues: HashMap<String, sentry::IssueMeta>,
 }
 
 /// Create all enabled watchers based on the configuration.
@@ -72,7 +92,7 @@ pub fn create_watchers(config: &BuzzConfig, base: &Path) -> Vec<Box<dyn Watcher>
     watchers
 }
 
-/// Load persisted watcher state and restore cursors.
+/// Load persisted watcher state and restore cursors + seen issues.
 fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
     let state_path = base.join(STATE_REL);
     let state: WatcherState = match load_state(&state_path) {
@@ -82,10 +102,6 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
             WatcherState::default()
         }
     };
-
-    if state.cursors.is_empty() {
-        return;
-    }
 
     for watcher in watchers.iter_mut() {
         if let Some(cursor) = state.cursors.get(watcher.name()) {
@@ -97,9 +113,20 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
             watcher.set_cursor(cursor.clone());
         }
     }
+
+    // Restore seen_issues into the sentry watcher (if present).
+    if !state.seen_issues.is_empty()
+        && let Some(sentry_watcher) = find_sentry_watcher_mut(watchers)
+    {
+        eprintln!(
+            "[buzz] restored {} seen issue(s) for sweep",
+            state.seen_issues.len()
+        );
+        sentry_watcher.restore_seen_issues(state.seen_issues);
+    }
 }
 
-/// Save all watcher cursors to `<base>/.buzz/state.json`.
+/// Save all watcher cursors + seen issues to `<base>/.buzz/state.json`.
 pub fn save_cursors(watchers: &[Box<dyn Watcher>], base: &Path) {
     let mut state = WatcherState::default();
 
@@ -109,10 +136,33 @@ pub fn save_cursors(watchers: &[Box<dyn Watcher>], base: &Path) {
         }
     }
 
+    // Persist seen_issues from the sentry watcher (if present).
+    if let Some(sw) = find_sentry_watcher(watchers) {
+        state.seen_issues = sw.seen_issues().clone();
+    }
+
     let state_path = base.join(STATE_REL);
     if let Err(e) = save_state(&state_path, &state) {
         eprintln!("[buzz] failed to save watcher state: {e}");
     }
+}
+
+/// Find the SentryWatcher in a slice of boxed watchers (immutable).
+fn find_sentry_watcher(watchers: &[Box<dyn Watcher>]) -> Option<&sentry::SentryWatcher> {
+    watchers
+        .iter()
+        .find(|w| w.name() == "sentry")
+        .and_then(|w| w.as_any().downcast_ref::<sentry::SentryWatcher>())
+}
+
+/// Find the SentryWatcher in a mutable slice of boxed watchers.
+fn find_sentry_watcher_mut(
+    watchers: &mut [Box<dyn Watcher>],
+) -> Option<&mut sentry::SentryWatcher> {
+    watchers
+        .iter_mut()
+        .find(|w| w.name() == "sentry")
+        .and_then(|w| w.as_any_mut().downcast_mut::<sentry::SentryWatcher>())
 }
 
 #[cfg(test)]
@@ -151,6 +201,14 @@ mod tests {
 
         fn set_cursor(&mut self, cursor: String) {
             *self.cursor.lock().unwrap() = Some(cursor);
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
         }
     }
 

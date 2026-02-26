@@ -5,7 +5,7 @@ pub mod history;
 pub mod inbox;
 pub mod render;
 
-use app::{App, ChatLine, Panel};
+use app::{App, ChatLine, Panel, PendingAction};
 use color_eyre::Result;
 use crossterm::{
     ExecutableCommand,
@@ -14,7 +14,7 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 use std::io::stdout;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -28,6 +28,12 @@ enum CoordResponse {
     /// Session finished.
     Done,
     /// Error from coordinator.
+    Error(String),
+}
+
+/// Async action results sent back to the event loop.
+enum ActionResponse {
+    Success(String),
     Error(String),
 }
 
@@ -105,14 +111,19 @@ async fn event_loop(
     user_tx: &mpsc::Sender<String>,
     mut coord_rx: mpsc::Receiver<CoordResponse>,
 ) -> Result<()> {
+    // Channel for async action results (swarm send, close, etc.).
+    let (action_tx, mut action_rx) = mpsc::channel::<ActionResponse>(16);
+
     loop {
+        // Capture terminal height for page scroll calculations.
+        let viewport_height = terminal.size()?.height.saturating_sub(6); // approx content area
+
         terminal.draw(|frame| render::draw(frame, app))?;
 
         // Check for coordinator responses (non-blocking).
         while let Ok(msg) = coord_rx.try_recv() {
             match msg {
                 CoordResponse::Token(text) => {
-                    // Append to the last assistant message, or create one.
                     if let Some(ChatLine::Assistant(s)) = app.chat_history.last_mut() {
                         s.push_str(&text);
                     } else {
@@ -121,7 +132,6 @@ async fn event_loop(
                     app.chat_scroll = 0;
                 }
                 CoordResponse::Done => {
-                    // Persist the completed assistant response.
                     if let Some(ChatLine::Assistant(s)) = app.chat_history.last() {
                         let _ = history::save_message(
                             &app.workspace_root,
@@ -142,6 +152,14 @@ async fn event_loop(
             }
         }
 
+        // Check for action responses (non-blocking).
+        while let Ok(resp) = action_rx.try_recv() {
+            match resp {
+                ActionResponse::Success(msg) => app.flash(msg),
+                ActionResponse::Error(msg) => app.flash(format!("Error: {msg}")),
+            }
+        }
+
         // Poll keyboard events with 100ms timeout.
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
@@ -151,48 +169,197 @@ async fn event_loop(
                 break;
             }
 
-            match app.focus {
-                Panel::Chat => match key.code {
-                    KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
-                    KeyCode::Enter => {
-                        if !app.input.is_empty() && !app.streaming {
-                            let text = app.take_input();
-                            // Persist user message.
-                            let _ = history::save_message(
-                                &app.workspace_root,
-                                &history::ChatMessage {
-                                    role: "user".into(),
-                                    content: text.clone(),
-                                    ts: chrono::Utc::now(),
-                                },
-                            );
-                            // Build prompt with recent history context.
-                            let recent = history::load_history(&app.workspace_root, 20);
-                            let prompt = build_prompt_with_history(&recent, &text);
-                            app.chat_history.push(ChatLine::User(text));
-                            app.streaming = true;
-                            let _ = user_tx.send(prompt).await;
-                        }
+            // ── Prefix mode (Ctrl+B, then command) ──
+            if app.prefix_active {
+                app.prefix_active = false;
+                match key.code {
+                    KeyCode::Char('n') => {
+                        let next = (app.active_tab + 1) % app.workspaces.len().max(1);
+                        app.switch_tab(next);
                     }
-                    KeyCode::Backspace => app.backspace(),
-                    KeyCode::Char(c) => app.insert_char(c),
-                    KeyCode::Up => app.scroll_chat_up(),
-                    KeyCode::Down => app.scroll_chat_down(),
-                    KeyCode::Esc => app.toggle_focus(),
-                    _ => {}
-                },
-                Panel::Workers => match key.code {
-                    KeyCode::Tab | KeyCode::BackTab => app.toggle_focus(),
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('j') | KeyCode::Down => app.select_next_worker(),
-                    KeyCode::Char('k') | KeyCode::Up => app.select_prev_worker(),
+                    KeyCode::Char('p') => {
+                        let prev = if app.active_tab == 0 {
+                            app.workspaces.len().saturating_sub(1)
+                        } else {
+                            app.active_tab - 1
+                        };
+                        app.switch_tab(prev);
+                    }
                     KeyCode::Char(c @ '1'..='9') => {
                         let idx = (c as usize) - ('1' as usize);
                         app.switch_tab(idx);
                     }
-                    KeyCode::Esc => app.toggle_focus(),
-                    _ => {}
-                },
+                    _ => {} // unknown prefix command — ignore
+                }
+                continue;
+            }
+
+            // Ctrl+B activates prefix mode.
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') {
+                app.prefix_active = true;
+                continue;
+            }
+
+            // ── Confirmation mode ──
+            if app.pending_action.is_some() {
+                match key.code {
+                    KeyCode::Char('y') => {
+                        let action = app.pending_action.take().unwrap();
+                        match action {
+                            PendingAction::CloseWorker(id) => {
+                                let root = app.workspace_root.clone();
+                                let tx = action_tx.clone();
+                                spawn_close_worker(root, id, tx);
+                            }
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Esc => {
+                        app.pending_action = None;
+                        app.flash("Cancelled");
+                    }
+                    _ => {} // ignore other keys during confirm
+                }
+                continue; // skip normal key handling
+            }
+
+            // ── Global keybindings ──
+            let handled = match key.code {
+                KeyCode::Char(c @ '1'..='9')
+                    if key.modifiers.contains(KeyModifiers::ALT) || app.focus == Panel::Workers =>
+                {
+                    let idx = (c as usize) - ('1' as usize);
+                    app.switch_tab(idx);
+                    true
+                }
+                _ => false,
+            };
+
+            if !handled {
+                match app.focus {
+                    Panel::Chat => {
+                        if app.is_chat_selected() {
+                            // ── Content: Chat mode ──
+                            // Ctrl modifiers first (before generic Char match).
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                match key.code {
+                                    KeyCode::Char('u') => app.scroll_chat_half_up(viewport_height),
+                                    KeyCode::Char('d') => {
+                                        app.scroll_chat_half_down(viewport_height)
+                                    }
+                                    KeyCode::Char('b') => app.scroll_chat_page_up(viewport_height),
+                                    KeyCode::Char('f') => {
+                                        app.scroll_chat_page_down(viewport_height)
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                match key.code {
+                                    KeyCode::BackTab | KeyCode::Left => app.focus = Panel::Workers,
+                                    KeyCode::Tab => app.focus = Panel::Workers,
+                                    KeyCode::Esc => app.focus = Panel::Workers,
+                                    KeyCode::Enter => {
+                                        if !app.input.is_empty() && !app.streaming {
+                                            let text = app.take_input();
+                                            let _ = history::save_message(
+                                                &app.workspace_root,
+                                                &history::ChatMessage {
+                                                    role: "user".into(),
+                                                    content: text.clone(),
+                                                    ts: chrono::Utc::now(),
+                                                },
+                                            );
+                                            let recent =
+                                                history::load_history(&app.workspace_root, 20);
+                                            let prompt = build_prompt_with_history(&recent, &text);
+                                            app.chat_history.push(ChatLine::User(text));
+                                            app.streaming = true;
+                                            let _ = user_tx.send(prompt).await;
+                                        }
+                                    }
+                                    KeyCode::Backspace => app.backspace(),
+                                    KeyCode::Up => app.scroll_chat_up(),
+                                    KeyCode::Down => app.scroll_chat_down(),
+                                    KeyCode::Char(c) => app.insert_char(c),
+                                    _ => {}
+                                }
+                            }
+                        } else {
+                            // ── Content: Worker pane (forward keys to tmux) ──
+                            // Esc / Tab / BackTab return focus to sidebar.
+                            // Everything else is forwarded to the tmux pane.
+                            match key.code {
+                                KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {
+                                    app.focus = Panel::Workers;
+                                }
+                                _ => {
+                                    if let Some((_, wt)) = app.selected_worker()
+                                        && let Some(ref pane_id) = wt.agent_pane_id
+                                    {
+                                        send_key_to_pane(pane_id, key.code, key.modifiers);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Panel::Workers => {
+                        // ── Sidebar mode ──
+                        match key.code {
+                            KeyCode::Char('l') | KeyCode::Tab | KeyCode::Right => {
+                                app.focus = Panel::Chat
+                            }
+                            KeyCode::BackTab => app.focus = Panel::Chat,
+                            KeyCode::Char('q') => break,
+                            KeyCode::Char('j') | KeyCode::Down => app.select_next(),
+                            KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
+                            KeyCode::Char('g') => app.select_first(),
+                            KeyCode::Char('G') => app.select_last(),
+                            KeyCode::Esc => app.focus = Panel::Chat,
+                            KeyCode::Enter => {
+                                // Focus the content panel (chat or worker input).
+                                app.focus = Panel::Chat;
+                            }
+                            KeyCode::Char('o') => {
+                                // Jump directly to tmux pane for selected worker.
+                                if let Some((_, wt)) = app.selected_worker()
+                                    && let Some(ref pane_id) = wt.agent_pane_id
+                                {
+                                    let _ = jump_to_worker_pane(pane_id);
+                                }
+                            }
+                            KeyCode::Char('x') => {
+                                // Close worker (with confirmation).
+                                if let Some((id, _)) = app.selected_worker() {
+                                    app.pending_action =
+                                        Some(PendingAction::CloseWorker(id.to_string()));
+                                }
+                            }
+                            KeyCode::Char('p') => {
+                                // Open PR in browser.
+                                if let Some((_, wt)) = app.selected_worker() {
+                                    if let Some(ref pr) = wt.pr {
+                                        let _ =
+                                            std::process::Command::new("open").arg(&pr.url).spawn();
+                                        app.flash("Opened PR in browser");
+                                    } else {
+                                        app.flash("No PR for this worker");
+                                    }
+                                }
+                            }
+                            KeyCode::Char('c') => {
+                                // Copy PR URL to clipboard.
+                                if let Some((_, wt)) = app.selected_worker() {
+                                    if let Some(ref pr) = wt.pr {
+                                        copy_to_clipboard(&pr.url);
+                                        app.flash("PR URL copied");
+                                    } else {
+                                        app.flash("No PR to copy");
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
 
@@ -208,6 +375,102 @@ async fn event_loop(
     }
 
     Ok(())
+}
+
+// ── Async action helpers ─────────────────────────────────
+
+/// Spawn a task to close a worker via `swarm close`.
+fn spawn_close_worker(workspace_root: PathBuf, id: String, tx: mpsc::Sender<ActionResponse>) {
+    tokio::spawn(async move {
+        let result = tokio::process::Command::new("swarm")
+            .args(["--dir", &workspace_root.to_string_lossy(), "close", &id])
+            .output()
+            .await;
+
+        match result {
+            Ok(output) if output.status.success() => {
+                let _ = tx
+                    .send(ActionResponse::Success(format!("Closed {id}")))
+                    .await;
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let _ = tx
+                    .send(ActionResponse::Error(format!("swarm close: {stderr}")))
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(ActionResponse::Error(format!("swarm close: {e}")))
+                    .await;
+            }
+        }
+    });
+}
+
+/// Forward a key event to a tmux pane via `tmux send-keys`.
+fn send_key_to_pane(pane_id: &str, code: KeyCode, modifiers: KeyModifiers) {
+    let key_str = if modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+<key> → "C-<key>"
+        match code {
+            KeyCode::Char(c) => format!("C-{c}"),
+            _ => return,
+        }
+    } else if modifiers.contains(KeyModifiers::ALT) {
+        match code {
+            KeyCode::Char(c) => format!("M-{c}"),
+            KeyCode::Enter => "M-Enter".to_string(),
+            _ => return,
+        }
+    } else {
+        match code {
+            KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Backspace => "BSpace".to_string(),
+            KeyCode::Up => "Up".to_string(),
+            KeyCode::Down => "Down".to_string(),
+            KeyCode::Left => "Left".to_string(),
+            KeyCode::Right => "Right".to_string(),
+            KeyCode::Home => "Home".to_string(),
+            KeyCode::End => "End".to_string(),
+            KeyCode::PageUp => "PageUp".to_string(),
+            KeyCode::PageDown => "PageDown".to_string(),
+            KeyCode::Delete => "DC".to_string(),
+            KeyCode::Char(c) => {
+                // Use -l (literal) for printable characters.
+                let _ = std::process::Command::new("tmux")
+                    .args(["send-keys", "-t", pane_id, "-l", &c.to_string()])
+                    .output();
+                return;
+            }
+            _ => return,
+        }
+    };
+
+    let _ = std::process::Command::new("tmux")
+        .args(["send-keys", "-t", pane_id, &key_str])
+        .output();
+}
+
+/// Jump to a worker's tmux agent pane using `tmux select-pane`.
+fn jump_to_worker_pane(pane_id: &str) -> std::io::Result<()> {
+    std::process::Command::new("tmux")
+        .args(["select-pane", "-t", pane_id])
+        .status()?;
+    Ok(())
+}
+
+/// Copy text to the system clipboard (macOS).
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    if let Ok(mut child) = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(ref mut stdin) = child.stdin {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }
 
 /// Background task that receives user messages and calls the coordinator.
@@ -331,7 +594,8 @@ fn build_prompt_with_history(history: &[history::ChatMessage], user_input: &str)
 fn build_system_prompt(workspace: &crate::workspace::Workspace) -> String {
     let mut prompt = format!(
         "You are a coordinator for the \"{}\" workspace. \
-         Help the user understand project status, plan work, and manage agents.\n",
+         Help the user understand project status, plan work, and manage agents.\n\n\
+         The user is chatting with you from `hive ui` — the local terminal TUI (not Telegram, not Claude Code).\n",
         workspace.name
     );
 

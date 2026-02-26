@@ -10,6 +10,8 @@
 //! the API returns errors, individual failures are logged and skipped without
 //! crashing the entire poll cycle.
 
+use std::any::Any;
+
 use crate::signal::{Severity, Signal};
 use async_trait::async_trait;
 use color_eyre::Result;
@@ -327,6 +329,14 @@ fn has_label(issue: &serde_json::Value, label_name: &str) -> bool {
 impl Watcher for GithubWatcher {
     fn name(&self) -> &str {
         "github"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 
     async fn poll(&mut self) -> Result<Vec<Signal>> {

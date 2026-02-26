@@ -176,14 +176,18 @@ impl TelegramChannel {
     }
 
     /// Send a "typing" chat action indicator.
-    pub async fn send_typing(&self, chat_id: i64) {
+    pub async fn send_typing(&self, chat_id: i64, topic_id: Option<i64>) {
+        let mut payload = serde_json::json!({
+            "chat_id": chat_id,
+            "action": "typing",
+        });
+        if let Some(tid) = topic_id {
+            payload["message_thread_id"] = serde_json::json!(tid);
+        }
         let resp = self
             .client
             .post(self.api_url("sendChatAction"))
-            .json(&serde_json::json!({
-                "chat_id": chat_id,
-                "action": "typing",
-            }))
+            .json(&payload)
             .send()
             .await;
 
@@ -330,6 +334,7 @@ impl Channel for TelegramChannel {
                     }
 
                     let chat_id = cq.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
+                    let topic_id = cq.message.as_ref().and_then(|m| m.message_thread_id);
                     let user_name = cq.from.username.unwrap_or(cq.from.first_name);
 
                     if let Some(data) = cq.data {
@@ -338,6 +343,7 @@ impl Channel for TelegramChannel {
                             user_name,
                             data,
                             callback_query_id: cq.id,
+                            topic_id,
                         };
                         if tx.send(event).await.is_err() {
                             return;

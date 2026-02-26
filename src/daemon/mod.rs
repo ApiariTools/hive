@@ -23,7 +23,7 @@ use crate::coordinator::Coordinator;
 use crate::quest::{QuestStore, TaskOrigin, default_store_path};
 use crate::reminder::{self as user_reminder, ReminderStore};
 use crate::signal::{Severity, Signal};
-use crate::workspace::load_workspace;
+use crate::workspace::{self, load_workspace};
 use apiari_claude_sdk::types::ContentBlock;
 use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions};
 use apiari_common::ipc::JsonlReader;
@@ -228,6 +228,125 @@ struct PendingOrigin {
     created_at: std::time::Instant,
 }
 
+/// An extra workspace managed by the same daemon instance.
+///
+/// Holds only what's needed for coordinator chat routing — the system prompt,
+/// session store, and workspace root. Swarm watcher, buzz, reminders stay
+/// home-workspace-only for now.
+struct WorkspaceSlot {
+    name: String,
+    workspace_root: PathBuf,
+    coordinator_prompt: String,
+    sessions: SessionStore,
+}
+
+/// Per-workspace buzz state — watchers, reminders, output, and sweep timer.
+///
+/// Each workspace with a `buzz:` section in its `workspace.yaml` gets its own
+/// `BuzzSlot`. The daemon polls all slots on the buzz timer and writes signals
+/// to each workspace's own `.buzz/signals.jsonl`.
+struct BuzzSlot {
+    name: String,
+    workspace_root: PathBuf,
+    watchers: Vec<Box<dyn Watcher>>,
+    reminders: Vec<Reminder>,
+    output: OutputMode,
+    sweep_cron_expr: Option<String>,
+    next_sweep_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Telegram forum topic for this workspace's notifications.
+    /// `None` = home workspace (uses config.telegram.topic_id).
+    topic_id: Option<i64>,
+}
+
+impl BuzzSlot {
+    /// Try to create a BuzzSlot for a workspace.
+    ///
+    /// - For the home workspace, `daemon_buzz_config` provides the legacy `config_path`
+    ///   fallback from `daemon.toml [buzz]`.
+    /// - For registry workspaces, only the `workspace.yaml buzz:` section is used.
+    ///
+    /// Returns `None` if no buzz sources are configured.
+    fn try_new(
+        name: &str,
+        workspace_root: &Path,
+        daemon_buzz_config: Option<&config::BuzzDaemonConfig>,
+        topic_id: Option<i64>,
+    ) -> Option<Self> {
+        let ws = match load_workspace(workspace_root) {
+            Ok(ws) => ws,
+            Err(e) => {
+                eprintln!("[daemon] BuzzSlot '{name}': failed to load workspace: {e}");
+                return None;
+            }
+        };
+
+        // Resolve buzz config: workspace.yaml buzz section first,
+        // then legacy config_path fallback (home workspace only).
+        let buzz_config = if let Some(buzz) = &ws.buzz {
+            eprintln!("[daemon] BuzzSlot '{name}': loaded buzz config from workspace.yaml");
+            buzz.clone()
+        } else if let Some(daemon_cfg) = daemon_buzz_config {
+            // Legacy fallback: load from config_path in daemon.toml.
+            let config_path = if daemon_cfg.config_path.is_absolute() {
+                daemon_cfg.config_path.clone()
+            } else {
+                workspace_root.join(&daemon_cfg.config_path)
+            };
+            match BuzzConfig::load(&config_path) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    eprintln!("[daemon] BuzzSlot '{name}': failed to load legacy config: {e}");
+                    return None;
+                }
+            }
+        } else {
+            return None;
+        };
+
+        let watchers = create_watchers(&buzz_config, workspace_root);
+        if watchers.is_empty() && buzz_config.reminders.is_empty() {
+            eprintln!("[daemon] BuzzSlot '{name}': no watchers or reminders — skipping");
+            return None;
+        }
+
+        let reminders: Vec<Reminder> = buzz_config
+            .reminders
+            .iter()
+            .map(Reminder::from_config)
+            .collect();
+
+        // Always write to JSONL so the dashboard can read signals.
+        let output = OutputMode::File(
+            buzz_config
+                .output
+                .path
+                .clone()
+                .unwrap_or_else(|| workspace_root.join(".buzz/signals.jsonl")),
+        );
+
+        // Compute sweep schedule from watchers.
+        let (next_sweep_at, sweep_cron_expr) = DaemonRunner::compute_sweep_schedule(&watchers);
+
+        eprintln!(
+            "[daemon] BuzzSlot '{name}': {} watcher(s), {} reminder(s), sweep={}",
+            watchers.len(),
+            reminders.len(),
+            if next_sweep_at.is_some() { "yes" } else { "no" },
+        );
+
+        Some(Self {
+            name: name.to_owned(),
+            workspace_root: workspace_root.to_path_buf(),
+            watchers,
+            reminders,
+            output,
+            sweep_cron_expr,
+            next_sweep_at,
+            topic_id,
+        })
+    }
+}
+
 /// Max number of button label mappings to keep in memory.
 const BUTTON_LABEL_CACHE_MAX: usize = 500;
 
@@ -295,12 +414,9 @@ struct DaemonRunner {
     sessions: SessionStore,
     buzz_reader: JsonlReader<Signal>,
     coordinator_prompt: String,
-    /// Inline buzz watchers (when [buzz] enabled = true).
-    inline_watchers: Option<Vec<Box<dyn Watcher>>>,
-    /// Inline buzz reminders (when [buzz] enabled = true).
-    inline_reminders: Option<Vec<Reminder>>,
-    /// Buzz output mode for writing signals to JSONL (when inline watchers are active).
-    buzz_output: Option<OutputMode>,
+    /// Per-workspace buzz slots (watchers, reminders, output, sweep timers).
+    /// Non-empty when `[buzz] enabled = true`.
+    buzz_slots: Vec<BuzzSlot>,
     /// Swarm agent completion watcher.
     swarm_watcher: Option<swarm_watcher::SwarmWatcher>,
     /// Maps worktree_id → who asked for it (for notification routing).
@@ -321,6 +437,57 @@ struct DaemonRunner {
     /// Topic ID for the current event being handled (from incoming message).
     /// Used by `send()` to reply in the same topic.
     active_topic_id: Option<i64>,
+    /// Extra workspaces keyed by topic_id for multi-workspace routing.
+    extra_workspaces: HashMap<i64, WorkspaceSlot>,
+}
+
+/// Build a coordinator system prompt for a workspace, with daemon-mode addendum.
+fn build_coordinator_prompt(workspace_root: &Path, bot_username: Option<&str>) -> Result<String> {
+    let workspace = load_workspace(workspace_root)?;
+    let store = QuestStore::new(default_store_path(&workspace.root));
+    let coord = Coordinator::new(workspace, store);
+    let mut prompt = coord.build_system_prompt()?;
+    prompt.push_str("\n## Daemon Mode Constraints\n");
+    prompt.push_str(
+        "You are running as a Telegram bot in daemon mode (not an interactive terminal).\n",
+    );
+    if let Some(username) = bot_username {
+        prompt.push_str(&format!(
+            "Your Telegram bot username is @{username}. When users @mention you in a group chat, that IS a message to you — respond normally.\n"
+        ));
+    }
+    prompt.push_str("Keep responses conversational and concise.\n");
+    prompt.push_str(
+        "Do NOT modify files directly — no Write, Edit, or file-writing shell commands.\n",
+    );
+    prompt.push_str("Dispatch coding work to swarm agents via `swarm create`.\n");
+    prompt.push_str(
+        "Only use Bash for: swarm commands, git status/log, cargo check, and other read-only operations.\n",
+    );
+    prompt.push_str("\n## Interactive Buttons\n\n");
+    prompt.push_str("You can attach inline keyboard buttons to any response by ending your message with a buttons block:\n\n");
+    prompt.push_str(
+        "```buttons\n[[\"Button label\", \"callback:data\"], [\"Another\", \"other:data\"]]\n```\n\n",
+    );
+    prompt.push_str(
+        "Each inner array is [label, callback_data]. Multiple inner arrays = multiple rows.\n",
+    );
+    prompt.push_str("When the user taps a button, you will receive: \"User tapped: <label>\"\n\n");
+    prompt.push_str("Built-in actions (handled automatically, no response needed from you):\n");
+    prompt.push_str("- merge_pr:<worktree_id> — merges the PR for that worker\n");
+    prompt.push_str("- close_worker:<worktree_id> — closes that swarm worker\n");
+    prompt.push_str("- ci_pending:<worktree_id> — tells user CI is still running\n");
+    prompt.push_str("- ci_failing_merge:<worktree_id> — merges PR despite failing CI\n\n");
+    prompt.push_str("Use buttons to offer clear choices instead of asking open-ended questions.\n");
+    prompt.push_str(
+        "Example: instead of \"Should I merge?\" write \"Should I merge?\" with [Yes] [No] buttons.\n",
+    );
+    prompt.push_str("\n## Sentry Sweep Context\n\n");
+    prompt.push_str(
+        "When the user asks about Sentry issues or triage, check `.hive/last_sweep.md` for the latest sweep results. \
+         This file is updated after each `/sweep` command and contains issue titles, severity, event counts, and links.\n",
+    );
+    Ok(prompt)
 }
 
 impl DaemonRunner {
@@ -347,76 +514,54 @@ impl DaemonRunner {
         }
 
         // Build the coordinator system prompt once, with a daemon-specific addendum.
-        let workspace = load_workspace(&workspace_root)?;
-        let store = QuestStore::new(default_store_path(&workspace.root));
-        let coord = Coordinator::new(workspace, store);
-        let mut coordinator_prompt = coord.build_system_prompt()?;
-        coordinator_prompt.push_str("\n## Daemon Mode Constraints\n");
-        coordinator_prompt
-            .push_str("You are running as a bot in daemon mode (not an interactive terminal).\n");
-        coordinator_prompt.push_str("Keep responses conversational and concise.\n");
-        coordinator_prompt.push_str(
-            "Do NOT modify files directly — no Write, Edit, or file-writing shell commands.\n",
-        );
-        coordinator_prompt.push_str("Dispatch coding work to swarm agents via `swarm create`.\n");
-        coordinator_prompt.push_str("Only use Bash for: swarm commands, git status/log, cargo check, and other read-only operations.\n");
-        coordinator_prompt.push_str("\n## Interactive Buttons\n\n");
-        coordinator_prompt.push_str("You can attach inline keyboard buttons to any response by ending your message with a buttons block:\n\n");
-        coordinator_prompt.push_str("```buttons\n[[\"Button label\", \"callback:data\"], [\"Another\", \"other:data\"]]\n```\n\n");
-        coordinator_prompt.push_str(
-            "Each inner array is [label, callback_data]. Multiple inner arrays = multiple rows.\n",
-        );
-        coordinator_prompt.push_str(
-            "When the user taps a button, you will receive: \"User tapped: <label>\"\n\n",
-        );
-        coordinator_prompt
-            .push_str("Built-in actions (handled automatically, no response needed from you):\n");
-        coordinator_prompt.push_str("- merge_pr:<worktree_id> — merges the PR for that worker\n");
-        coordinator_prompt.push_str("- close_worker:<worktree_id> — closes that swarm worker\n");
-        coordinator_prompt
-            .push_str("- ci_pending:<worktree_id> — tells user CI is still running\n");
-        coordinator_prompt
-            .push_str("- ci_failing_merge:<worktree_id> — merges PR despite failing CI\n\n");
-        coordinator_prompt.push_str(
-            "Use buttons to offer clear choices instead of asking open-ended questions.\n",
-        );
-        coordinator_prompt.push_str("Example: instead of \"Should I merge?\" write \"Should I merge?\" with [Yes] [No] buttons.\n");
+        let coordinator_prompt =
+            build_coordinator_prompt(&workspace_root, config.telegram.bot_username.as_deref())?;
 
-        // Conditionally init inline buzz watchers.
-        let (inline_watchers, inline_reminders, buzz_output) =
-            if let Some(buzz_config_path) = config.resolved_buzz_config_path(&workspace_root) {
-                match BuzzConfig::load(&buzz_config_path) {
-                    Ok(buzz_config) => {
-                        let watchers = create_watchers(&buzz_config, &workspace_root);
-                        let reminders: Vec<Reminder> = buzz_config
-                            .reminders
-                            .iter()
-                            .map(Reminder::from_config)
-                            .collect();
-                        // Always write to JSONL so the dashboard can still read signals.
-                        let output = OutputMode::File(
-                            buzz_config
-                                .output
-                                .path
-                                .clone()
-                                .unwrap_or_else(|| PathBuf::from(".buzz/signals.jsonl")),
-                        );
-                        eprintln!(
-                            "[daemon] Inline buzz watchers enabled ({} watcher(s), {} reminder(s))",
-                            watchers.len(),
-                            reminders.len()
-                        );
-                        (Some(watchers), Some(reminders), Some(output))
-                    }
-                    Err(e) => {
-                        eprintln!("[daemon] Failed to load buzz config: {e}");
-                        eprintln!("[daemon] Falling back to JSONL file polling");
-                        (None, None, None)
-                    }
+        // Conditionally init per-workspace buzz slots.
+        // When [buzz] enabled = true, discover workspaces from the global registry
+        // and create a BuzzSlot for each that has a buzz: section in workspace.yaml.
+        let buzz_slots = if config.buzz.as_ref().is_some_and(|b| b.enabled) {
+            let mut slots = Vec::new();
+
+            // Home workspace — uses daemon.toml config_path as legacy fallback.
+            // topic_id = None means "use config.telegram.topic_id" (home topic).
+            if let Some(slot) =
+                BuzzSlot::try_new("home", &workspace_root, config.buzz.as_ref(), None)
+            {
+                slots.push(slot);
+            }
+
+            // Discover other workspaces from global registry.
+            let home_canonical =
+                std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root.clone());
+            for entry in workspace::load_registry() {
+                let entry_canonical =
+                    std::fs::canonicalize(&entry.path).unwrap_or(entry.path.clone());
+                if entry_canonical == home_canonical {
+                    continue; // skip home — already handled
                 }
+                // Look up topic_id from daemon.toml [[workspaces]] by path.
+                let topic_id = config.workspaces.iter().find_map(|ws| {
+                    let ws_canonical = std::fs::canonicalize(&ws.path).unwrap_or(ws.path.clone());
+                    (ws_canonical == entry_canonical).then_some(ws.topic_id)
+                });
+                if let Some(slot) = BuzzSlot::try_new(&entry.name, &entry.path, None, topic_id) {
+                    slots.push(slot);
+                }
+            }
+
+            if slots.is_empty() {
+                eprintln!("[daemon] Buzz enabled but no workspaces have buzz config");
             } else {
-                (None, None, None)
-            };
+                eprintln!(
+                    "[daemon] Buzz slots initialized: {} workspace(s)",
+                    slots.len()
+                );
+            }
+            slots
+        } else {
+            Vec::new()
+        };
 
         // Conditionally init swarm watcher.
         let swarm_watcher_instance = if let Some(state_path) =
@@ -461,6 +606,47 @@ impl DaemonRunner {
             eprintln!("[daemon] Loaded {active_reminders} active reminder(s)");
         }
 
+        // Initialize extra workspace slots.
+        let mut extra_workspaces = HashMap::new();
+        for ws_cfg in &config.workspaces {
+            match build_coordinator_prompt(&ws_cfg.path, config.telegram.bot_username.as_deref()) {
+                Ok(prompt) => {
+                    let ws_sessions = SessionStore::load(&ws_cfg.path);
+                    eprintln!(
+                        "[daemon] Extra workspace '{}' loaded (topic_id={}, path={})",
+                        ws_cfg.name,
+                        ws_cfg.topic_id,
+                        ws_cfg.path.display()
+                    );
+                    extra_workspaces.insert(
+                        ws_cfg.topic_id,
+                        WorkspaceSlot {
+                            name: ws_cfg.name.clone(),
+                            workspace_root: ws_cfg.path.clone(),
+                            coordinator_prompt: prompt,
+                            sessions: ws_sessions,
+                        },
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[daemon] Failed to load extra workspace '{}': {e}",
+                        ws_cfg.name
+                    );
+                }
+            }
+        }
+
+        // Log sweep schedules from buzz slots.
+        for slot in &buzz_slots {
+            if let Some(ref next) = slot.next_sweep_at {
+                eprintln!(
+                    "[daemon] Sweep scheduled for '{}': next at {next}",
+                    slot.name
+                );
+            }
+        }
+
         Ok(Self {
             workspace_root,
             config,
@@ -468,9 +654,7 @@ impl DaemonRunner {
             sessions,
             buzz_reader,
             coordinator_prompt,
-            inline_watchers,
-            inline_reminders,
-            buzz_output,
+            buzz_slots,
             swarm_watcher: swarm_watcher_instance,
             origin_map,
             pending_origins: Vec::new(),
@@ -480,6 +664,7 @@ impl DaemonRunner {
             button_labels: HashMap::new(),
             button_labels_order: VecDeque::new(),
             active_topic_id: None,
+            extra_workspaces,
         })
     }
 
@@ -542,6 +727,11 @@ impl DaemonRunner {
         // Skip the first immediate tick.
         reminder_timer.tick().await;
 
+        // Sweep timer — computed from sentry sweep cron schedule.
+        let mut sweep_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = self
+            .sweep_instant()
+            .map(|i| Box::pin(tokio::time::sleep_until(i)));
+
         eprintln!("[daemon] Ready. Listening for Telegram messages and buzz signals.");
 
         loop {
@@ -582,16 +772,33 @@ impl DaemonRunner {
                         eprintln!("[daemon] Reminder poll error: {e}");
                     }
                 }
+
+                _ = async { sweep_sleep.as_mut().unwrap().as_mut().await }, if sweep_sleep.is_some() => {
+                    if let Err(e) = self.poll_sweep().await {
+                        eprintln!("[daemon] Sweep error: {e}");
+                    }
+                    self.advance_sweep_timer();
+                    sweep_sleep = self.sweep_instant().map(|i| Box::pin(tokio::time::sleep_until(i)));
+                }
             }
         }
 
         // Persist state before exiting.
         self.sessions.save()?;
+        for slot in self.extra_workspaces.values() {
+            if let Err(e) = slot.sessions.save() {
+                eprintln!("[daemon] Failed to save sessions for '{}': {e}", slot.name);
+            }
+        }
         if let Err(e) = self.reminder_store.save() {
             eprintln!("[daemon] Failed to save reminders: {e}");
         }
         if let Err(e) = self.origin_map.save(&self.workspace_root) {
             eprintln!("[daemon] Failed to save origin map: {e}");
+        }
+        // Save buzz watcher cursors for all slots.
+        for slot in &self.buzz_slots {
+            save_cursors(&slot.watchers, &slot.workspace_root);
         }
 
         let restart = self.restart_requested.load(Ordering::Relaxed);
@@ -603,6 +810,33 @@ impl DaemonRunner {
         Ok(restart)
     }
 
+    /// Resolve which workspace a topic belongs to.
+    ///
+    /// Returns `Some(topic_id)` for an extra workspace, `None` for home workspace.
+    /// Returns `Err(())` if the topic doesn't match any registered workspace.
+    fn resolve_topic(&self, topic_id: Option<i64>) -> std::result::Result<Option<i64>, ()> {
+        // Check extra workspaces first.
+        if let Some(tid) = topic_id
+            && self.extra_workspaces.contains_key(&tid)
+        {
+            return Ok(Some(tid));
+        }
+        // Check home workspace.
+        match self.config.telegram.topic_id {
+            Some(configured) => {
+                if topic_id == Some(configured) {
+                    Ok(None) // home workspace
+                } else if topic_id.is_none() {
+                    // No topic but home has one configured — accept for DMs/non-forum chats.
+                    Ok(None)
+                } else {
+                    Err(()) // unregistered topic
+                }
+            }
+            None => Ok(None), // no topic configured — everything goes to home
+        }
+    }
+
     /// Handle a message or command from a channel.
     async fn handle_channel_event(&mut self, event: ChannelEvent) -> Result<()> {
         // Callback queries don't have message_id — handle separately.
@@ -611,6 +845,7 @@ impl DaemonRunner {
             user_name,
             data,
             callback_query_id,
+            topic_id,
         } = event
         {
             if !self.config.is_chat_allowed(chat_id) {
@@ -620,7 +855,11 @@ impl DaemonRunner {
             eprintln!("[daemon] Callback from {user_name}: {data}");
             // Always acknowledge immediately to dismiss Telegram's spinner.
             self.channel.answer_callback_query(&callback_query_id).await;
-            return self.handle_callback(chat_id, &data).await;
+            // Resolve workspace for callback routing.
+            self.active_topic_id = topic_id;
+            let result = self.handle_callback(chat_id, &data).await;
+            self.active_topic_id = None;
+            return result;
         }
 
         let (chat_id, message_id, topic_id) = match &event {
@@ -641,6 +880,12 @@ impl DaemonRunner {
 
         if !self.config.is_chat_allowed(chat_id) {
             eprintln!("[daemon] Ignoring message from disallowed chat {chat_id}");
+            return Ok(());
+        }
+
+        // Resolve workspace from topic. Reject messages from unregistered topics.
+        if self.resolve_topic(topic_id).is_err() {
+            eprintln!("[daemon] Ignoring message from unregistered topic {topic_id:?}");
             return Ok(());
         }
 
@@ -672,7 +917,7 @@ impl DaemonRunner {
                 ..
             } => {
                 eprintln!(
-                    "[daemon] Message from {user_name} (chat={chat_id}): {}",
+                    "[daemon] Message from {user_name} (chat={chat_id}, topic={topic_id:?}): {}",
                     truncate(&text, 80)
                 );
                 self.handle_message(chat_id, user_id, &user_name, &text)
@@ -684,6 +929,50 @@ impl DaemonRunner {
         // Clear topic context after handling.
         self.active_topic_id = None;
         result
+    }
+
+    /// Get the active workspace's coordinator prompt (extra workspace or home).
+    fn active_coordinator_prompt(&self) -> &str {
+        if let Some(tid) = self.active_topic_id
+            && let Some(slot) = self.extra_workspaces.get(&tid)
+        {
+            &slot.coordinator_prompt
+        } else {
+            &self.coordinator_prompt
+        }
+    }
+
+    /// Get the active workspace's root path (extra workspace or home).
+    fn active_workspace_root(&self) -> &Path {
+        if let Some(tid) = self.active_topic_id
+            && let Some(slot) = self.extra_workspaces.get(&tid)
+        {
+            &slot.workspace_root
+        } else {
+            &self.workspace_root
+        }
+    }
+
+    /// Get a mutable reference to the active workspace's session store.
+    fn active_sessions_mut(&mut self) -> &mut SessionStore {
+        if let Some(tid) = self.active_topic_id
+            && let Some(slot) = self.extra_workspaces.get_mut(&tid)
+        {
+            &mut slot.sessions
+        } else {
+            &mut self.sessions
+        }
+    }
+
+    /// Get a reference to the active workspace's session store.
+    fn active_sessions(&self) -> &SessionStore {
+        if let Some(tid) = self.active_topic_id
+            && let Some(slot) = self.extra_workspaces.get(&tid)
+        {
+            &slot.sessions
+        } else {
+            &self.sessions
+        }
     }
 
     /// Handle an inline keyboard button press.
@@ -713,7 +1002,7 @@ impl DaemonRunner {
 
     /// Merge a PR for the given worktree by looking up its PR URL from swarm state.
     async fn handle_merge_pr(&self, chat_id: i64, worktree_id: &str) -> Result<()> {
-        let pr_url = match read_pr_url_from_swarm(&self.workspace_root, worktree_id) {
+        let pr_url = match read_pr_url_from_swarm(self.active_workspace_root(), worktree_id) {
             Some(url) => url,
             None => {
                 return self
@@ -767,7 +1056,7 @@ impl DaemonRunner {
         let output = tokio::process::Command::new("swarm")
             .args([
                 "--dir",
-                &self.workspace_root.display().to_string(),
+                &self.active_workspace_root().display().to_string(),
                 "close",
                 worktree_id,
             ])
@@ -814,8 +1103,8 @@ impl DaemonRunner {
                 .await
             }
             "reset" => {
-                let had_session = self.sessions.reset_session(chat_id);
-                self.sessions.save()?;
+                let had_session = self.active_sessions_mut().reset_session(chat_id);
+                self.active_sessions_mut().save()?;
                 if had_session {
                     self.send(
                         chat_id,
@@ -827,7 +1116,7 @@ impl DaemonRunner {
                 }
             }
             "history" => {
-                let history = self.sessions.history(chat_id);
+                let history = self.active_sessions().history(chat_id);
                 if history.is_empty() {
                     return self.send(chat_id, "No previous sessions.").await;
                 }
@@ -849,10 +1138,11 @@ impl DaemonRunner {
                         .send(chat_id, "Usage: /resume <session-id-prefix>")
                         .await;
                 }
-                match self.sessions.find_archived(chat_id, args) {
+                match self.active_sessions().find_archived(chat_id, args) {
                     Some(session_id) => {
-                        self.sessions.resume_session(chat_id, &session_id);
-                        self.sessions.save()?;
+                        self.active_sessions_mut()
+                            .resume_session(chat_id, &session_id);
+                        self.active_sessions_mut().save()?;
                         let short = &session_id[..8.min(session_id.len())];
                         self.send(
                             chat_id,
@@ -867,8 +1157,9 @@ impl DaemonRunner {
                 }
             }
             "status" => {
-                let mut text = format!("Workspace: {}\n", self.workspace_root.display());
-                if let Some(session) = self.sessions.get_active(chat_id) {
+                let ws_root = self.active_workspace_root();
+                let mut text = format!("Workspace: {}\n", ws_root.display());
+                if let Some(session) = self.active_sessions().get_active(chat_id) {
                     text.push_str(&format!(
                         "Active session: `{}`\nTurns: {}\nStarted: {}",
                         &session.session_id[..8.min(session.session_id.len())],
@@ -882,6 +1173,7 @@ impl DaemonRunner {
             }
             "remind" => self.handle_remind_command(chat_id, args).await,
             "reminders" => self.handle_reminders_command(chat_id, args).await,
+            "sweep" => self.handle_sweep_command(chat_id).await,
             "help" => {
                 let mut text = String::from(
                     "Commands:\n\
@@ -893,6 +1185,7 @@ impl DaemonRunner {
                      /remind --cron \"expr\" <msg> — Cron reminder\n\
                      /reminders — List pending reminders\n\
                      /reminders cancel <id> — Cancel a reminder\n\
+                     /sweep — Run a Sentry sweep now\n\
                      /help — Show this message",
                 );
                 // Append custom commands.
@@ -924,7 +1217,7 @@ impl DaemonRunner {
 
         let output = tokio::process::Command::new("sh")
             .args(["-c", &cmd.run])
-            .current_dir(&self.workspace_root)
+            .current_dir(self.active_workspace_root())
             .output()
             .await;
 
@@ -1011,11 +1304,12 @@ impl DaemonRunner {
         });
         // Start typing indicator loop (expires after 5s, so we resend every 4s).
         let channel = self.channel.clone();
+        let typing_topic_id = self.active_topic_id;
         let typing_cancel = CancellationToken::new();
         let typing_token = typing_cancel.clone();
         tokio::spawn(async move {
             loop {
-                channel.send_typing(chat_id).await;
+                channel.send_typing(chat_id, typing_topic_id).await;
                 tokio::select! {
                     _ = typing_token.cancelled() => break,
                     _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {}
@@ -1025,7 +1319,7 @@ impl DaemonRunner {
 
         // Check if we have an active session to resume, or start a new one.
         let resume_id = self
-            .sessions
+            .active_sessions()
             .get_active(chat_id)
             .map(|s| s.session_id.clone());
 
@@ -1057,13 +1351,13 @@ impl DaemonRunner {
             Ok((final_text, session_id)) => {
                 // If this was a new session, record it.
                 if resume_id.is_none() || resume_id.as_deref() != Some(&session_id) {
-                    self.sessions.start_session(chat_id, session_id);
+                    self.active_sessions_mut()
+                        .start_session(chat_id, session_id);
                 }
 
-                let should_nudge = self
-                    .sessions
-                    .record_turn(chat_id, self.config.nudge_turn_threshold);
-                self.sessions.save()?;
+                let threshold = self.config.nudge_turn_threshold;
+                let should_nudge = self.active_sessions_mut().record_turn(chat_id, threshold);
+                self.active_sessions_mut().save()?;
 
                 let mut full_response = final_text;
                 if should_nudge {
@@ -1077,8 +1371,8 @@ impl DaemonRunner {
                 eprintln!("[daemon] Claude session error: {e}");
                 // If session died, remove it so next message auto-reconnects.
                 if resume_id.is_some() {
-                    self.sessions.remove_active(chat_id);
-                    self.sessions.save()?;
+                    self.active_sessions_mut().remove_active(chat_id);
+                    self.active_sessions_mut().save()?;
                 }
                 format!(
                     "⚠️ Error: {}\n\nSession has been reset. Send another message to reconnect.",
@@ -1136,14 +1430,14 @@ impl DaemonRunner {
     {
         let opts = SessionOptions {
             system_prompt: if resume_id.is_none() {
-                Some(self.coordinator_prompt.clone())
+                Some(self.active_coordinator_prompt().to_owned())
             } else {
                 None
             },
             model: Some(self.config.model.clone()),
             resume: resume_id.map(|s| s.to_owned()),
             max_turns: Some(self.config.max_turns.into()),
-            working_dir: Some(self.workspace_root.clone()),
+            working_dir: Some(self.active_workspace_root().to_path_buf()),
             allowed_tools: vec![
                 "Bash".into(),
                 "Read".into(),
@@ -1280,19 +1574,24 @@ impl DaemonRunner {
 
     /// Poll buzz signals and auto-triage critical/warning ones.
     ///
-    /// When inline watchers are enabled, polls them directly and writes to JSONL
+    /// When buzz slots are active, polls them directly and writes to JSONL
     /// for the dashboard. Otherwise, reads new signals from the JSONL file.
     async fn poll_buzz(&mut self) -> Result<()> {
-        let signals = if self.inline_watchers.is_some() {
+        // Each signal is paired with the topic it should be routed to.
+        let tagged: Vec<(Signal, Option<i64>)> = if !self.buzz_slots.is_empty() {
             self.poll_inline_watchers().await
         } else {
+            // JSONL fallback — all signals route to home topic.
             self.poll_buzz_jsonl()
+                .into_iter()
+                .map(|s| (s, self.config.telegram.topic_id))
+                .collect()
         };
 
         // Filter for important signals.
-        let important: Vec<&Signal> = signals
+        let important: Vec<&(Signal, Option<i64>)> = tagged
             .iter()
-            .filter(|s| matches!(s.severity, Severity::Critical | Severity::Warning))
+            .filter(|(s, _)| matches!(s.severity, Severity::Critical | Severity::Warning))
             .collect();
 
         if important.is_empty() {
@@ -1301,12 +1600,11 @@ impl DaemonRunner {
 
         eprintln!("[daemon] {} new buzz signal(s) to triage", important.len());
 
-        // Use configured notification topic for background alerts.
-        self.active_topic_id = self.config.telegram.topic_id;
-        for signal in important {
+        let alert_chat_id = self.config.telegram.alert_chat_id;
+        for (signal, topic) in important {
             let assessment = self.triage_signal(signal).await;
             let alert = format_triage_alert(signal, &assessment);
-            let alert_chat_id = self.config.telegram.alert_chat_id;
+            self.active_topic_id = *topic;
             self.send(alert_chat_id, &alert).await?;
         }
         self.active_topic_id = None;
@@ -1315,58 +1613,65 @@ impl DaemonRunner {
         Ok(())
     }
 
-    /// Poll inline buzz watchers directly, dedup + prioritize, emit to JSONL.
-    async fn poll_inline_watchers(&mut self) -> Vec<Signal> {
-        let watchers = match self.inline_watchers.as_mut() {
-            Some(w) => w,
-            None => return Vec::new(),
-        };
+    /// Poll all buzz slots (per-workspace watchers), dedup + prioritize per slot, emit to JSONL.
+    /// Returns signals tagged with their destination topic for correct Telegram routing.
+    async fn poll_inline_watchers(&mut self) -> Vec<(Signal, Option<i64>)> {
+        let mut all_tagged = Vec::new();
 
-        let mut all_signals = Vec::new();
+        for slot in &mut self.buzz_slots {
+            let mut slot_signals = Vec::new();
 
-        // Poll each watcher.
-        for watcher in watchers.iter_mut() {
-            match watcher.poll().await {
-                Ok(signals) => {
-                    if !signals.is_empty() {
-                        eprintln!(
-                            "[daemon] {} returned {} signal(s)",
-                            watcher.name(),
-                            signals.len()
-                        );
+            // Poll each watcher in this slot.
+            for watcher in slot.watchers.iter_mut() {
+                match watcher.poll().await {
+                    Ok(signals) => {
+                        if !signals.is_empty() {
+                            eprintln!(
+                                "[daemon] [{}] {} returned {} signal(s)",
+                                slot.name,
+                                watcher.name(),
+                                signals.len()
+                            );
+                        }
+                        slot_signals.extend(signals);
                     }
-                    all_signals.extend(signals);
-                }
-                Err(e) => {
-                    eprintln!("[daemon] {} error: {e}", watcher.name());
+                    Err(e) => {
+                        eprintln!("[daemon] [{}] {} error: {e}", slot.name, watcher.name());
+                    }
                 }
             }
-        }
 
-        // Check reminders.
-        if let Some(reminders) = self.inline_reminders.as_mut() {
-            let reminder_signals = reminder::check_reminders(reminders);
+            // Check reminders for this slot.
+            let reminder_signals = reminder::check_reminders(&mut slot.reminders);
             if !reminder_signals.is_empty() {
-                eprintln!("[daemon] {} reminder(s) fired", reminder_signals.len());
-                all_signals.extend(reminder_signals);
+                eprintln!(
+                    "[daemon] [{}] {} reminder(s) fired",
+                    slot.name,
+                    reminder_signals.len()
+                );
+                slot_signals.extend(reminder_signals);
             }
+
+            // Save watcher cursors for this workspace.
+            save_cursors(&slot.watchers, &slot.workspace_root);
+
+            // Emit to this workspace's JSONL so the dashboard can read them.
+            if let Err(e) = output::emit(&slot_signals, &slot.output) {
+                eprintln!("[daemon] [{}] Failed to write buzz signals: {e}", slot.name);
+            }
+
+            // Dedup + prioritize within this slot.
+            let mut deduped = deduplicate(&slot_signals);
+            prioritize(&mut deduped);
+
+            // Resolve topic: slot-specific topic, or fall back to home topic from config.
+            let topic = slot.topic_id.or(self.config.telegram.topic_id);
+
+            // Tag each signal with its destination topic.
+            all_tagged.extend(deduped.into_iter().map(|s| (s, topic)));
         }
 
-        // Dedup + prioritize.
-        let mut signals = deduplicate(&all_signals);
-        prioritize(&mut signals);
-
-        // Emit to JSONL so the dashboard can read them.
-        if let Some(output_mode) = &self.buzz_output
-            && let Err(e) = output::emit(&signals, output_mode)
-        {
-            eprintln!("[daemon] Failed to write buzz signals: {e}");
-        }
-
-        // Save watcher cursors.
-        save_cursors(watchers, &self.workspace_root);
-
-        signals
+        all_tagged
     }
 
     /// Poll buzz signals from the JSONL file (fallback when inline watchers are disabled).
@@ -1402,6 +1707,213 @@ impl DaemonRunner {
         self.active_topic_id = None;
 
         self.reminder_store.save()?;
+        Ok(())
+    }
+
+    /// Compute the sweep schedule from inline watchers' sentry config.
+    fn compute_sweep_schedule(
+        watchers: &[Box<dyn Watcher>],
+    ) -> (Option<chrono::DateTime<chrono::Utc>>, Option<String>) {
+        use crate::buzz::watcher::sentry::SentryWatcher;
+
+        for watcher in watchers {
+            if let Some(sw) = watcher.as_any().downcast_ref::<SentryWatcher>()
+                && let Some(schedule) = sw.sweep_schedule()
+                && let Ok(cron) = schedule.parse::<croner::Cron>()
+            {
+                let now = chrono::Utc::now();
+                if let Ok(next) = cron.find_next_occurrence(&now, false) {
+                    return (Some(next), Some(schedule.to_string()));
+                }
+            }
+        }
+        (None, None)
+    }
+
+    /// Convert the earliest `next_sweep_at` across all buzz slots to a `tokio::time::Instant`.
+    fn sweep_instant(&self) -> Option<tokio::time::Instant> {
+        let next = self
+            .buzz_slots
+            .iter()
+            .filter_map(|s| s.next_sweep_at)
+            .min()?;
+        let now_chrono = chrono::Utc::now();
+        let duration = (next - now_chrono).to_std().ok()?;
+        Some(tokio::time::Instant::now() + duration)
+    }
+
+    /// Advance sweep timers for slots where `next_sweep_at <= now`.
+    fn advance_sweep_timer(&mut self) {
+        let now = chrono::Utc::now();
+        for slot in &mut self.buzz_slots {
+            if let Some(next) = slot.next_sweep_at
+                && next <= now
+                && let Some(ref expr) = slot.sweep_cron_expr
+                && let Ok(cron) = expr.parse::<croner::Cron>()
+            {
+                slot.next_sweep_at = cron.find_next_occurrence(&now, false).ok();
+                if let Some(ref next) = slot.next_sweep_at {
+                    eprintln!("[daemon] Next sweep for '{}' at {next}", slot.name);
+                }
+            }
+        }
+    }
+
+    /// Run a sweep across all due buzz slots and send a per-workspace summary digest.
+    /// Returns the number of signals found.
+    async fn poll_sweep(&mut self) -> Result<usize> {
+        let now = chrono::Utc::now();
+
+        // Phase 1: Sweep all due slots, collect results.
+        // Separated from send phase to avoid borrow conflict.
+        struct SweepResult {
+            topic: Option<i64>,
+            message: String,
+        }
+        let mut results: Vec<SweepResult> = Vec::new();
+        let mut total_count = 0usize;
+
+        for slot in &mut self.buzz_slots {
+            // Only sweep slots that are due.
+            if let Some(next) = slot.next_sweep_at {
+                if next > now {
+                    continue;
+                }
+            } else {
+                continue; // no sweep configured for this slot
+            }
+
+            let mut slot_signals = Vec::new();
+            for watcher in slot.watchers.iter_mut() {
+                if !watcher.has_sweep() {
+                    continue;
+                }
+                match watcher.sweep().await {
+                    Ok(signals) => {
+                        if !signals.is_empty() {
+                            eprintln!(
+                                "[daemon] [{}] {} sweep returned {} signal(s)",
+                                slot.name,
+                                watcher.name(),
+                                signals.len()
+                            );
+                        }
+                        slot_signals.extend(signals);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[daemon] [{}] {} sweep error: {e}",
+                            slot.name,
+                            watcher.name()
+                        );
+                    }
+                }
+            }
+
+            // Save watcher state (cursors + seen_issues) for this workspace.
+            save_cursors(&slot.watchers, &slot.workspace_root);
+
+            if slot_signals.is_empty() {
+                eprintln!(
+                    "[daemon] [{}] Sweep complete — no issues to re-triage",
+                    slot.name
+                );
+                continue;
+            }
+
+            let message = build_sweep_summary(&slot.name, &slot_signals);
+            eprintln!("[daemon] [{}] Sweep digest ready", slot.name);
+
+            // Write to .hive/last_sweep.md so the coordinator can read it.
+            write_last_sweep(&slot.workspace_root, &message);
+
+            let topic = slot.topic_id.or(self.config.telegram.topic_id);
+            total_count += slot_signals.len();
+            results.push(SweepResult { topic, message });
+        }
+
+        // Phase 2: Send all digests to Telegram, each to its workspace's topic.
+        let alert_chat_id = self.config.telegram.alert_chat_id;
+        for r in &results {
+            self.active_topic_id = r.topic;
+            self.send(alert_chat_id, &r.message).await?;
+        }
+        self.active_topic_id = None;
+
+        if results.is_empty() {
+            eprintln!("[daemon] Sweep complete — no issues to re-triage across all workspaces");
+        }
+
+        Ok(total_count)
+    }
+
+    /// Handle `/sweep` Telegram command — run a sweep on demand across all buzz slots.
+    async fn handle_sweep_command(&mut self, chat_id: i64) -> Result<()> {
+        if self.buzz_slots.is_empty() {
+            return self
+                .send(
+                    chat_id,
+                    "Inline buzz watchers are not enabled — sweep unavailable.",
+                )
+                .await;
+        }
+
+        let has_sweep = self
+            .buzz_slots
+            .iter()
+            .any(|s| s.watchers.iter().any(|w| w.has_sweep()));
+
+        if !has_sweep {
+            return self
+                .send(
+                    chat_id,
+                    "No watchers support sweep (is sentry.sweep configured?).",
+                )
+                .await;
+        }
+
+        self.send(chat_id, "Running sweep...").await?;
+
+        // Manual sweep: clear seen issues so everything is re-evaluated as fresh,
+        // then force all sweep-capable slots due.
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        for slot in &mut self.buzz_slots {
+            if slot.next_sweep_at.is_some() {
+                slot.next_sweep_at = Some(past);
+                // Clear sentry seen_issues so the manual sweep shows all issues.
+                for watcher in &mut slot.watchers {
+                    if let Some(sw) = watcher
+                        .as_any_mut()
+                        .downcast_mut::<crate::buzz::watcher::sentry::SentryWatcher>()
+                    {
+                        sw.clear_seen_issues();
+                    }
+                }
+            }
+        }
+
+        // Save topic context — poll_sweep changes active_topic_id internally.
+        let saved_topic = self.active_topic_id;
+        match self.poll_sweep().await {
+            Ok(0) => {
+                self.active_topic_id = saved_topic;
+                self.send(chat_id, "Sweep complete — nothing to re-triage.")
+                    .await?;
+            }
+            Ok(_count) => {
+                // Results already sent to Telegram per-workspace by poll_sweep,
+                // and written to .hive/last_sweep.md for coordinator context.
+                self.active_topic_id = saved_topic;
+            }
+            Err(e) => {
+                self.active_topic_id = saved_topic;
+                self.send(chat_id, &format!("Sweep failed: {e}")).await?;
+            }
+        }
+
+        // Advance timers after forced sweep.
+        self.advance_sweep_timer();
+
         Ok(())
     }
 
@@ -2181,6 +2693,79 @@ fn format_swarm_batch(notifications: &[&swarm_watcher::SwarmNotification]) -> St
         text.push_str(&format!("\n• {}", n.summary_line()));
     }
     text
+}
+
+/// Build a sweep summary message for a single workspace's signals.
+///
+/// Groups issues by severity with titles, event counts, and links.
+fn build_sweep_summary(workspace_name: &str, signals: &[Signal]) -> String {
+    let header = if workspace_name == "home" {
+        format!("**Sentry Sweep** — {} issue(s)", signals.len())
+    } else {
+        format!(
+            "**Sentry Sweep** ({workspace_name}) — {} issue(s)",
+            signals.len()
+        )
+    };
+
+    // Group by severity.
+    let mut critical: Vec<&Signal> = Vec::new();
+    let mut warning: Vec<&Signal> = Vec::new();
+    let mut info: Vec<&Signal> = Vec::new();
+
+    for signal in signals {
+        match signal.severity {
+            Severity::Critical => critical.push(signal),
+            Severity::Warning => warning.push(signal),
+            Severity::Info => info.push(signal),
+        }
+    }
+
+    let mut text = header;
+
+    for (emoji, label, group) in [
+        ("🔴", "Critical", &critical),
+        ("🟡", "Warning", &warning),
+        ("🔵", "Info", &info),
+    ] {
+        if group.is_empty() {
+            continue;
+        }
+        text.push_str(&format!("\n\n{emoji} **{label}** ({})", group.len()));
+        for signal in group.iter() {
+            // Extract event count from body (format: "culprit\nLevel: X | Events: N").
+            let events = signal.body.split("Events: ").nth(1).unwrap_or("?");
+            let trigger = if signal.tags.iter().any(|t| t == "spiking") {
+                " 📈"
+            } else if signal.tags.iter().any(|t| t == "stale") {
+                " 🕸"
+            } else {
+                ""
+            };
+            let link = signal
+                .url
+                .as_ref()
+                .map(|u| format!(" [↗]({u})"))
+                .unwrap_or_default();
+            text.push_str(&format!(
+                "\n• {} — {events} events{trigger}{link}",
+                signal.title
+            ));
+        }
+    }
+
+    text
+}
+
+/// Write sweep results to `<workspace_root>/.hive/last_sweep.md` so the
+/// coordinator can read them when the user asks follow-up triage questions.
+fn write_last_sweep(workspace_root: &Path, message: &str) {
+    let path = workspace_root.join(".hive").join("last_sweep.md");
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+    let content = format!("<!-- Last sweep: {timestamp} -->\n\n{message}\n");
+    if let Err(e) = std::fs::write(&path, &content) {
+        eprintln!("[daemon] Failed to write {}: {e}", path.display());
+    }
 }
 
 /// Format a triage alert for Telegram.
