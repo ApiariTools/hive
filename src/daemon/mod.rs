@@ -406,6 +406,104 @@ fn extract_buttons(text: &str) -> (String, Vec<Vec<crate::channel::InlineButton>
     (cleaned, parsed)
 }
 
+/// A dispatch request parsed from a coordinator response.
+struct DispatchRequest {
+    repo: String,
+    agent: Option<String>,
+    prompt: String,
+}
+
+/// Extract `` ```dispatch:repo[:agent] `` fenced code blocks from text.
+///
+/// Returns the cleaned text (blocks stripped) and parsed dispatch requests.
+/// Multiple blocks = multiple dispatches. Invalid blocks are left in the text.
+fn extract_dispatch_blocks(text: &str) -> (String, Vec<DispatchRequest>) {
+    let mut dispatches = Vec::new();
+    let mut cleaned = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(fence_start) = rest.find("```dispatch:") {
+        // Append text before this block.
+        cleaned.push_str(&rest[..fence_start]);
+
+        let after_backticks = &rest[fence_start + 3..]; // skip ```
+        // Find end of opening fence line.
+        let header_end = after_backticks.find('\n').unwrap_or(after_backticks.len());
+        let header = &after_backticks[..header_end]; // "dispatch:repo" or "dispatch:repo:agent"
+
+        // Parse repo and optional agent from header.
+        let parts: Vec<&str> = header
+            .strip_prefix("dispatch:")
+            .unwrap_or("")
+            .splitn(2, ':')
+            .collect();
+        let repo = parts.first().map(|s| s.trim()).unwrap_or("");
+
+        if repo.is_empty() {
+            // Malformed — leave in text and skip past "```dispatch:".
+            let skip = fence_start + "```dispatch:".len();
+            cleaned.push_str(&rest[fence_start..skip]);
+            rest = &rest[skip..];
+            continue;
+        }
+
+        let agent = parts
+            .get(1)
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+
+        // Find closing ``` fence.
+        let body_start = header_end + 1; // skip the newline
+        let Some(relative_close) = after_backticks[body_start..].find("```") else {
+            // Unclosed fence — leave in text, consume everything from fence_start onward.
+            cleaned.push_str(&rest[fence_start..]);
+            rest = "";
+            continue;
+        };
+        let body_end = body_start + relative_close;
+        let prompt = after_backticks[body_start..body_end].trim().to_owned();
+
+        // Skip past the closing ```.
+        let block_total_len = 3 + body_end + 3; // opening ``` + content + closing ```
+        rest = &rest[fence_start + block_total_len..];
+
+        if !prompt.is_empty() {
+            dispatches.push(DispatchRequest {
+                repo: repo.to_owned(),
+                agent,
+                prompt,
+            });
+        }
+    }
+
+    // Append remainder.
+    cleaned.push_str(rest);
+    let cleaned = cleaned.trim().to_owned();
+
+    (cleaned, dispatches)
+}
+
+/// Resolve the `swarm` binary path. Checks `$PATH` first, then `~/.cargo/bin/swarm`.
+fn which_swarm() -> Option<PathBuf> {
+    // Try $PATH via `which`.
+    if let Ok(output) = std::process::Command::new("which").arg("swarm").output()
+        && output.status.success()
+    {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    // Fallback: ~/.cargo/bin/swarm
+    if let Some(home) = std::env::var_os("HOME") {
+        let cargo_bin = PathBuf::from(home).join(".cargo/bin/swarm");
+        if cargo_bin.exists() {
+            return Some(cargo_bin);
+        }
+    }
+    None
+}
+
 /// Main daemon event loop.
 struct DaemonRunner {
     workspace_root: std::path::PathBuf,
@@ -439,6 +537,8 @@ struct DaemonRunner {
     active_topic_id: Option<i64>,
     /// Extra workspaces keyed by topic_id for multi-workspace routing.
     extra_workspaces: HashMap<i64, WorkspaceSlot>,
+    /// Resolved path to the `swarm` binary (for dispatch blocks).
+    swarm_bin: Option<PathBuf>,
 }
 
 /// Build a coordinator system prompt for a workspace, with daemon-mode addendum.
@@ -460,9 +560,9 @@ fn build_coordinator_prompt(workspace_root: &Path, bot_username: Option<&str>) -
     prompt.push_str(
         "Do NOT modify files directly — no Write, Edit, or file-writing shell commands.\n",
     );
-    prompt.push_str("Dispatch coding work to swarm agents via `swarm create`.\n");
+    prompt.push_str("Dispatch coding work to swarm agents via dispatch blocks (see below).\n");
     prompt.push_str(
-        "Only use Bash for: swarm commands, git status/log, cargo check, and other read-only operations.\n",
+        "Only use Bash for: swarm status/send/close, git status/log, cargo check, and other read-only operations.\n",
     );
     prompt.push_str("\n## Interactive Buttons\n\n");
     prompt.push_str("You can attach inline keyboard buttons to any response by ending your message with a buttons block:\n\n");
@@ -482,6 +582,16 @@ fn build_coordinator_prompt(workspace_root: &Path, bot_username: Option<&str>) -
     prompt.push_str(
         "Example: instead of \"Should I merge?\" write \"Should I merge?\" with [Yes] [No] buttons.\n",
     );
+    prompt.push_str("\n## Dispatching Workers\n\n");
+    prompt.push_str("To create a swarm worker, end your message with a dispatch block:\n\n");
+    prompt.push_str("    ```dispatch:<repo>\n    Your task prompt here.\n    Create a PR when done.\n    ```\n\n");
+    prompt.push_str("- One block = one worker. Use multiple blocks for multiple workers.\n");
+    prompt.push_str("- `<repo>` is the subdirectory name (e.g. `hive`, `swarm`, `common`).\n");
+    prompt.push_str(
+        "- Add `:<agent>` to override the default (e.g. `dispatch:hive:claude` for headless).\n",
+    );
+    prompt.push_str("- You can still check workers with `swarm status` via Bash.\n");
+    prompt.push_str("- Do NOT run `swarm create` via Bash — use dispatch blocks instead.\n\n");
     prompt.push_str("\n## Sentry Sweep Context\n\n");
     prompt.push_str(
         "When the user asks about Sentry issues or triage, check `.hive/last_sweep.md` for the latest sweep results. \
@@ -647,6 +757,14 @@ impl DaemonRunner {
             }
         }
 
+        // Resolve swarm binary for dispatch blocks.
+        let swarm_bin = which_swarm();
+        if let Some(ref path) = swarm_bin {
+            eprintln!("[daemon] Swarm binary: {}", path.display());
+        } else {
+            eprintln!("[daemon] Swarm binary not found — dispatch blocks will fail");
+        }
+
         Ok(Self {
             workspace_root,
             config,
@@ -665,6 +783,7 @@ impl DaemonRunner {
             button_labels_order: VecDeque::new(),
             active_topic_id: None,
             extra_workspaces,
+            swarm_bin,
         })
     }
 
@@ -1092,6 +1211,128 @@ impl DaemonRunner {
         }
     }
 
+    /// Execute dispatch requests by running `swarm create` for each.
+    async fn handle_dispatches(&self, chat_id: i64, dispatches: Vec<DispatchRequest>) {
+        let Some(ref swarm_bin) = self.swarm_bin else {
+            if let Err(e) = self
+                .send(
+                    chat_id,
+                    "❌ Cannot dispatch: `swarm` binary not found on this system.",
+                )
+                .await
+            {
+                eprintln!("[daemon] Failed to send dispatch error: {e}");
+            }
+            return;
+        };
+
+        let workspace_root = self.active_workspace_root().to_path_buf();
+
+        for dispatch in dispatches {
+            // Write prompt to a temp file.
+            let prompt_file =
+                std::env::temp_dir().join(format!("dispatch-{}.txt", uuid::Uuid::new_v4()));
+            if let Err(e) = std::fs::write(&prompt_file, &dispatch.prompt) {
+                eprintln!("[daemon] Failed to write dispatch prompt file: {e}");
+                let _ = self
+                    .send(
+                        chat_id,
+                        &format!(
+                            "❌ Dispatch to `{}` failed: could not write prompt file",
+                            dispatch.repo
+                        ),
+                    )
+                    .await;
+                continue;
+            }
+
+            let mut args = vec![
+                "--dir".to_owned(),
+                workspace_root.display().to_string(),
+                "create".to_owned(),
+                "--repo".to_owned(),
+                dispatch.repo.clone(),
+                "--prompt-file".to_owned(),
+                prompt_file.display().to_string(),
+            ];
+            if let Some(ref agent) = dispatch.agent {
+                args.push("--agent".to_owned());
+                args.push(agent.clone());
+            }
+
+            eprintln!(
+                "[daemon] Dispatching to repo={} agent={}: {}",
+                dispatch.repo,
+                dispatch.agent.as_deref().unwrap_or("default"),
+                truncate(&dispatch.prompt, 80)
+            );
+
+            let output = tokio::process::Command::new(swarm_bin)
+                .args(&args)
+                .output()
+                .await;
+
+            // Clean up temp file (best-effort).
+            let _ = std::fs::remove_file(&prompt_file);
+
+            match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    // Try to extract worktree ID from swarm output.
+                    let worktree_id = stdout
+                        .lines()
+                        .find_map(|line| {
+                            // swarm create prints "Created worktree <id>" or similar.
+                            line.strip_prefix("Created worktree ")
+                                .or_else(|| line.strip_prefix("created worktree "))
+                        })
+                        .unwrap_or(stdout.trim());
+                    let msg = if worktree_id.is_empty() {
+                        format!("🚀 Dispatched worker for `{}`", dispatch.repo)
+                    } else {
+                        format!("🚀 Dispatched `{worktree_id}`")
+                    };
+                    if let Err(e) = self.send(chat_id, &msg).await {
+                        eprintln!("[daemon] Failed to send dispatch confirmation: {e}");
+                    }
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let detail = if !stderr.is_empty() {
+                        stderr.to_string()
+                    } else {
+                        stdout.to_string()
+                    };
+                    eprintln!(
+                        "[daemon] Dispatch to {} failed: {}",
+                        dispatch.repo,
+                        truncate(&detail, 200)
+                    );
+                    let _ = self
+                        .send(
+                            chat_id,
+                            &format!(
+                                "❌ Dispatch to `{}` failed:\n```\n{}\n```",
+                                dispatch.repo,
+                                truncate(&detail, 500)
+                            ),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    eprintln!("[daemon] Failed to run swarm create: {e}");
+                    let _ = self
+                        .send(
+                            chat_id,
+                            &format!("❌ Dispatch to `{}` failed: {}", dispatch.repo, e),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
     /// Handle a slash command.
     async fn handle_command(&mut self, chat_id: i64, command: &str, args: &str) -> Result<()> {
         match command {
@@ -1344,11 +1585,11 @@ impl DaemonRunner {
             }
         };
 
-        let response = match self
+        let (response, mut dispatches) = match self
             .run_coordinator_turn(text, resume_id.as_deref(), send_fn)
             .await
         {
-            Ok((final_text, session_id)) => {
+            Ok((final_text, session_id, turn_dispatches)) => {
                 // If this was a new session, record it.
                 if resume_id.is_none() || resume_id.as_deref() != Some(&session_id) {
                     self.active_sessions_mut()
@@ -1365,7 +1606,7 @@ impl DaemonRunner {
                         "\n\n_This session has many turns. Consider /reset for better performance._",
                     );
                 }
-                full_response
+                (full_response, turn_dispatches)
             }
             Err(e) => {
                 eprintln!("[daemon] Claude session error: {e}");
@@ -1374,9 +1615,12 @@ impl DaemonRunner {
                     self.active_sessions_mut().remove_active(chat_id);
                     self.active_sessions_mut().save()?;
                 }
-                format!(
-                    "⚠️ Error: {}\n\nSession has been reset. Send another message to reconnect.",
-                    truncate(&e.to_string(), 200),
+                (
+                    format!(
+                        "⚠️ Error: {}\n\nSession has been reset. Send another message to reconnect.",
+                        truncate(&e.to_string(), 200),
+                    ),
+                    Vec::new(),
                 )
             }
         };
@@ -1386,6 +1630,9 @@ impl DaemonRunner {
 
         // Parse and strip any trailing buttons block from the response.
         let (clean_response, buttons) = extract_buttons(&response);
+        // Parse and strip any remaining dispatch blocks from the final response.
+        let (clean_response, final_dispatches) = extract_dispatch_blocks(&clean_response);
+        dispatches.extend(final_dispatches);
 
         // Cache button labels for callback resolution.
         if !buttons.is_empty() {
@@ -1408,22 +1655,31 @@ impl DaemonRunner {
             }
         }
 
+        // Process dispatch blocks after sending the text response.
+        if !dispatches.is_empty() {
+            eprintln!("[daemon] Processing {} dispatch block(s)", dispatches.len());
+            self.handle_dispatches(chat_id, dispatches).await;
+        }
+
         Ok(())
     }
 
     /// Run a single coordinator turn: send message, stream intermediate text blocks
-    /// to the caller via `send_fn`, return session_id.
+    /// to the caller via `send_fn`, return (final_text, session_id, dispatches).
     ///
     /// Each `ContentBlock::Text` from intermediate `Event::Assistant` events (those
     /// without `stop_reason: "end_turn"`) is forwarded immediately through `send_fn`,
     /// giving the user real-time responses as Claude thinks and acts. The final
     /// end_turn text (if any) is returned so the caller can append nudge hints.
+    ///
+    /// Dispatch blocks are stripped from both intermediate and final text and
+    /// accumulated in the returned Vec.
     async fn run_coordinator_turn<F, Fut>(
         &self,
         text: &str,
         resume_id: Option<&str>,
         send_fn: F,
-    ) -> Result<(String, String)>
+    ) -> Result<(String, String, Vec<DispatchRequest>)>
     where
         F: Fn(String) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
@@ -1468,6 +1724,8 @@ impl DaemonRunner {
         let mut final_text = String::new();
         // Track whether we sent anything so we can detect empty responses.
         let mut sent_any = false;
+        // Accumulate dispatch blocks from all messages (intermediate + final).
+        let mut all_dispatches: Vec<DispatchRequest> = Vec::new();
 
         loop {
             let event = session
@@ -1499,17 +1757,21 @@ impl DaemonRunner {
                     }
 
                     if !block_text.is_empty() {
+                        // Strip dispatch blocks before sending/returning.
+                        let (clean_text, dispatches) = extract_dispatch_blocks(&block_text);
+                        all_dispatches.extend(dispatches);
+
                         if is_end_turn {
                             // Final response — return to caller so it can append nudge.
-                            final_text = block_text;
-                        } else {
+                            final_text = clean_text;
+                        } else if !clean_text.is_empty() {
                             // Intermediate response — send immediately.
                             eprintln!(
                                 "[daemon] Streaming intermediate ({} chars): {}",
-                                block_text.len(),
-                                truncate(&block_text, 80)
+                                clean_text.len(),
+                                truncate(&clean_text, 80)
                             );
-                            if let Err(e) = send_fn(block_text).await {
+                            if let Err(e) = send_fn(clean_text).await {
                                 eprintln!("[daemon] Failed to send intermediate text: {e}");
                             } else {
                                 sent_any = true;
@@ -1569,7 +1831,7 @@ impl DaemonRunner {
             final_text = "[No response from coordinator]".to_owned();
         }
 
-        Ok((final_text, session_id))
+        Ok((final_text, session_id, all_dispatches))
     }
 
     /// Poll buzz signals and auto-triage critical/warning ones.
@@ -3387,6 +3649,76 @@ mod tests {
         let (text, buttons) = extract_buttons(input);
         assert_eq!(text, input);
         assert!(buttons.is_empty());
+    }
+
+    // --- extract_dispatch_blocks tests ---
+
+    #[test]
+    fn test_extract_dispatch_single_block() {
+        let input = "On it!\n\n```dispatch:backend\nFix the DB pool.\nCreate a PR.\n```";
+        let (text, dispatches) = extract_dispatch_blocks(input);
+        assert_eq!(text, "On it!");
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].repo, "backend");
+        assert!(dispatches[0].agent.is_none());
+        assert_eq!(dispatches[0].prompt, "Fix the DB pool.\nCreate a PR.");
+    }
+
+    #[test]
+    fn test_extract_dispatch_with_agent() {
+        let input = "```dispatch:hive:claude\nDo the thing.\n```";
+        let (text, dispatches) = extract_dispatch_blocks(input);
+        assert_eq!(text, "");
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].repo, "hive");
+        assert_eq!(dispatches[0].agent.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn test_extract_dispatch_multiple_blocks() {
+        let input = "Spinning up two workers.\n\n```dispatch:backend\nFix pools.\n```\n\n```dispatch:frontend\nUpdate CSS.\n```";
+        let (text, dispatches) = extract_dispatch_blocks(input);
+        assert_eq!(text, "Spinning up two workers.");
+        assert_eq!(dispatches.len(), 2);
+        assert_eq!(dispatches[0].repo, "backend");
+        assert_eq!(dispatches[0].prompt, "Fix pools.");
+        assert_eq!(dispatches[1].repo, "frontend");
+        assert_eq!(dispatches[1].prompt, "Update CSS.");
+    }
+
+    #[test]
+    fn test_extract_dispatch_no_blocks() {
+        let input = "Just a regular message.";
+        let (text, dispatches) = extract_dispatch_blocks(input);
+        assert_eq!(text, input);
+        assert!(dispatches.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dispatch_unclosed_fence() {
+        let input = "Some text\n\n```dispatch:backend\nNo closing fence";
+        let (text, dispatches) = extract_dispatch_blocks(input);
+        assert_eq!(text, input);
+        assert!(dispatches.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dispatch_empty_prompt() {
+        let input = "```dispatch:backend\n\n```";
+        let (_text, dispatches) = extract_dispatch_blocks(input);
+        // Empty prompt is skipped.
+        assert!(dispatches.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dispatch_coexists_with_buttons() {
+        let input = "Here's the plan.\n\n```dispatch:backend\nFix bug.\n```\n\n```buttons\n[[\"OK\", \"ok\"]]\n```";
+        // Buttons are NOT stripped by extract_dispatch_blocks — that's extract_buttons' job.
+        let (text, dispatches) = extract_dispatch_blocks(input);
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].repo, "backend");
+        // The buttons block should remain in the cleaned text.
+        assert!(text.contains("```buttons"));
     }
 
     // -- notification_to_ui_event tests --
