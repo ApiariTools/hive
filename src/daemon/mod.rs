@@ -437,6 +437,25 @@ struct DispatchRequest {
     prompt: String,
 }
 
+/// Result from a spawned message handler, sent back to the main loop for state mutations.
+struct MessageResult {
+    ws_idx: usize,
+    chat_id: i64,
+    outcome: MessageOutcome,
+}
+
+/// Outcome of processing a user message.
+enum MessageOutcome {
+    /// Coordinator responded successfully. Response already sent to Telegram.
+    Success {
+        session_id: String,
+        resume_id: Option<String>,
+        buttons: Vec<Vec<crate::channel::InlineButton>>,
+    },
+    /// Coordinator session failed. Error message already sent to Telegram.
+    Error { had_resume: bool },
+}
+
 /// Extract `` ```dispatch:repo[:agent] `` fenced code blocks from text.
 ///
 /// Returns the cleaned text (blocks stripped) and parsed dispatch requests.
@@ -547,6 +566,8 @@ struct DaemonRunner {
     cancel: Option<CancellationToken>,
     /// Set by `/restart` handler before cancelling the loop.
     restart_requested: Arc<AtomicBool>,
+    /// Channel for spawned message handlers to send results back to the main loop.
+    msg_done_tx: Option<mpsc::UnboundedSender<MessageResult>>,
 }
 
 /// Build a coordinator system prompt for a workspace, with daemon-mode addendum.
@@ -775,6 +796,7 @@ impl DaemonRunner {
             button_labels_order: VecDeque::new(),
             cancel: None,
             restart_requested: Arc::new(AtomicBool::new(false)),
+            msg_done_tx: None,
         })
     }
 
@@ -815,6 +837,10 @@ impl DaemonRunner {
     async fn run(&mut self) -> Result<bool> {
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
+
+        // Channel for spawned message handlers to send results back.
+        let (msg_done_tx, mut msg_done_rx) = mpsc::unbounded_channel();
+        self.msg_done_tx = Some(msg_done_tx);
 
         // Set up SIGTERM/SIGINT handler.
         let shutdown_cancel = cancel.clone();
@@ -922,6 +948,10 @@ impl DaemonRunner {
                             break;
                         }
                     }
+                }
+
+                Some(result) = msg_done_rx.recv() => {
+                    self.handle_message_result(result).await;
                 }
 
                 _ = buzz_timer.tick() => {
@@ -1225,128 +1255,6 @@ impl DaemonRunner {
         }
     }
 
-    /// Execute dispatch requests by running `swarm create` for each.
-    async fn handle_dispatches(&self, chat_id: i64, dispatches: Vec<DispatchRequest>) {
-        let Some(ref swarm_bin) = self.swarm_bin else {
-            if let Err(e) = self
-                .send(
-                    chat_id,
-                    "❌ Cannot dispatch: `swarm` binary not found on this system.",
-                )
-                .await
-            {
-                eprintln!("[daemon] Failed to send dispatch error: {e}");
-            }
-            return;
-        };
-
-        let workspace_root = self.active_ws().workspace_root.clone();
-
-        for dispatch in dispatches {
-            // Write prompt to a temp file.
-            let prompt_file =
-                std::env::temp_dir().join(format!("dispatch-{}.txt", uuid::Uuid::new_v4()));
-            if let Err(e) = std::fs::write(&prompt_file, &dispatch.prompt) {
-                eprintln!("[daemon] Failed to write dispatch prompt file: {e}");
-                let _ = self
-                    .send(
-                        chat_id,
-                        &format!(
-                            "❌ Dispatch to `{}` failed: could not write prompt file",
-                            dispatch.repo
-                        ),
-                    )
-                    .await;
-                continue;
-            }
-
-            let mut args = vec![
-                "--dir".to_owned(),
-                workspace_root.display().to_string(),
-                "create".to_owned(),
-                "--repo".to_owned(),
-                dispatch.repo.clone(),
-                "--prompt-file".to_owned(),
-                prompt_file.display().to_string(),
-            ];
-            if let Some(ref agent) = dispatch.agent {
-                args.push("--agent".to_owned());
-                args.push(agent.clone());
-            }
-
-            eprintln!(
-                "[daemon] Dispatching to repo={} agent={}: {}",
-                dispatch.repo,
-                dispatch.agent.as_deref().unwrap_or("default"),
-                truncate(&dispatch.prompt, 80)
-            );
-
-            let output = tokio::process::Command::new(swarm_bin)
-                .args(&args)
-                .output()
-                .await;
-
-            // Clean up temp file (best-effort).
-            let _ = std::fs::remove_file(&prompt_file);
-
-            match output {
-                Ok(out) if out.status.success() => {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    // Try to extract worktree ID from swarm output.
-                    let worktree_id = stdout
-                        .lines()
-                        .find_map(|line| {
-                            // swarm create prints "Created worktree <id>" or similar.
-                            line.strip_prefix("Created worktree ")
-                                .or_else(|| line.strip_prefix("created worktree "))
-                        })
-                        .unwrap_or(stdout.trim());
-                    let msg = if worktree_id.is_empty() {
-                        format!("🚀 Dispatched worker for `{}`", dispatch.repo)
-                    } else {
-                        format!("🚀 Dispatched `{worktree_id}`")
-                    };
-                    if let Err(e) = self.send(chat_id, &msg).await {
-                        eprintln!("[daemon] Failed to send dispatch confirmation: {e}");
-                    }
-                }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let detail = if !stderr.is_empty() {
-                        stderr.to_string()
-                    } else {
-                        stdout.to_string()
-                    };
-                    eprintln!(
-                        "[daemon] Dispatch to {} failed: {}",
-                        dispatch.repo,
-                        truncate(&detail, 200)
-                    );
-                    let _ = self
-                        .send(
-                            chat_id,
-                            &format!(
-                                "❌ Dispatch to `{}` failed:\n```\n{}\n```",
-                                dispatch.repo,
-                                truncate(&detail, 500)
-                            ),
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    eprintln!("[daemon] Failed to run swarm create: {e}");
-                    let _ = self
-                        .send(
-                            chat_id,
-                            &format!("❌ Dispatch to `{}` failed: {}", dispatch.repo, e),
-                        )
-                        .await;
-                }
-            }
-        }
-    }
-
     /// Handle a slash command.
     async fn handle_command(&mut self, chat_id: i64, command: &str, args: &str) -> Result<()> {
         match command {
@@ -1546,7 +1454,14 @@ impl DaemonRunner {
         Ok(())
     }
 
-    /// Handle a regular text message — route to Claude session.
+    /// Handle a regular text message — spawn coordinator work in the background.
+    ///
+    /// Phase A (sync, in main loop): push pending origin, read resume_id, clone
+    /// state, spawn the background task. Returns immediately so the main loop
+    /// stays responsive to other events.
+    ///
+    /// Phase B (spawned task): typing indicator, coordinator turn, send response,
+    /// run dispatches, send `MessageResult` back to main loop for state mutations.
     async fn handle_message(
         &mut self,
         chat_id: i64,
@@ -1554,6 +1469,8 @@ impl DaemonRunner {
         user_name: &str,
         text: &str,
     ) -> Result<()> {
+        // -- Phase A: brief sync work in the main loop --
+
         // Push a pending origin so that if the coordinator spawns a swarm agent,
         // we can associate it with this chat for notification routing.
         self.active_ws_mut().pending_origins.push(PendingOrigin {
@@ -1565,20 +1482,6 @@ impl DaemonRunner {
             },
             created_at: std::time::Instant::now(),
         });
-        // Start typing indicator loop (expires after 5s, so we resend every 4s).
-        let channel = self.active_channel().clone();
-        let typing_topic_id = self.active_ws().config.telegram.topic_id;
-        let typing_cancel = CancellationToken::new();
-        let typing_token = typing_cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                channel.send_typing(chat_id, typing_topic_id).await;
-                tokio::select! {
-                    _ = typing_token.cancelled() => break,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {}
-                }
-            }
-        });
 
         // Check if we have an active session to resume, or start a new one.
         let resume_id = self
@@ -1587,284 +1490,212 @@ impl DaemonRunner {
             .get_active(chat_id)
             .map(|s| s.session_id.clone());
 
-        // Build a callback that sends intermediate text blocks to Telegram immediately,
-        // splitting long messages to stay within Telegram's 4096-char limit.
+        // Clone everything the spawned task needs.
+        let ws_idx = self.active_workspace.expect("no active workspace");
         let channel = self.active_channel().clone();
         let topic_id = self.active_ws().config.telegram.topic_id;
-        let send_fn = move |text: String| {
-            let channel = channel.clone();
-            async move {
-                for chunk in split_message(&text, 4000) {
-                    channel
-                        .send_message(&OutboundMessage {
+        let coordinator_prompt = self.active_ws().coordinator_prompt.clone();
+        let model = self.active_ws().config.model.clone();
+        let max_turns = self.active_ws().config.max_turns;
+        let workspace_root = self.active_ws().workspace_root.clone();
+        let swarm_bin = self.swarm_bin.clone();
+        let msg_done_tx = self
+            .msg_done_tx
+            .as_ref()
+            .expect("msg_done_tx not initialized")
+            .clone();
+        let text = text.to_owned();
+
+        // -- Phase B: spawn the long-running coordinator work --
+        tokio::spawn(async move {
+            // Start typing indicator loop (expires after 5s, so we resend every 4s).
+            let typing_cancel = CancellationToken::new();
+            {
+                let typing_token = typing_cancel.clone();
+                let typing_channel = channel.clone();
+                tokio::spawn(async move {
+                    loop {
+                        typing_channel.send_typing(chat_id, topic_id).await;
+                        tokio::select! {
+                            _ = typing_token.cancelled() => break,
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(4)) => {}
+                        }
+                    }
+                });
+            }
+
+            // Build a callback that sends intermediate text blocks to Telegram.
+            let send_channel = channel.clone();
+            let send_fn = move |text: String| {
+                let channel = send_channel.clone();
+                async move {
+                    for chunk in split_message(&text, 4000) {
+                        channel
+                            .send_message(&OutboundMessage {
+                                chat_id,
+                                text: chunk,
+                                buttons: vec![],
+                                topic_id,
+                            })
+                            .await?;
+                    }
+                    Ok(())
+                }
+            };
+
+            // Run the coordinator turn (the 10-30s operation — now non-blocking!).
+            let result = run_coordinator_turn_standalone(
+                &coordinator_prompt,
+                &model,
+                max_turns,
+                &workspace_root,
+                &text,
+                resume_id.as_deref(),
+                send_fn,
+            )
+            .await;
+
+            // Stop typing indicator.
+            typing_cancel.cancel();
+
+            let outcome = match result {
+                Ok((final_text, session_id, turn_dispatches)) => {
+                    // Extract buttons and dispatch blocks from the response.
+                    let (clean_response, buttons) = extract_buttons(&final_text);
+                    let (clean_response, final_dispatches) =
+                        extract_dispatch_blocks(&clean_response);
+                    let mut dispatches = turn_dispatches;
+                    dispatches.extend(final_dispatches);
+
+                    // Send the final response to Telegram.
+                    if !clean_response.is_empty() {
+                        eprintln!(
+                            "[daemon] Responding ({} chars): {}",
+                            clean_response.len(),
+                            truncate(&clean_response, 80)
+                        );
+                        if buttons.is_empty() {
+                            let _ = send_to_telegram(&channel, chat_id, &clean_response, topic_id)
+                                .await;
+                        } else {
+                            let _ = send_with_buttons_to_telegram(
+                                &channel,
+                                chat_id,
+                                &clean_response,
+                                buttons.clone(),
+                                topic_id,
+                            )
+                            .await;
+                        }
+                    }
+
+                    // Process dispatch blocks after sending the text response.
+                    if !dispatches.is_empty() {
+                        eprintln!("[daemon] Processing {} dispatch block(s)", dispatches.len());
+                        run_dispatches_standalone(
                             chat_id,
-                            text: chunk,
-                            buttons: vec![],
+                            dispatches,
+                            swarm_bin,
+                            workspace_root,
+                            channel.clone(),
                             topic_id,
-                        })
-                        .await?;
-                }
-                Ok(())
-            }
-        };
+                        )
+                        .await;
+                    }
 
-        let (response, mut dispatches) = match self
-            .run_coordinator_turn(text, resume_id.as_deref(), send_fn)
-            .await
-        {
-            Ok((final_text, session_id, turn_dispatches)) => {
-                // If this was a new session, record it.
-                if resume_id.is_none() || resume_id.as_deref() != Some(&session_id) {
-                    self.active_ws_mut()
-                        .sessions
-                        .start_session(chat_id, session_id);
+                    MessageOutcome::Success {
+                        session_id,
+                        resume_id,
+                        buttons,
+                    }
                 }
-
-                let threshold = self.active_ws().config.nudge_turn_threshold;
-                let should_nudge = self
-                    .active_ws_mut()
-                    .sessions
-                    .record_turn(chat_id, threshold);
-                self.active_ws_mut().sessions.save()?;
-
-                let mut full_response = final_text;
-                if should_nudge {
-                    full_response.push_str(
-                        "\n\n_This session has many turns. Consider /reset for better performance._",
-                    );
-                }
-                (full_response, turn_dispatches)
-            }
-            Err(e) => {
-                eprintln!("[daemon] Claude session error: {e}");
-                // If session died, remove it so next message auto-reconnects.
-                if resume_id.is_some() {
-                    self.active_ws_mut().sessions.remove_active(chat_id);
-                    self.active_ws_mut().sessions.save()?;
-                }
-                (
-                    format!(
+                Err(e) => {
+                    eprintln!("[daemon] Claude session error: {e}");
+                    let error_msg = format!(
                         "⚠️ Error: {}\n\nSession has been reset. Send another message to reconnect.",
                         truncate(&e.to_string(), 200),
-                    ),
-                    Vec::new(),
-                )
-            }
-        };
+                    );
+                    let _ = send_to_telegram(&channel, chat_id, &error_msg, topic_id).await;
+                    MessageOutcome::Error {
+                        had_resume: resume_id.is_some(),
+                    }
+                }
+            };
 
-        // Stop typing indicator before sending the final response.
-        typing_cancel.cancel();
-
-        // Parse and strip any trailing buttons block from the response.
-        let (clean_response, buttons) = extract_buttons(&response);
-        // Parse and strip any remaining dispatch blocks from the final response.
-        let (clean_response, final_dispatches) = extract_dispatch_blocks(&clean_response);
-        dispatches.extend(final_dispatches);
-
-        // Cache button labels for callback resolution.
-        if !buttons.is_empty() {
-            self.cache_button_labels(&buttons);
-        }
-
-        // Only send the final response if there's text (may be empty if all
-        // content was already streamed as intermediate messages).
-        if !clean_response.is_empty() {
-            eprintln!(
-                "[daemon] Responding ({} chars): {}",
-                clean_response.len(),
-                truncate(&clean_response, 80)
-            );
-            if buttons.is_empty() {
-                self.send(chat_id, &clean_response).await?;
-            } else {
-                self.send_with_buttons(chat_id, &clean_response, buttons)
-                    .await?;
-            }
-        }
-
-        // Process dispatch blocks after sending the text response.
-        if !dispatches.is_empty() {
-            eprintln!("[daemon] Processing {} dispatch block(s)", dispatches.len());
-            self.handle_dispatches(chat_id, dispatches).await;
-        }
+            // Send result back to the main loop for state mutations.
+            let _ = msg_done_tx.send(MessageResult {
+                ws_idx,
+                chat_id,
+                outcome,
+            });
+        });
 
         Ok(())
     }
 
-    /// Run a single coordinator turn: send message, stream intermediate text blocks
-    /// to the caller via `send_fn`, return (final_text, session_id, dispatches).
-    ///
-    /// Each `ContentBlock::Text` from intermediate `Event::Assistant` events (those
-    /// without `stop_reason: "end_turn"`) is forwarded immediately through `send_fn`,
-    /// giving the user real-time responses as Claude thinks and acts. The final
-    /// end_turn text (if any) is returned so the caller can append nudge hints.
-    ///
-    /// Dispatch blocks are stripped from both intermediate and final text and
-    /// accumulated in the returned Vec.
-    async fn run_coordinator_turn<F, Fut>(
-        &self,
-        text: &str,
-        resume_id: Option<&str>,
-        send_fn: F,
-    ) -> Result<(String, String, Vec<DispatchRequest>)>
-    where
-        F: Fn(String) -> Fut,
-        Fut: std::future::Future<Output = Result<()>>,
-    {
-        let opts = SessionOptions {
-            system_prompt: if resume_id.is_none() {
-                Some(self.active_ws().coordinator_prompt.clone())
-            } else {
-                None
-            },
-            model: Some(self.active_ws().config.model.clone()),
-            resume: resume_id.map(|s| s.to_owned()),
-            max_turns: Some(self.active_ws().config.max_turns.into()),
-            working_dir: Some(self.active_ws().workspace_root.clone()),
-            allowed_tools: vec![
-                "Bash".into(),
-                "Read".into(),
-                "Glob".into(),
-                "Grep".into(),
-                "WebSearch".into(),
-                "WebFetch".into(),
-            ],
-            disallowed_tools: vec![
-                "Task".into(),
-                "Write".into(),
-                "Edit".into(),
-                "NotebookEdit".into(),
-            ],
-            ..Default::default()
-        };
+    /// Process the result of a spawned message handler — brief state mutations only.
+    async fn handle_message_result(&mut self, result: MessageResult) {
+        let MessageResult {
+            ws_idx,
+            chat_id,
+            outcome,
+        } = result;
 
-        let client = ClaudeClient::new();
-        let mut session = client
-            .spawn(opts)
-            .await
-            .map_err(|e| color_eyre::eyre::eyre!("failed to spawn Claude session: {e}"))?;
+        // Guard against stale workspace index (workspaces are fixed at startup,
+        // but be defensive).
+        if ws_idx >= self.workspaces.len() {
+            eprintln!("[daemon] Stale message result for ws_idx={ws_idx}, ignoring");
+            return;
+        }
 
-        // Send the user message immediately — do NOT wait for system event first.
-        // Claude CLI with --input-format stream-json doesn't emit system event until
-        // it receives input, so waiting would deadlock.
-        session
-            .send_message(text)
-            .await
-            .map_err(|e| color_eyre::eyre::eyre!("failed to send message: {e}"))?;
+        match outcome {
+            MessageOutcome::Success {
+                session_id,
+                resume_id,
+                buttons,
+            } => {
+                // Record or update the session.
+                if resume_id.is_none() || resume_id.as_deref() != Some(&session_id) {
+                    self.workspaces[ws_idx]
+                        .sessions
+                        .start_session(chat_id, session_id);
+                }
 
-        let mut session_id = String::new();
-        // Text from the final end_turn event (returned to caller for nudge appending).
-        let mut final_text = String::new();
-        // Track whether we sent anything so we can detect empty responses.
-        let mut sent_any = false;
-        // Accumulate dispatch blocks from all messages (intermediate + final).
-        let mut all_dispatches: Vec<DispatchRequest> = Vec::new();
+                let threshold = self.workspaces[ws_idx].config.nudge_turn_threshold;
+                let should_nudge = self.workspaces[ws_idx]
+                    .sessions
+                    .record_turn(chat_id, threshold);
+                if let Err(e) = self.workspaces[ws_idx].sessions.save() {
+                    eprintln!("[daemon] Failed to save sessions: {e}");
+                }
 
-        loop {
-            let event = session
-                .next_event()
-                .await
-                .map_err(|e| color_eyre::eyre::eyre!("error reading event: {e}"))?;
+                // Send nudge hint if threshold crossed.
+                if should_nudge {
+                    self.active_workspace = Some(ws_idx);
+                    let _ = self
+                        .send(
+                            chat_id,
+                            "_This session has many turns. Consider /reset for better performance._",
+                        )
+                        .await;
+                    self.active_workspace = None;
+                }
 
-            match event {
-                Some(Event::Assistant { message, .. }) => {
-                    if let Some(sid) = &message.session_id {
-                        session_id.clone_from(sid);
-                    }
-
-                    let is_end_turn = message.message.stop_reason.as_deref() == Some("end_turn");
-
-                    // Collect text blocks and log tool calls from this event.
-                    let mut block_text = String::new();
-                    for block in &message.message.content {
-                        match block {
-                            ContentBlock::Text { text } => block_text.push_str(text),
-                            ContentBlock::ToolUse { name, input, .. } => {
-                                eprintln!(
-                                    "[daemon] Coordinator tool call: {name}({})",
-                                    truncate(&input.to_string(), 120)
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    if !block_text.is_empty() {
-                        // Strip dispatch blocks before sending/returning.
-                        let (clean_text, dispatches) = extract_dispatch_blocks(&block_text);
-                        all_dispatches.extend(dispatches);
-
-                        if is_end_turn {
-                            // Final response — return to caller so it can append nudge.
-                            final_text = clean_text;
-                        } else if !clean_text.is_empty() {
-                            // Intermediate response — send immediately.
-                            eprintln!(
-                                "[daemon] Streaming intermediate ({} chars): {}",
-                                clean_text.len(),
-                                truncate(&clean_text, 80)
-                            );
-                            if let Err(e) = send_fn(clean_text).await {
-                                eprintln!("[daemon] Failed to send intermediate text: {e}");
-                            } else {
-                                sent_any = true;
-                            }
-                        }
-                    }
-
-                    if is_end_turn {
-                        break;
+                // Cache button labels for callback resolution.
+                if !buttons.is_empty() {
+                    self.cache_button_labels(&buttons);
+                }
+            }
+            MessageOutcome::Error { had_resume } => {
+                // If session died, remove it so next message auto-reconnects.
+                if had_resume {
+                    self.workspaces[ws_idx].sessions.remove_active(chat_id);
+                    if let Err(e) = self.workspaces[ws_idx].sessions.save() {
+                        eprintln!("[daemon] Failed to save sessions: {e}");
                     }
                 }
-                Some(Event::Result(result)) => {
-                    session_id = result.session_id;
-                    if let Some(text) = &result.result
-                        && final_text.is_empty()
-                        && !sent_any
-                    {
-                        final_text = text.clone();
-                    }
-                    break;
-                }
-                Some(Event::RateLimit(rl)) => {
-                    if let Some(info) = &rl.rate_limit_info {
-                        eprintln!("[daemon] Rate limit status: {info}");
-                    }
-                }
-                Some(Event::System(sys)) => {
-                    let sid = sys
-                        .data
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let model = sys
-                        .data
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    eprintln!("[daemon] Coordinator session: session_id={sid}, model={model}",);
-                    if session_id.is_empty() {
-                        session_id = sid.to_owned();
-                    }
-                }
-                Some(Event::User(_)) => {
-                    // Echo of our own prompt — nothing to do.
-                }
-                Some(Event::Stream { .. }) => {
-                    // Partial streaming tokens — not used in daemon mode.
-                }
-                None => break,
             }
         }
-
-        // Close the session gracefully (stdin EOF, let process finish).
-        session.close_stdin();
-
-        if final_text.is_empty() && !sent_any {
-            final_text = "[No response from coordinator]".to_owned();
-        }
-
-        Ok((final_text, session_id, all_dispatches))
     }
 
     /// Poll buzz signals and auto-triage critical/warning ones.
@@ -2753,6 +2584,340 @@ impl DaemonRunner {
                 .await?;
         }
         Ok(())
+    }
+}
+
+/// Send a message through a Telegram channel, sanitizing markdown and splitting if too long.
+async fn send_to_telegram(
+    channel: &TelegramChannel,
+    chat_id: i64,
+    text: &str,
+    topic_id: Option<i64>,
+) -> Result<()> {
+    let text = markdown::sanitize_for_telegram(text);
+    for chunk in split_message(&text, 4000) {
+        channel
+            .send_message(&OutboundMessage {
+                chat_id,
+                text: chunk,
+                buttons: vec![],
+                topic_id,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+/// Send a message with inline keyboard buttons through a Telegram channel.
+async fn send_with_buttons_to_telegram(
+    channel: &TelegramChannel,
+    chat_id: i64,
+    text: &str,
+    buttons: Vec<Vec<crate::channel::InlineButton>>,
+    topic_id: Option<i64>,
+) -> Result<()> {
+    let text = markdown::sanitize_for_telegram(text);
+    let chunks = split_message(&text, 4000);
+    let last_idx = chunks.len().saturating_sub(1);
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        channel
+            .send_message(&OutboundMessage {
+                chat_id,
+                text: chunk,
+                buttons: if i == last_idx {
+                    buttons.clone()
+                } else {
+                    vec![]
+                },
+                topic_id,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+/// Standalone coordinator turn: send message, stream intermediate text, return result.
+///
+/// This is the free-function version of `DaemonRunner::run_coordinator_turn`, taking
+/// owned parameters so it can be called from a spawned task without borrowing `&self`.
+async fn run_coordinator_turn_standalone<F, Fut>(
+    coordinator_prompt: &str,
+    model: &str,
+    max_turns: u32,
+    workspace_root: &Path,
+    text: &str,
+    resume_id: Option<&str>,
+    send_fn: F,
+) -> Result<(String, String, Vec<DispatchRequest>)>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let opts = SessionOptions {
+        system_prompt: if resume_id.is_none() {
+            Some(coordinator_prompt.to_owned())
+        } else {
+            None
+        },
+        model: Some(model.to_owned()),
+        resume: resume_id.map(|s| s.to_owned()),
+        max_turns: Some(max_turns.into()),
+        working_dir: Some(workspace_root.to_path_buf()),
+        allowed_tools: vec![
+            "Bash".into(),
+            "Read".into(),
+            "Glob".into(),
+            "Grep".into(),
+            "WebSearch".into(),
+            "WebFetch".into(),
+        ],
+        disallowed_tools: vec![
+            "Task".into(),
+            "Write".into(),
+            "Edit".into(),
+            "NotebookEdit".into(),
+        ],
+        ..Default::default()
+    };
+
+    let client = ClaudeClient::new();
+    let mut session = client
+        .spawn(opts)
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("failed to spawn Claude session: {e}"))?;
+
+    session
+        .send_message(text)
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("failed to send message: {e}"))?;
+
+    let mut session_id = String::new();
+    let mut final_text = String::new();
+    let mut sent_any = false;
+    let mut all_dispatches: Vec<DispatchRequest> = Vec::new();
+
+    loop {
+        let event = session
+            .next_event()
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("error reading event: {e}"))?;
+
+        match event {
+            Some(Event::Assistant { message, .. }) => {
+                if let Some(sid) = &message.session_id {
+                    session_id.clone_from(sid);
+                }
+
+                let is_end_turn = message.message.stop_reason.as_deref() == Some("end_turn");
+
+                let mut block_text = String::new();
+                for block in &message.message.content {
+                    match block {
+                        ContentBlock::Text { text } => block_text.push_str(text),
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            eprintln!(
+                                "[daemon] Coordinator tool call: {name}({})",
+                                truncate(&input.to_string(), 120)
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+
+                if !block_text.is_empty() {
+                    let (clean_text, dispatches) = extract_dispatch_blocks(&block_text);
+                    all_dispatches.extend(dispatches);
+
+                    if is_end_turn {
+                        final_text = clean_text;
+                    } else if !clean_text.is_empty() {
+                        eprintln!(
+                            "[daemon] Streaming intermediate ({} chars): {}",
+                            clean_text.len(),
+                            truncate(&clean_text, 80)
+                        );
+                        if let Err(e) = send_fn(clean_text).await {
+                            eprintln!("[daemon] Failed to send intermediate text: {e}");
+                        } else {
+                            sent_any = true;
+                        }
+                    }
+                }
+
+                if is_end_turn {
+                    break;
+                }
+            }
+            Some(Event::Result(result)) => {
+                session_id = result.session_id;
+                if let Some(text) = &result.result
+                    && final_text.is_empty()
+                    && !sent_any
+                {
+                    final_text = text.clone();
+                }
+                break;
+            }
+            Some(Event::RateLimit(rl)) => {
+                if let Some(info) = &rl.rate_limit_info {
+                    eprintln!("[daemon] Rate limit status: {info}");
+                }
+            }
+            Some(Event::System(sys)) => {
+                let sid = sys
+                    .data
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let model = sys
+                    .data
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                eprintln!("[daemon] Coordinator session: session_id={sid}, model={model}",);
+                if session_id.is_empty() {
+                    session_id = sid.to_owned();
+                }
+            }
+            Some(Event::User(_)) => {}
+            Some(Event::Stream { .. }) => {}
+            None => break,
+        }
+    }
+
+    session.close_stdin();
+
+    if final_text.is_empty() && !sent_any {
+        final_text = "[No response from coordinator]".to_owned();
+    }
+
+    Ok((final_text, session_id, all_dispatches))
+}
+
+/// Execute dispatch requests by running `swarm create` for each (standalone version).
+async fn run_dispatches_standalone(
+    chat_id: i64,
+    dispatches: Vec<DispatchRequest>,
+    swarm_bin: Option<PathBuf>,
+    workspace_root: PathBuf,
+    channel: Arc<TelegramChannel>,
+    topic_id: Option<i64>,
+) {
+    let Some(swarm_bin) = swarm_bin else {
+        if let Err(e) = send_to_telegram(
+            &channel,
+            chat_id,
+            "❌ Cannot dispatch: `swarm` binary not found on this system.",
+            topic_id,
+        )
+        .await
+        {
+            eprintln!("[daemon] Failed to send dispatch error: {e}");
+        }
+        return;
+    };
+
+    for dispatch in dispatches {
+        let prompt_file =
+            std::env::temp_dir().join(format!("dispatch-{}.txt", uuid::Uuid::new_v4()));
+        if let Err(e) = std::fs::write(&prompt_file, &dispatch.prompt) {
+            eprintln!("[daemon] Failed to write dispatch prompt file: {e}");
+            let _ = send_to_telegram(
+                &channel,
+                chat_id,
+                &format!(
+                    "❌ Dispatch to `{}` failed: could not write prompt file",
+                    dispatch.repo
+                ),
+                topic_id,
+            )
+            .await;
+            continue;
+        }
+
+        let mut args = vec![
+            "--dir".to_owned(),
+            workspace_root.display().to_string(),
+            "create".to_owned(),
+            "--repo".to_owned(),
+            dispatch.repo.clone(),
+            "--prompt-file".to_owned(),
+            prompt_file.display().to_string(),
+        ];
+        if let Some(ref agent) = dispatch.agent {
+            args.push("--agent".to_owned());
+            args.push(agent.clone());
+        }
+
+        eprintln!(
+            "[daemon] Dispatching to repo={} agent={}: {}",
+            dispatch.repo,
+            dispatch.agent.as_deref().unwrap_or("default"),
+            truncate(&dispatch.prompt, 80)
+        );
+
+        let output = tokio::process::Command::new(&swarm_bin)
+            .args(&args)
+            .output()
+            .await;
+
+        let _ = std::fs::remove_file(&prompt_file);
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let worktree_id = stdout
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Created worktree ")
+                            .or_else(|| line.strip_prefix("created worktree "))
+                    })
+                    .unwrap_or(stdout.trim());
+                let msg = if worktree_id.is_empty() {
+                    format!("🚀 Dispatched worker for `{}`", dispatch.repo)
+                } else {
+                    format!("🚀 Dispatched `{worktree_id}`")
+                };
+                if let Err(e) = send_to_telegram(&channel, chat_id, &msg, topic_id).await {
+                    eprintln!("[daemon] Failed to send dispatch confirmation: {e}");
+                }
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let detail = if !stderr.is_empty() {
+                    stderr.to_string()
+                } else {
+                    stdout.to_string()
+                };
+                eprintln!(
+                    "[daemon] Dispatch to {} failed: {}",
+                    dispatch.repo,
+                    truncate(&detail, 200)
+                );
+                let _ = send_to_telegram(
+                    &channel,
+                    chat_id,
+                    &format!(
+                        "❌ Dispatch to `{}` failed:\n```\n{}\n```",
+                        dispatch.repo,
+                        truncate(&detail, 500)
+                    ),
+                    topic_id,
+                )
+                .await;
+            }
+            Err(e) => {
+                eprintln!("[daemon] Failed to run swarm create: {e}");
+                let _ = send_to_telegram(
+                    &channel,
+                    chat_id,
+                    &format!("❌ Dispatch to `{}` failed: {}", dispatch.repo, e),
+                    topic_id,
+                )
+                .await;
+            }
+        }
     }
 }
 
