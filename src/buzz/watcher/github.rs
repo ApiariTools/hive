@@ -11,6 +11,7 @@
 //! crashing the entire poll cycle.
 
 use std::any::Any;
+use std::collections::HashSet;
 
 use crate::signal::{Severity, Signal};
 use async_trait::async_trait;
@@ -27,6 +28,10 @@ pub struct GithubWatcher {
     gh_available: Option<bool>,
     /// Cached GitHub username (resolved from `gh api user`).
     username: Option<String>,
+    /// Dedup keys of signals emitted in previous polls, keyed by the set of
+    /// currently-active dedup keys. Updated each poll to exactly the current
+    /// active set so resolved conditions (CI passes, issue closed) are pruned.
+    seen: HashSet<String>,
 }
 
 impl GithubWatcher {
@@ -35,7 +40,18 @@ impl GithubWatcher {
             config,
             gh_available: None,
             username: None,
+            seen: HashSet::new(),
         }
+    }
+
+    /// Return the current seen set (for persistence).
+    pub fn seen(&self) -> &HashSet<String> {
+        &self.seen
+    }
+
+    /// Restore seen set from persisted state.
+    pub fn restore_seen(&mut self, seen: HashSet<String>) {
+        self.seen = seen;
     }
 
     /// Check that the `gh` CLI is installed and authenticated.
@@ -345,11 +361,30 @@ impl Watcher for GithubWatcher {
         }
 
         let mut all_signals = Vec::new();
+        let mut current_keys: HashSet<String> = HashSet::new();
 
         for repo in &self.config.repos.clone() {
             let signals = self.poll_repo(repo).await;
-            all_signals.extend(signals);
+            for signal in signals {
+                if let Some(ref key) = signal.dedup_key {
+                    current_keys.insert(key.clone());
+                    // Only emit if we haven't already notified about this signal.
+                    // Prevents re-firing every poll for long-lived conditions like
+                    // a persistently broken CI check or an open assigned issue.
+                    if !self.seen.contains(key) {
+                        all_signals.push(signal);
+                    }
+                } else {
+                    // No dedup key — always emit.
+                    all_signals.push(signal);
+                }
+            }
         }
+
+        // Prune seen to only currently-active signals. This means: if a CI run
+        // passes (disappears from the failed list), its key leaves the seen set,
+        // so a future failure on the same check will fire again.
+        self.seen = current_keys;
 
         Ok(all_signals)
     }

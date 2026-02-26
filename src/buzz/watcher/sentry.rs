@@ -280,13 +280,18 @@ impl Watcher for SentryWatcher {
             return Ok(Vec::new());
         }
 
+        let spike_ratio = self
+            .sweep_config
+            .as_ref()
+            .map(|s| s.event_spike_ratio)
+            .unwrap_or(f64::MAX);
+
         let mut signals = Vec::new();
         let mut new_last_seen_id: Option<String> = None;
 
         for issue in &issues {
-            let id = match issue.get("id").and_then(|v| v.as_str()) {
-                Some(id) => id,
-                None => continue,
+            let Some((id, level, event_count)) = Self::extract_issue_fields(issue) else {
+                continue;
             };
 
             // Track the newest ID (first in the list since sorted by date desc).
@@ -294,26 +299,32 @@ impl Watcher for SentryWatcher {
                 new_last_seen_id = Some(id.to_string());
             }
 
-            // If we have a cursor, skip issues we've already seen.
-            // Sentry IDs are numeric strings; once we hit our cursor, everything
-            // after it is older, so we can stop.
-            if let Some(ref cursor) = self.last_seen_id
-                && id == cursor
-            {
-                break;
-            }
+            // Use seen_issues for cross-poll dedup instead of a cursor.
+            //
+            // The old cursor approach (break on id == last_seen_id) breaks when
+            // recurring issues accumulate new events and leapfrog each other in
+            // Sentry's sort=date ordering — the same issue keeps appearing above
+            // the cursor and gets re-emitted every poll.
+            //
+            // Instead: emit only if (a) we've never seen this issue, or (b) its
+            // event count has spiked significantly since last triage.
+            let should_emit = match self.seen_issues.get(id) {
+                None => true,
+                Some(meta) => {
+                    meta.event_count > 0
+                        && event_count as f64 >= spike_ratio * meta.event_count as f64
+                }
+            };
 
-            if let Some(signal) = self.issue_to_signal(issue, &[]) {
+            if should_emit && let Some(signal) = self.issue_to_signal(issue, &[]) {
                 signals.push(signal);
             }
 
-            // Also record in seen set so sweep knows about fast-polled issues.
-            if let Some((id, level, count)) = Self::extract_issue_fields(issue) {
-                self.record_seen(id, level, count);
-            }
+            // Always record so sweep and subsequent polls have fresh metadata.
+            self.record_seen(id, level, event_count);
         }
 
-        // Update cursor to the newest issue we saw.
+        // Advance cursor to the newest issue we saw (kept for state tracking).
         if let Some(new_id) = new_last_seen_id {
             self.last_seen_id = Some(new_id);
         }

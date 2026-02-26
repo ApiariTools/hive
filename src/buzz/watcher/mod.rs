@@ -9,7 +9,7 @@ pub mod sentry;
 pub mod webhook;
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::signal::Signal;
@@ -65,6 +65,9 @@ pub struct WatcherState {
     /// Per-issue metadata for sweep re-triage (keyed by Sentry issue ID).
     #[serde(default)]
     pub seen_issues: HashMap<String, sentry::IssueMeta>,
+    /// Dedup keys of currently-active GitHub signals (cross-poll dedup).
+    #[serde(default)]
+    pub seen_github: HashSet<String>,
 }
 
 /// Create all enabled watchers based on the configuration.
@@ -124,6 +127,17 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
         );
         sentry_watcher.restore_seen_issues(state.seen_issues);
     }
+
+    // Restore seen_github into the github watcher (if present).
+    if !state.seen_github.is_empty()
+        && let Some(github_watcher) = find_github_watcher_mut(watchers)
+    {
+        eprintln!(
+            "[buzz] restored {} seen github signal(s)",
+            state.seen_github.len()
+        );
+        github_watcher.restore_seen(state.seen_github);
+    }
 }
 
 /// Save all watcher cursors + seen issues to `<base>/.buzz/state.json`.
@@ -139,6 +153,11 @@ pub fn save_cursors(watchers: &[Box<dyn Watcher>], base: &Path) {
     // Persist seen_issues from the sentry watcher (if present).
     if let Some(sw) = find_sentry_watcher(watchers) {
         state.seen_issues = sw.seen_issues().clone();
+    }
+
+    // Persist seen_github from the github watcher (if present).
+    if let Some(gw) = find_github_watcher(watchers) {
+        state.seen_github = gw.seen().clone();
     }
 
     let state_path = base.join(STATE_REL);
@@ -163,6 +182,24 @@ fn find_sentry_watcher_mut(
         .iter_mut()
         .find(|w| w.name() == "sentry")
         .and_then(|w| w.as_any_mut().downcast_mut::<sentry::SentryWatcher>())
+}
+
+/// Find the GithubWatcher in a slice of boxed watchers (immutable).
+fn find_github_watcher(watchers: &[Box<dyn Watcher>]) -> Option<&github::GithubWatcher> {
+    watchers
+        .iter()
+        .find(|w| w.name() == "github")
+        .and_then(|w| w.as_any().downcast_ref::<github::GithubWatcher>())
+}
+
+/// Find the GithubWatcher in a mutable slice of boxed watchers.
+fn find_github_watcher_mut(
+    watchers: &mut [Box<dyn Watcher>],
+) -> Option<&mut github::GithubWatcher> {
+    watchers
+        .iter_mut()
+        .find(|w| w.name() == "github")
+        .and_then(|w| w.as_any_mut().downcast_mut::<github::GithubWatcher>())
 }
 
 #[cfg(test)]
