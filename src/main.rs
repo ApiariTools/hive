@@ -119,7 +119,11 @@ enum Command {
     },
 
     /// Run diagnostic checks on workspace, daemon, and tooling health.
-    Doctor,
+    Doctor {
+        /// Automatically fix issues that can be resolved safely.
+        #[arg(long)]
+        fix: bool,
+    },
 
     /// List or manage pending reminders.
     Reminders {
@@ -204,7 +208,7 @@ async fn main() -> Result<()> {
             cron.as_deref(),
             &message.join(" "),
         ),
-        Command::Doctor => doctor::run(&cwd),
+        Command::Doctor { fix } => doctor::run(&cwd, fix),
         Command::Reminders { action } => match action {
             None => cmd_list_reminders(&cwd),
             Some(RemindersAction::Cancel { id }) => cmd_cancel_reminder(&cwd, &id),

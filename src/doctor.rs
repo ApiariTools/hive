@@ -4,7 +4,7 @@ use crate::daemon::config::DaemonConfig;
 use crate::workspace::{self, load_workspace};
 use color_eyre::eyre::Result;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── Data types ───────────────────────────────────────────
 
@@ -15,10 +15,19 @@ enum Status {
     Fail,
 }
 
+/// Auto-fix action that `--fix` can perform.
+enum Fix {
+    /// Remove stale entries from the workspace registry.
+    PruneRegistry,
+    /// Delete a file at the given path.
+    RemoveFile(PathBuf),
+}
+
 struct Check {
     status: Status,
     message: String,
     hint: Option<String>,
+    fix: Option<Fix>,
 }
 
 struct Category {
@@ -32,6 +41,7 @@ impl Check {
             status: Status::Pass,
             message: msg.into(),
             hint: None,
+            fix: None,
         }
     }
 
@@ -40,6 +50,7 @@ impl Check {
             status: Status::Warn,
             message: msg.into(),
             hint: None,
+            fix: None,
         }
     }
 
@@ -48,6 +59,7 @@ impl Check {
             status: Status::Fail,
             message: msg.into(),
             hint: None,
+            fix: None,
         }
     }
 
@@ -55,11 +67,16 @@ impl Check {
         self.hint = Some(hint.into());
         self
     }
+
+    fn with_fix(mut self, fix: Fix) -> Self {
+        self.fix = Some(fix);
+        self
+    }
 }
 
 // ── Entry point ──────────────────────────────────────────
 
-pub fn run(cwd: &Path) -> Result<()> {
+pub fn run(cwd: &Path, fix: bool) -> Result<()> {
     let categories = vec![
         check_workspace(cwd),
         check_daemon(),
@@ -69,6 +86,10 @@ pub fn run(cwd: &Path) -> Result<()> {
     ];
 
     print_report(&categories);
+
+    if fix {
+        apply_fixes(&categories);
+    }
 
     let has_failures = categories
         .iter()
@@ -130,9 +151,12 @@ fn check_workspace(cwd: &Path) -> Category {
     let live = workspace::load_registry();
     let stale = all.len().saturating_sub(live.len());
     if stale > 0 {
-        checks.push(Check::warn(format!(
-            "{stale} stale registry entry(ies) (paths no longer exist)"
-        )));
+        checks.push(
+            Check::warn(format!(
+                "{stale} stale registry entry(ies) (paths no longer exist)"
+            ))
+            .with_fix(Fix::PruneRegistry),
+        );
     }
 
     Category {
@@ -160,7 +184,8 @@ fn check_daemon() -> Category {
                 ))
                 .with_hint(
                     "Remove it: rm \"{}\"".replace("{}", &global_pid_path.display().to_string()),
-                ),
+                )
+                .with_fix(Fix::RemoveFile(global_pid_path.clone())),
             );
         }
         None => {
@@ -198,7 +223,8 @@ fn check_daemon() -> Category {
                 _ => {
                     checks.push(
                         Check::warn(format!("Stale PID file at {}", ws_pid.display()))
-                            .with_hint(format!("Remove it: rm \"{}\"", ws_pid.display())),
+                            .with_hint(format!("Remove it: rm \"{}\"", ws_pid.display()))
+                            .with_fix(Fix::RemoveFile(ws_pid.clone())),
                     );
                 }
             }
@@ -482,6 +508,55 @@ fn print_report(categories: &[Category]) {
         parts.push(format!("{total_fail} failure(s)"));
     }
     println!("{}", parts.join(", "));
+}
+
+// ── Fix logic ────────────────────────────────────────────
+
+fn apply_fixes(categories: &[Category]) {
+    let fixable: Vec<_> = categories
+        .iter()
+        .flat_map(|c| &c.checks)
+        .filter(|c| c.fix.is_some() && c.status != Status::Pass)
+        .collect();
+
+    if fixable.is_empty() {
+        return;
+    }
+
+    println!("Fixing {} issue(s)...", fixable.len());
+    for check in fixable {
+        match check.fix {
+            Some(Fix::PruneRegistry) => match prune_registry() {
+                Ok(n) => println!("  Pruned {n} stale registry entry(ies)"),
+                Err(e) => eprintln!("  Failed to prune registry: {e}"),
+            },
+            Some(Fix::RemoveFile(ref path)) => match std::fs::remove_file(path) {
+                Ok(()) => println!("  Removed {}", path.display()),
+                Err(e) => eprintln!("  Failed to remove {}: {e}", path.display()),
+            },
+            None => {}
+        }
+    }
+}
+
+/// Rewrite the registry file keeping only entries whose paths exist.
+fn prune_registry() -> Result<usize> {
+    let reg_path = workspace::registry_path();
+    let all = workspace::load_registry_unfiltered();
+    let live: Vec<_> = all.iter().filter(|e| e.path.exists()).cloned().collect();
+    let pruned = all.len() - live.len();
+
+    if pruned > 0 {
+        #[derive(serde::Serialize)]
+        struct Registry {
+            workspaces: Vec<workspace::RegistryEntry>,
+        }
+        let registry = Registry { workspaces: live };
+        let toml_str = toml::to_string_pretty(&registry)?;
+        std::fs::write(&reg_path, toml_str)?;
+    }
+
+    Ok(pruned)
 }
 
 // ── Helpers ──────────────────────────────────────────────
