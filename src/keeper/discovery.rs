@@ -40,6 +40,9 @@ pub struct WorktreeState {
     pub summary: Option<String>,
     #[serde(default)]
     pub pr: Option<WtPrInfo>,
+    /// Worker lifecycle phase from swarm's state machine.
+    #[serde(default)]
+    pub phase: Option<String>,
     #[serde(default)]
     pub agent_session_status: Option<String>,
 }
@@ -261,6 +264,8 @@ pub struct WorktreeInfo {
     pub summary: Option<String>,
     pub created_at: Option<DateTime<Local>>,
     pub pr: Option<PrInfo>,
+    /// Worker lifecycle phase (e.g. "creating", "running", "waiting", "completed", "failed").
+    pub phase: Option<String>,
     pub agent_session_status: Option<String>,
 }
 
@@ -523,6 +528,7 @@ fn read_session(session_name: &str) -> Option<SwarmSession> {
                 summary: wt.summary,
                 created_at: wt.created_at,
                 pr,
+                phase: wt.phase,
                 agent_session_status: wt.agent_session_status,
             }
         })

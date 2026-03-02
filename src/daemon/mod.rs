@@ -707,18 +707,12 @@ impl DaemonRunner {
                     .as_ref()
                     .map(|sw| sw.stall_timeout_secs)
                     .unwrap_or(300);
-                let waiting_debounce = config
-                    .swarm_watch
-                    .as_ref()
-                    .map(|sw| sw.waiting_debounce_secs)
-                    .unwrap_or(30);
                 eprintln!(
-                    "[daemon] [{name}] Swarm watcher enabled (state: {}, stall_timeout: {stall_timeout}s, waiting_debounce: {waiting_debounce}s)",
+                    "[daemon] [{name}] Swarm watcher enabled (state: {}, stall_timeout: {stall_timeout}s)",
                     state_path.display()
                 );
                 let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
                 watcher.set_stall_timeout(stall_timeout);
-                watcher.set_waiting_debounce(waiting_debounce);
                 watcher.set_hive_dir(path.join(".hive"));
                 Some(watcher)
             } else {
