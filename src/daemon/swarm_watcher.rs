@@ -2204,4 +2204,114 @@ mod tests {
         let event: SwarmEventMirror = serde_json::from_str(json).unwrap();
         assert!(matches!(event, SwarmEventMirror::Unknown));
     }
+
+    // --- Additional edge case tests ---
+
+    #[test]
+    fn test_waiting_to_running_to_waiting_fires_twice() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/cycle","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Cycle test"}]}"#,
+        );
+
+        // First cycle: running → waiting.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"starting","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:01:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        let waiting_count = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .count();
+        assert_eq!(waiting_count, 1, "first waiting transition should fire");
+
+        // Second cycle: waiting → running → waiting again.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"waiting","to":"running","timestamp":"2026-02-26T10:02:00-08:00"}"#,
+        );
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:03:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        let waiting_count = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .count();
+        assert_eq!(
+            waiting_count, 1,
+            "second waiting transition should also fire"
+        );
+    }
+
+    #[test]
+    fn test_pr_already_set_at_init_no_pr_opened() {
+        // Worker already has a pr_url at daemon startup. PrOpened should NOT emit
+        // on the first (init) poll — only on the second poll via prs_at_init.
+        let mut file = NamedTempFile::new().unwrap();
+        let hive_dir = tempfile::tempdir().unwrap();
+
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/has-pr","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","pr":{"url":"https://github.com/ex/pull/99","title":"Existing PR"}}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_hive_dir(hive_dir.path().to_path_buf());
+
+        // First poll (init) — no notifications at all.
+        let notes = watcher.poll();
+        assert!(
+            notes.is_empty(),
+            "first poll should not emit PrOpened (init only)"
+        );
+
+        // The PR is tracked for re-emit on second poll.
+        assert!(
+            watcher.prs_at_init.contains("w1"),
+            "w1 should be in prs_at_init after init"
+        );
+    }
+
+    #[test]
+    fn test_multiple_workers_appear_simultaneously() {
+        // Two new workers appear in the same poll cycle → two AgentSpawned events.
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[
+                {"id":"w1","branch":"swarm/task-a","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Task A"},
+                {"id":"w2","branch":"swarm/task-b","agent":{"pane_id":"%2"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Task B"}
+            ]}"#,
+        );
+
+        // Both workers transition to running in the same poll.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"creating","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w2","from":"creating","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert_eq!(
+            spawned.len(),
+            2,
+            "two simultaneous spawns should produce two AgentSpawned events"
+        );
+
+        let ids: std::collections::HashSet<&str> =
+            spawned.iter().map(|n| n.worktree_id()).collect();
+        assert!(ids.contains("w1"), "w1 should be in spawned set");
+        assert!(ids.contains("w2"), "w2 should be in spawned set");
+    }
 }
