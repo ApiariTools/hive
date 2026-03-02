@@ -301,16 +301,34 @@ fn draw_worker_sidebar_row(
     // Background fill
     frame.render_widget(Paragraph::new("").style(row_style), area);
 
-    let status_icon = if wt.agent_alive {
-        if wt.agent_session_status.as_deref() == Some("waiting") {
-            Span::styled("\u{25cf} ", theme::status_waiting())
-        } else {
-            Span::styled("\u{25cf} ", theme::status_running())
+    let status_icon = match wt.phase.as_deref() {
+        Some("creating") | Some("starting") => {
+            Span::styled("\u{25cc} ", theme::status_waiting()) // ◌ amber
         }
-    } else if wt.summary.is_some() {
-        Span::styled("\u{25c6} ", theme::status_done())
-    } else {
-        Span::styled("\u{25cb} ", theme::status_idle())
+        Some("running") => Span::styled("\u{25cf} ", theme::status_running()), // ● green
+        Some("waiting") => Span::styled("\u{25cf} ", theme::status_waiting()), // ● amber
+        Some("completed") => Span::styled("\u{25c6} ", theme::status_done()),  // ◆ grey
+        Some("failed") => {
+            Span::styled(
+                "\u{2717} ",
+                Style::default().fg(ratatui::style::Color::Rgb(200, 60, 60)),
+            )
+            // ✗ red
+        }
+        _ => {
+            // Fallback for old state.json without phase field
+            if wt.agent_alive {
+                if wt.agent_session_status.as_deref() == Some("waiting") {
+                    Span::styled("\u{25cf} ", theme::status_waiting())
+                } else {
+                    Span::styled("\u{25cf} ", theme::status_running())
+                }
+            } else if wt.summary.is_some() {
+                Span::styled("\u{25c6} ", theme::status_done())
+            } else {
+                Span::styled("\u{25cb} ", theme::status_idle())
+            }
+        }
     };
 
     let selector = if selected { "\u{25b8}" } else { " " };
@@ -611,15 +629,26 @@ fn draw_worker_output(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    // Build title: id + status.
-    let status_str = if wt.agent_alive {
-        if wt.agent_session_status.as_deref() == Some("waiting") {
-            "waiting"
-        } else {
-            "running"
+    // Build title: id + status (prefer phase when available).
+    let status_str = match wt.phase.as_deref() {
+        Some("creating") => "creating",
+        Some("starting") => "starting",
+        Some("running") => "running",
+        Some("waiting") => "waiting",
+        Some("completed") => "completed",
+        Some("failed") => "failed",
+        _ => {
+            // Fallback: infer from agent liveness.
+            if wt.agent_alive {
+                if wt.agent_session_status.as_deref() == Some("waiting") {
+                    "waiting"
+                } else {
+                    "running"
+                }
+            } else {
+                "stopped"
+            }
         }
-    } else {
-        "stopped"
     };
     let title_parts = format!(" {}  {} ", wt.id, status_str);
 
