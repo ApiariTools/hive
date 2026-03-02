@@ -2204,4 +2204,156 @@ mod tests {
         let event: SwarmEventMirror = serde_json::from_str(json).unwrap();
         assert!(matches!(event, SwarmEventMirror::Unknown));
     }
+
+    // --- Additional edge case tests ---
+
+    #[test]
+    fn test_waiting_to_running_to_waiting_fires_twice() {
+        // A worker goes waiting → running → waiting across two poll cycles.
+        // Each transition to waiting should fire AgentWaiting.
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/flip-flop","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Flip flop task"}]}"#,
+        );
+
+        // First cycle: running → waiting.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:05:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "first waiting transition should fire AgentWaiting"
+        );
+
+        // Worker goes back to running (user sent a message).
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"waiting","to":"running","timestamp":"2026-02-26T10:06:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        assert!(
+            notes
+                .iter()
+                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
+            "waiting→running should not fire AgentWaiting"
+        );
+
+        // Second cycle: running → waiting again.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:10:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "second waiting transition should also fire AgentWaiting"
+        );
+
+        drop(dir);
+    }
+
+    #[test]
+    fn test_pr_already_set_at_init_no_pr_opened() {
+        // Worker has pr_url at startup AND pr_notified.json already contains it.
+        // PrOpened should NOT be emitted on any poll.
+        let dir = tempfile::tempdir().unwrap();
+        let swarm_dir = dir.path().join(".swarm");
+        std::fs::create_dir_all(&swarm_dir).unwrap();
+        let hive_dir = dir.path().join(".hive");
+        std::fs::create_dir_all(&hive_dir).unwrap();
+
+        // State: worker already has a PR.
+        std::fs::write(
+            swarm_dir.join("state.json"),
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/already-done","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","pr":{"url":"https://github.com/ex/pull/50","title":"Already done"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(swarm_dir.join("events.jsonl"), "").unwrap();
+
+        // Pre-populate pr_notified.json — this PR was already notified.
+        std::fs::write(
+            hive_dir.join("pr_notified.json"),
+            r#"["https://github.com/ex/pull/50"]"#,
+        )
+        .unwrap();
+
+        let mut watcher = SwarmWatcher::new(swarm_dir.join("state.json"));
+        watcher.set_hive_dir(hive_dir.clone());
+
+        // First poll (init): never emits anything.
+        let notes = watcher.poll();
+        assert!(
+            notes.is_empty(),
+            "first poll should not emit any notifications"
+        );
+
+        // Second poll: should NOT emit PrOpened since it's already notified.
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(
+            pr_notes.is_empty(),
+            "PrOpened should NOT be emitted when pr_notified.json already contains the URL"
+        );
+    }
+
+    #[test]
+    fn test_multiple_workers_appear_simultaneously() {
+        // Two new workers start running in the same poll cycle.
+        // Both should generate AgentSpawned events.
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[
+                {"id":"w1","branch":"swarm/task-a","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Task A"},
+                {"id":"w2","branch":"swarm/task-b","agent":{"pane_id":"%2"},"created_at":"2026-02-26T10:00:01-08:00","summary":"Task B"}
+            ]}"#,
+        );
+
+        // Both transition to running in the same poll cycle.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"creating","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w2","from":"starting","to":"running","timestamp":"2026-02-26T10:00:06-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert_eq!(
+            spawned.len(),
+            2,
+            "two workers starting simultaneously should produce two AgentSpawned events"
+        );
+
+        let ids: Vec<&str> = spawned.iter().map(|n| n.worktree_id()).collect();
+        assert!(ids.contains(&"w1"), "should contain w1");
+        assert!(ids.contains(&"w2"), "should contain w2");
+
+        // Verify each notification has the right summary.
+        for n in &spawned {
+            let msg = n.format_telegram();
+            if n.worktree_id() == "w1" {
+                assert!(msg.contains("Task A"));
+            } else {
+                assert!(msg.contains("Task B"));
+            }
+        }
+    }
 }
