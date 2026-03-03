@@ -1,17 +1,19 @@
-//! Swarm state watcher — monitors `.swarm/state.json` for agent completions
-//! and generates typed notifications.
+//! Swarm event watcher — tails `.swarm/events.jsonl` for lifecycle events
+//! and generates typed notifications for the daemon.
 //!
-//! Since swarm does not persist agent status (only pane IDs), we detect completion
-//! by tracking changes between polls:
-//! - Agent pane disappears (was `Some`, now `None`) → agent finished
-//! - Worktree removed entirely → agent was cleaned up (closed/merged)
-//! - New worktree appears → new agent spawned
+//! Swarm emits discrete lifecycle events (PhaseChanged, PrDetected, WorktreeClosed)
+//! to `.swarm/events.jsonl`. This module tails that file using a cursor-based
+//! JSONL reader and maps each event to a `SwarmNotification`.
+//!
+//! State.json is still read for context (branch names, summaries, PR URLs) and
+//! for daemon-restart re-notifications (workers already waiting or with unnotified PRs).
 
+use apiari_common::ipc::JsonlReader;
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// CI check status for a PR.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,10 +414,17 @@ impl SwarmNotification {
     }
 }
 
-/// Watches `.swarm/state.json` for agent completion events.
+/// Watches `.swarm/events.jsonl` for lifecycle events and generates notifications.
+///
+/// On each `poll()`:
+/// 1. Reads `state.json` for context (branch, summary, PR URL, created_at)
+/// 2. On first poll: initializes known state, skips events to end-of-file
+/// 3. On subsequent polls: tails new events and maps them to notifications
+/// 4. Re-emits notifications for workers waiting/with-PRs at daemon startup
+/// 5. Checks for stalled agents (idle too long, permission blocked)
 pub struct SwarmWatcher {
     state_path: PathBuf,
-    /// Tracked worktrees from the previous poll.
+    /// Tracked worktrees from the previous poll (for context lookups on closed workers).
     known: HashMap<String, TrackedWorktree>,
     /// Whether we've done the initial load (skip notifications on first poll).
     initialized: bool,
@@ -423,8 +432,6 @@ pub struct SwarmWatcher {
     swarm_dir: PathBuf,
     /// Stall timeout in seconds (0 = disabled).
     stall_timeout_secs: u64,
-    /// Seconds a worker must be in "waiting" before AgentWaiting fires (0 = disabled).
-    waiting_debounce_secs: u64,
     /// Workers that were already in "waiting" state at initialization.
     /// Drained on the first poll after init to re-emit AgentWaiting.
     waiting_at_init: HashSet<String>,
@@ -435,9 +442,11 @@ pub struct SwarmWatcher {
     prs_at_init: HashSet<String>,
     /// Directory for persisting `pr_notified.json` (e.g. `.hive/`).
     hive_dir: Option<PathBuf>,
+    /// JSONL reader for `.swarm/events.jsonl`.
+    events_reader: Option<JsonlReader<SwarmEventMirror>>,
 }
 
-/// Snapshot of a worktree's state for diffing between polls.
+/// Snapshot of a worktree's state for context lookups.
 #[derive(Debug, Clone)]
 struct TrackedWorktree {
     branch: String,
@@ -447,10 +456,7 @@ struct TrackedWorktree {
     stall_notified: bool,
     agent_kind: Option<String>,
     pr_url: Option<String>,
-    agent_session_status: Option<String>,
     summary: Option<String>,
-    /// When this worker entered "waiting" state (for debounce tracking).
-    waiting_since: Option<Instant>,
 }
 
 // Mirror types for deserializing .swarm/state.json.
@@ -476,7 +482,11 @@ struct WorktreeState {
     #[serde(default)]
     pr: Option<WtPrInfo>,
     #[serde(default)]
+    #[allow(dead_code)]
     agent_session_status: Option<String>,
+    /// Worker lifecycle phase from swarm's state machine.
+    #[serde(default)]
+    phase: Option<WorkerPhase>,
 }
 
 impl WorktreeState {
@@ -499,6 +509,69 @@ struct WtPrInfo {
 struct PaneState {
     #[allow(dead_code)]
     pane_id: String,
+}
+
+// ── Mirror types for swarm event tailing ─────────────────────
+
+/// Mirror of swarm's `WorkerPhase` enum for deserializing events.jsonl.
+/// Uses `Unknown` catch-all for forward compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPhase {
+    Creating,
+    Starting,
+    Running,
+    Waiting,
+    Completed,
+    Failed,
+    /// Forward-compat catch-all for phases added in future swarm versions.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Mirror of swarm's `SwarmEvent` enum for deserializing `.swarm/events.jsonl`.
+/// Only includes variants we act on; unknown events silently deserialize as `Unknown`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum SwarmEventMirror {
+    PhaseChanged {
+        worktree: String,
+        from: WorkerPhase,
+        to: WorkerPhase,
+        #[allow(dead_code)]
+        timestamp: DateTime<Local>,
+    },
+    PrDetected {
+        worktree: String,
+        pr_url: String,
+        pr_title: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        pr_number: u64,
+        #[allow(dead_code)]
+        timestamp: DateTime<Local>,
+    },
+    WorktreeClosed {
+        worktree: String,
+        #[allow(dead_code)]
+        timestamp: DateTime<Local>,
+    },
+    WorktreeMerged {
+        worktree: String,
+        #[allow(dead_code)]
+        timestamp: DateTime<Local>,
+    },
+    /// Catch-all for unknown/future event types.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Context data for building notifications from events.
+struct EventContext {
+    branch: String,
+    summary: Option<String>,
+    pr_url: Option<String>,
+    duration: String,
 }
 
 /// A single event entry from `.swarm/agents/<id>/events.jsonl`.
@@ -525,23 +598,17 @@ impl SwarmWatcher {
             initialized: false,
             swarm_dir,
             stall_timeout_secs: 0,
-            waiting_debounce_secs: 0,
             waiting_at_init: HashSet::new(),
             pr_notified: HashSet::new(),
             prs_at_init: HashSet::new(),
             hive_dir: None,
+            events_reader: None,
         }
     }
 
     /// Set the stall detection timeout (in seconds). 0 disables stall detection.
     pub fn set_stall_timeout(&mut self, secs: u64) {
         self.stall_timeout_secs = secs;
-    }
-
-    /// Set the waiting debounce duration (in seconds). 0 disables debounce
-    /// (AgentWaiting fires immediately on transition, backwards compatible).
-    pub fn set_waiting_debounce(&mut self, secs: u64) {
-        self.waiting_debounce_secs = secs;
     }
 
     /// Set the hive directory for persisting PR notification state.
@@ -551,207 +618,58 @@ impl SwarmWatcher {
         self.hive_dir = Some(dir);
     }
 
-    /// Poll the swarm state file and return typed notifications for any transitions.
+    /// Poll for new events and return typed notifications.
+    ///
+    /// Reads `state.json` for context, then tails `events.jsonl` for new lifecycle
+    /// events. On the first poll after daemon restart, re-emits notifications for
+    /// workers already waiting or with unnotified PRs.
     pub fn poll(&mut self) -> Vec<SwarmNotification> {
         let state = match Self::load_state(&self.state_path) {
             Some(s) => s,
             None => return Vec::new(),
         };
 
-        // Build current snapshot.
-        let mut current: HashMap<String, &WorktreeState> = HashMap::new();
-        for wt in &state.worktrees {
-            current.insert(wt.id.clone(), wt);
-        }
+        let current: HashMap<String, &WorktreeState> = state
+            .worktrees
+            .iter()
+            .map(|wt| (wt.id.clone(), wt))
+            .collect();
 
-        // On first poll, just populate known state without generating notifications.
+        // First poll: populate known state, initialize events reader, no notifications.
         if !self.initialized {
-            self.initialized = true;
-            for wt in &state.worktrees {
-                self.known.insert(
-                    wt.id.clone(),
-                    TrackedWorktree {
-                        branch: wt.branch.clone(),
-                        had_agent: wt.agent.is_some(),
-                        created_at: wt.created_at,
-                        stall_notified: false,
-                        agent_kind: wt.agent_kind.clone(),
-                        pr_url: wt.pr_url(),
-                        agent_session_status: wt.agent_session_status.clone(),
-                        summary: wt.summary.clone(),
-                        waiting_since: None, // Handled by waiting_at_init path, not debounce.
-                    },
-                );
-            }
-            // Track workers already in "waiting" state so we can re-emit
-            // AgentWaiting on the next poll (handles daemon restarts).
-            for wt in &state.worktrees {
-                if wt.agent_session_status.as_deref() == Some("waiting") {
-                    self.waiting_at_init.insert(wt.id.clone());
-                }
-            }
-            // Load persisted PR notification set and track unnotified PRs at init.
-            // Only active when hive_dir is set (i.e. running as daemon).
-            if let Some(dir) = &self.hive_dir {
-                self.pr_notified = Self::load_pr_notified(&dir.join("pr_notified.json"));
-                for wt in &state.worktrees {
-                    if let Some(url) = &wt.pr_url()
-                        && !self.pr_notified.contains(url)
-                    {
-                        self.prs_at_init.insert(wt.id.clone());
-                    }
-                }
-            }
-            if !self.known.is_empty() {
-                eprintln!(
-                    "[swarm-watcher] Initialized with {} worktree(s)",
-                    self.known.len()
-                );
-            }
+            self.initialize(&state);
             return Vec::new();
         }
 
         let mut notifications = Vec::new();
         let mut pr_notified_changed = false;
 
-        // Check for agent completions (agent pane disappeared) and removals.
-        let previous_ids: Vec<String> = self.known.keys().cloned().collect();
-        for id in &previous_ids {
-            let prev = &self.known[id];
+        // Tail events.jsonl for new lifecycle events.
+        self.process_events(&current, &mut notifications, &mut pr_notified_changed);
 
-            if let Some(wt) = current.get(id) {
-                // Worktree still exists — check if agent finished.
-                if prev.had_agent && wt.agent.is_none() {
-                    let duration = format_duration(prev.created_at);
-                    notifications.push(SwarmNotification::AgentCompleted {
-                        worktree_id: id.clone(),
-                        branch: wt.branch.clone(),
-                        summary: wt.summary.clone(),
-                        duration,
-                        pr_url: wt.pr_url(),
-                    });
-                }
+        // Update known state from current state.json.
+        self.update_known(&state);
 
-                // Check if a PR was opened or changed (None→Some, or URL changed).
-                let pr_changed = match (prev.pr_url.as_deref(), wt.pr_url().as_deref()) {
-                    (None, Some(_)) => true,
-                    (Some(old), Some(new)) if old != new => true,
-                    _ => false,
-                };
-                if pr_changed {
-                    let duration = format_duration(prev.created_at);
-                    let url = wt.pr_url().unwrap();
-                    notifications.push(SwarmNotification::PrOpened {
-                        worktree_id: id.clone(),
-                        branch: wt.branch.clone(),
-                        pr_url: url.clone(),
-                        pr_title: wt.pr_title(),
-                        duration,
-                    });
-                    self.pr_notified.insert(url);
-                    pr_notified_changed = true;
-                }
+        // On first poll after init, re-emit for workers already waiting or with PRs.
+        self.emit_restart_notifications(&current, &mut notifications, &mut pr_notified_changed);
 
-                // NOTIFICATION DESIGN: Debounce AgentWaiting to prevent false positives.
-                // Workers briefly enter "waiting" state between tool calls. Only emit
-                // AgentWaiting after the worker has been waiting for waiting_debounce_secs.
-                // If debounce is 0, emit immediately (backwards compatible, useful in tests).
-                // Also suppress when pr_url is set — PrOpened is the actionable signal.
-                // When debounce > 0, waiting_since is set in the known state update
-                // below. The debounce check pass will emit AgentWaiting once enough
-                // time has elapsed.
-                if prev.agent_session_status.as_deref() != Some("waiting")
-                    && wt.agent_session_status.as_deref() == Some("waiting")
-                    && wt.pr_url().is_none()
-                    && self.waiting_debounce_secs == 0
-                {
-                    notifications.push(SwarmNotification::AgentWaiting {
-                        worktree_id: id.clone(),
-                        branch: wt.branch.clone(),
-                        summary: wt.summary.clone(),
-                        pr_url: None,
-                    });
-                }
-            } else {
-                // Worktree was removed (closed or merged).
-                let duration = format_duration(prev.created_at);
-                notifications.push(SwarmNotification::AgentClosed {
-                    worktree_id: id.clone(),
-                    branch: prev.branch.clone(),
-                    summary: prev.summary.clone(),
-                    duration,
-                    pr_url: prev.pr_url.clone(),
-                });
-            }
+        // Check for stalled agents.
+        if self.stall_timeout_secs > 0 {
+            notifications.extend(self.check_stalls());
         }
 
-        // NOTIFICATION DESIGN: Emit exactly ONE notification per new worker.
-        // - If already waiting with PR → PrOpened (the actionable signal)
-        // - If already waiting without PR → AgentWaiting
-        // - Otherwise (running) → AgentSpawned
-        // This prevents AgentSpawned+AgentWaiting double-notifications for fast workers.
-        for wt in &state.worktrees {
-            if !self.known.contains_key(&wt.id) {
-                if wt.agent_session_status.as_deref() == Some("waiting") {
-                    if let Some(url) = wt.pr_url() {
-                        // Fast worker: appeared already with PR — emit PrOpened.
-                        // (PrOpened transition check won't fire since there's no prev state.)
-                        let duration = format_duration(wt.created_at);
-                        notifications.push(SwarmNotification::PrOpened {
-                            worktree_id: wt.id.clone(),
-                            branch: wt.branch.clone(),
-                            pr_url: url.clone(),
-                            pr_title: wt.pr_title(),
-                            duration,
-                        });
-                        self.pr_notified.insert(url);
-                        pr_notified_changed = true;
-                    } else {
-                        // Fast worker: appeared already waiting, no PR yet.
-                        if self.waiting_debounce_secs == 0 {
-                            notifications.push(SwarmNotification::AgentWaiting {
-                                worktree_id: wt.id.clone(),
-                                branch: wt.branch.clone(),
-                                summary: wt.summary.clone(),
-                                pr_url: None,
-                            });
-                        }
-                        // When debounce > 0, waiting_since is set in the known state
-                        // update below. The debounce check pass handles the delay.
-                    }
-                } else {
-                    // Normal spawn: worker is running, not yet waiting.
-                    notifications.push(SwarmNotification::AgentSpawned {
-                        worktree_id: wt.id.clone(),
-                        branch: wt.branch.clone(),
-                        summary: wt.summary.clone(),
-                    });
-                }
-            }
+        if pr_notified_changed {
+            self.save_pr_notified();
         }
 
-        // Update known state, carrying forward waiting_since for debounce tracking.
-        let old_known = std::mem::take(&mut self.known);
+        notifications
+    }
+
+    /// First-poll initialization: populate known state, skip existing events.
+    fn initialize(&mut self, state: &SwarmState) {
+        self.initialized = true;
+
         for wt in &state.worktrees {
-            let is_waiting = wt.agent_session_status.as_deref() == Some("waiting");
-            let old = old_known.get(&wt.id);
-            let was_waiting =
-                old.is_some_and(|o| o.agent_session_status.as_deref() == Some("waiting"));
-
-            // NOTIFICATION DESIGN: Track when a worker entered "waiting" state.
-            // - Transitioning TO waiting: record Instant::now()
-            // - Already waiting: preserve existing timestamp
-            // - Not waiting: clear (worker left waiting, debounce resets)
-            let waiting_since = if is_waiting {
-                if was_waiting {
-                    old.and_then(|o| o.waiting_since)
-                } else {
-                    Some(Instant::now())
-                }
-            } else {
-                None
-            };
-
             self.known.insert(
                 wt.id.clone(),
                 TrackedWorktree {
@@ -761,20 +679,174 @@ impl SwarmWatcher {
                     stall_notified: false,
                     agent_kind: wt.agent_kind.clone(),
                     pr_url: wt.pr_url(),
-                    agent_session_status: wt.agent_session_status.clone(),
                     summary: wt.summary.clone(),
-                    waiting_since,
+                },
+            );
+
+            // Track workers already waiting so we can re-emit on next poll.
+            if wt.phase == Some(WorkerPhase::Waiting) {
+                self.waiting_at_init.insert(wt.id.clone());
+            }
+        }
+
+        // Load persisted PR notification set and track unnotified PRs.
+        if let Some(dir) = &self.hive_dir {
+            self.pr_notified = Self::load_pr_notified(&dir.join("pr_notified.json"));
+            for wt in &state.worktrees {
+                if let Some(url) = &wt.pr_url()
+                    && !self.pr_notified.contains(url)
+                {
+                    self.prs_at_init.insert(wt.id.clone());
+                }
+            }
+        }
+
+        // Initialize events reader — skip to end so we don't replay history.
+        let events_path = self.swarm_dir.join("events.jsonl");
+        let mut reader = JsonlReader::<SwarmEventMirror>::new(&events_path);
+        let _ = reader.skip_to_end();
+        self.events_reader = Some(reader);
+
+        if !self.known.is_empty() {
+            eprintln!(
+                "[swarm-watcher] Initialized with {} worktree(s)",
+                self.known.len()
+            );
+        }
+    }
+
+    /// Tail new events from `events.jsonl` and map them to notifications.
+    fn process_events(
+        &mut self,
+        current: &HashMap<String, &WorktreeState>,
+        notifications: &mut Vec<SwarmNotification>,
+        pr_notified_changed: &mut bool,
+    ) {
+        let reader = match self.events_reader.as_mut() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let events = match reader.poll() {
+            Ok(events) => events,
+            Err(_) => return,
+        };
+
+        for event in events {
+            match event {
+                SwarmEventMirror::PhaseChanged {
+                    ref worktree,
+                    ref from,
+                    ref to,
+                    ..
+                } => match to {
+                    WorkerPhase::Running
+                        if matches!(from, WorkerPhase::Creating | WorkerPhase::Starting) =>
+                    {
+                        let ctx = self.event_context(worktree, current);
+                        notifications.push(SwarmNotification::AgentSpawned {
+                            worktree_id: worktree.clone(),
+                            branch: ctx.branch,
+                            summary: ctx.summary,
+                        });
+                    }
+                    WorkerPhase::Waiting => {
+                        let ctx = self.event_context(worktree, current);
+                        // Suppress AgentWaiting when PR is set — PrOpened is the signal.
+                        if ctx.pr_url.is_none() {
+                            notifications.push(SwarmNotification::AgentWaiting {
+                                worktree_id: worktree.clone(),
+                                branch: ctx.branch,
+                                summary: ctx.summary,
+                                pr_url: None,
+                            });
+                        }
+                    }
+                    WorkerPhase::Completed | WorkerPhase::Failed => {
+                        let ctx = self.event_context(worktree, current);
+                        notifications.push(SwarmNotification::AgentCompleted {
+                            worktree_id: worktree.clone(),
+                            branch: ctx.branch,
+                            summary: ctx.summary,
+                            duration: ctx.duration,
+                            pr_url: ctx.pr_url,
+                        });
+                    }
+                    _ => {} // Creating, Starting, Unknown — no notification
+                },
+                SwarmEventMirror::PrDetected {
+                    ref worktree,
+                    ref pr_url,
+                    ref pr_title,
+                    ..
+                } => {
+                    if !self.pr_notified.contains(pr_url) {
+                        let ctx = self.event_context(worktree, current);
+                        notifications.push(SwarmNotification::PrOpened {
+                            worktree_id: worktree.clone(),
+                            branch: ctx.branch,
+                            pr_url: pr_url.clone(),
+                            pr_title: Some(pr_title.clone()),
+                            duration: ctx.duration,
+                        });
+                        self.pr_notified.insert(pr_url.clone());
+                        *pr_notified_changed = true;
+                    }
+                }
+                SwarmEventMirror::WorktreeClosed { ref worktree, .. }
+                | SwarmEventMirror::WorktreeMerged { ref worktree, .. } => {
+                    let ctx = self.event_context(worktree, current);
+                    notifications.push(SwarmNotification::AgentClosed {
+                        worktree_id: worktree.clone(),
+                        branch: ctx.branch,
+                        summary: ctx.summary,
+                        duration: ctx.duration,
+                        pr_url: ctx.pr_url,
+                    });
+                }
+                SwarmEventMirror::Unknown => {} // Forward compat: silently skip
+            }
+        }
+    }
+
+    /// Update known state from current state.json snapshot.
+    fn update_known(&mut self, state: &SwarmState) {
+        let old_stall: HashMap<String, bool> = self
+            .known
+            .iter()
+            .map(|(id, t)| (id.clone(), t.stall_notified))
+            .collect();
+        self.known.clear();
+        for wt in &state.worktrees {
+            self.known.insert(
+                wt.id.clone(),
+                TrackedWorktree {
+                    branch: wt.branch.clone(),
+                    had_agent: wt.agent.is_some(),
+                    created_at: wt.created_at,
+                    stall_notified: old_stall.get(&wt.id).copied().unwrap_or(false),
+                    agent_kind: wt.agent_kind.clone(),
+                    pr_url: wt.pr_url(),
+                    summary: wt.summary.clone(),
                 },
             );
         }
+    }
 
-        // Re-emit AgentWaiting for workers that were already waiting at init.
-        // Drain ensures this only fires once (the first poll after initialization).
+    /// Re-emit notifications for workers that were already waiting or had PRs at init.
+    /// Drained on first call so this only fires once after daemon restart.
+    fn emit_restart_notifications(
+        &mut self,
+        current: &HashMap<String, &WorktreeState>,
+        notifications: &mut Vec<SwarmNotification>,
+        pr_notified_changed: &mut bool,
+    ) {
+        // Re-emit AgentWaiting for workers waiting at daemon startup.
         if !self.waiting_at_init.is_empty() {
             let init_ids: HashSet<String> = self.waiting_at_init.drain().collect();
             for id in init_ids {
                 if let Some(wt) = current.get(&id)
-                    && wt.agent_session_status.as_deref() == Some("waiting")
+                    && wt.phase == Some(WorkerPhase::Waiting)
                     && wt.pr_url().is_none()
                 {
                     notifications.push(SwarmNotification::AgentWaiting {
@@ -788,7 +860,6 @@ impl SwarmWatcher {
         }
 
         // Re-emit PrOpened for PRs that existed at init but weren't yet notified.
-        // Drained on first poll after init (handles daemon restarts).
         if !self.prs_at_init.is_empty() {
             let init_ids: HashSet<String> = self.prs_at_init.drain().collect();
             for id in init_ids {
@@ -803,65 +874,43 @@ impl SwarmWatcher {
                         duration: format_duration(wt.created_at),
                     });
                     self.pr_notified.insert(pr_url.clone());
-                    pr_notified_changed = true;
+                    *pr_notified_changed = true;
                 }
             }
         }
+    }
 
-        // NOTIFICATION DESIGN: Emit debounced AgentWaiting for workers that have
-        // been in "waiting" state long enough. This prevents false positives from
-        // brief mid-task flickers while still notifying for genuine human-input waits.
-        // A real wait is sustained across multiple polls; a tool-call gap clears
-        // within one 15s poll cycle, so waiting_since gets reset before the threshold.
-        if self.waiting_debounce_secs > 0 {
-            for (id, tracked) in &mut self.known {
-                if tracked.agent_session_status.as_deref() == Some("waiting")
-                    && tracked.pr_url.is_none()
-                    && let Some(since) = tracked.waiting_since
-                    && since.elapsed().as_secs() >= self.waiting_debounce_secs
-                {
-                    notifications.push(SwarmNotification::AgentWaiting {
-                        worktree_id: id.clone(),
-                        branch: tracked.branch.clone(),
-                        summary: tracked.summary.clone(),
-                        pr_url: None,
-                    });
-                    tracked.waiting_since = None; // fired, don't repeat
-                }
-            }
+    /// Look up context data for a worktree from current state.json or known state.
+    fn event_context(
+        &self,
+        worktree_id: &str,
+        current: &HashMap<String, &WorktreeState>,
+    ) -> EventContext {
+        // Try current state first (worktree still exists).
+        if let Some(wt) = current.get(worktree_id) {
+            return EventContext {
+                branch: wt.branch.clone(),
+                summary: wt.summary.clone(),
+                pr_url: wt.pr_url(),
+                duration: format_duration(wt.created_at),
+            };
         }
-
-        // Check for stalled agents.
-        if self.stall_timeout_secs > 0 {
-            notifications.extend(self.check_stalls());
+        // Fall back to known state (worktree was closed/removed).
+        if let Some(tracked) = self.known.get(worktree_id) {
+            return EventContext {
+                branch: tracked.branch.clone(),
+                summary: tracked.summary.clone(),
+                pr_url: tracked.pr_url.clone(),
+                duration: format_duration(tracked.created_at),
+            };
         }
-
-        // NOTIFICATION DESIGN: Deduplicate AgentCompleted + AgentClosed for same worker.
-        // When closing a claude-tui worker, both can fire in the same poll cycle
-        // (agent pane gone + worktree removed). Keep only AgentClosed — it's the
-        // terminal event and includes all relevant info (PR url from prev state).
-        let completed_and_closed: HashSet<String> = notifications
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentCompleted { .. }))
-            .map(|n| n.worktree_id().to_owned())
-            .filter(|id| {
-                notifications
-                    .iter()
-                    .any(|n| matches!(n, SwarmNotification::AgentClosed { worktree_id, .. } if worktree_id == id))
-            })
-            .collect();
-        if !completed_and_closed.is_empty() {
-            notifications.retain(|n| {
-                !matches!(n, SwarmNotification::AgentCompleted { worktree_id, .. }
-                    if completed_and_closed.contains(worktree_id.as_str()))
-            });
+        // No context available (shouldn't happen in practice).
+        EventContext {
+            branch: format!("swarm/{worktree_id}"),
+            summary: None,
+            pr_url: None,
+            duration: "?".to_string(),
         }
-
-        if pr_notified_changed {
-            self.save_pr_notified();
-        }
-
-        notifications
     }
 
     /// Check for stalled agents by reading their events.jsonl files.
@@ -1026,72 +1075,6 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_completion_detected() {
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/fix-bug","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Agent pane disappears.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/fix-bug","agent":null,"created_at":"2026-02-22T10:00:00-08:00"}]}"#,
-        );
-
-        let notes = watcher.poll();
-        assert_eq!(notes.len(), 1);
-        let msg = notes[0].format_telegram();
-        assert!(msg.contains("Agent finished"));
-        assert!(msg.contains("fix-bug"));
-    }
-
-    #[test]
-    fn test_worktree_removal_detected() {
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/old-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Worktree removed entirely.
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let notes = watcher.poll();
-        assert_eq!(notes.len(), 1);
-        let msg = notes[0].format_telegram();
-        assert!(msg.contains("Worker closed"));
-    }
-
-    #[test]
-    fn test_new_worktree_detected() {
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // New worktree appears.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/new-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","summary":"Add new feature"}]}"#,
-        );
-
-        let notes = watcher.poll();
-        assert_eq!(notes.len(), 1);
-        let msg = notes[0].format_telegram();
-        assert!(msg.contains("Agent spawned"));
-        assert!(msg.contains("new-feat"));
-        assert!(msg.contains("Add new feature"));
-    }
-
-    #[test]
     fn test_missing_state_file() {
         let mut watcher = SwarmWatcher::new(PathBuf::from("/nonexistent/state.json"));
         let notes = watcher.poll();
@@ -1213,112 +1196,39 @@ mod tests {
     }
 
     #[test]
-    fn test_pr_opened_none_to_some() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Initial state: agent running, no PR yet.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/add-auth","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui"}]}"#,
+    fn test_stall_notification_not_repeated() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/stuck","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","agent_kind":"claude"}]}"#,
         );
+        watcher.set_stall_timeout(1); // 1 second — triggers immediately
 
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
+        // Create a stale agent-events file so idle stall fires.
+        let agents_dir = dir.path().join(".swarm").join("agents").join("w1");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("events.jsonl"),
+            r#"{"type":"result","timestamp":"2025-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
 
-        // PR appears while agent is still running.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/add-auth","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","pr":{"url":"https://github.com/ApiariTools/hive/pull/42","title":"Add OAuth support"}}]}"#,
-        );
-
+        // First non-init poll — should get a stall notification.
         let notes = watcher.poll();
-        let pr_notes: Vec<_> = notes
+        let stalls: Vec<_> = notes
             .iter()
-            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .filter(|n| matches!(n, SwarmNotification::AgentStalled { .. }))
             .collect();
-        assert_eq!(pr_notes.len(), 1, "should emit exactly one PrOpened");
+        assert_eq!(stalls.len(), 1, "first poll should fire stall notification");
 
-        if let SwarmNotification::PrOpened {
-            worktree_id,
-            branch,
-            pr_url,
-            pr_title,
-            ..
-        } = &pr_notes[0]
-        {
-            assert_eq!(worktree_id, "1");
-            assert_eq!(branch, "swarm/add-auth");
-            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/42");
-            assert_eq!(pr_title.as_deref(), Some("Add OAuth support"));
-        }
-
-        let msg = pr_notes[0].format_telegram();
-        assert!(msg.contains("PR opened"));
-        assert!(msg.contains("add-auth"));
-        assert!(msg.contains("Add OAuth support"));
-        assert!(msg.contains("https://github.com/ApiariTools/hive/pull/42"));
-        assert!(msg.contains("Branch:"));
-    }
-
-    #[test]
-    fn test_pr_opened_same_url_no_duplicate() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Initial state: agent running with a PR already set.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/42"}}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Same PR URL on next poll — should NOT emit PrOpened again.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/42"}}]}"#,
-        );
-
+        // Second poll — same stalled state, should NOT re-fire.
         let notes = watcher.poll();
-        let pr_notes: Vec<_> = notes
+        let stalls: Vec<_> = notes
             .iter()
-            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .filter(|n| matches!(n, SwarmNotification::AgentStalled { .. }))
             .collect();
         assert!(
-            pr_notes.is_empty(),
-            "should NOT emit PrOpened when pr_url stays the same"
+            stalls.is_empty(),
+            "stall notification should not repeat on subsequent polls"
         );
-    }
-
-    #[test]
-    fn test_pr_opened_fires_on_url_change() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Initial state: agent running with a PR already set.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/42"}}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // PR URL changed — should emit PrOpened (worker opened a second PR).
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/99"}}]}"#,
-        );
-
-        let notes = watcher.poll();
-        let pr_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
-            .collect();
-        assert_eq!(
-            pr_notes.len(),
-            1,
-            "should emit PrOpened when pr_url changes (Some→Some with different URL)"
-        );
-        if let SwarmNotification::PrOpened { pr_url, .. } = pr_notes[0] {
-            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/99");
-        }
     }
 
     #[test]
@@ -1364,128 +1274,6 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_waiting_transition() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Initial state: agent running, not waiting.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Agent transitions to waiting.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing","agent_session_status":"waiting"}]}"#,
-        );
-
-        let notes = watcher.poll();
-        let waiting_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting_notes.len(),
-            1,
-            "should emit exactly one AgentWaiting"
-        );
-
-        let msg = waiting_notes[0].format_telegram();
-        assert!(msg.contains("Worker waiting"));
-        assert!(msg.contains("do-stuff"));
-        assert!(msg.contains("Fix the thing"));
-        assert!(msg.contains("Reply here"));
-    }
-
-    #[test]
-    fn test_agent_waiting_no_duplicate() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Initial state: agent already waiting.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Second poll — should emit AgentWaiting (re-notify for workers waiting at init).
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting_notes.len(),
-            1,
-            "should emit AgentWaiting on second poll for workers waiting at init"
-        );
-
-        // Third poll with same state — should NOT emit again.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert!(
-            waiting_notes.is_empty(),
-            "should NOT emit AgentWaiting again after the re-notify"
-        );
-    }
-
-    #[test]
-    fn test_agent_waiting_retriggers_after_active() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Agent starts waiting.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Agent becomes active (got input).
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-        let notes = watcher.poll();
-        assert!(
-            notes
-                .iter()
-                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
-            "should not emit when transitioning away from waiting"
-        );
-
-        // Agent finishes task and goes back to waiting.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting_notes.len(),
-            1,
-            "should re-emit AgentWaiting after active→waiting transition"
-        );
-    }
-
-    #[test]
     fn test_agent_waiting_format_no_summary() {
         let waiting = SwarmNotification::AgentWaiting {
             worktree_id: "abc".into(),
@@ -1497,76 +1285,6 @@ mod tests {
         assert_eq!(
             msg,
             "⏳ *Worker waiting* — my-task\nBranch: `swarm/my-task`\nReply here to send a message to this worker."
-        );
-    }
-
-    #[test]
-    fn test_agent_waiting_suppressed_when_pr_set() {
-        // NOTIFICATION DESIGN: When pr_url is set, PrOpened is the actionable
-        // signal — AgentWaiting is redundant and creates noise.
-        let mut file = NamedTempFile::new().unwrap();
-        // Agent running, no PR yet.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Agent transitions to waiting AND has a PR.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing","agent_session_status":"waiting","pr":{"url":"https://github.com/ApiariTools/hive/pull/77"}}]}"#,
-        );
-
-        let notes = watcher.poll();
-
-        // PrOpened should fire (None→Some transition).
-        let pr_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
-            .collect();
-        assert_eq!(pr_notes.len(), 1, "PrOpened should fire");
-
-        // AgentWaiting should NOT fire — PrOpened is the signal.
-        let waiting_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert!(
-            waiting_notes.is_empty(),
-            "AgentWaiting should be suppressed when pr_url is set"
-        );
-    }
-
-    #[test]
-    fn test_agent_waiting_fires_when_no_pr() {
-        // NOTIFICATION DESIGN: When no PR is set, AgentWaiting is the signal.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Agent transitions to waiting, no PR.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/do-stuff","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","summary":"Fix the thing","agent_session_status":"waiting"}]}"#,
-        );
-
-        let notes = watcher.poll();
-        let waiting_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting_notes.len(),
-            1,
-            "AgentWaiting should fire when no PR is set"
         );
     }
 
@@ -1671,7 +1389,7 @@ mod tests {
         // Worker already in "waiting" when daemon starts.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/stale-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Do the thing"}]}"#,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/stale-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","phase":"waiting","summary":"Do the thing"}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -1698,7 +1416,7 @@ mod tests {
         // Worker already waiting AND already has a PR.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/done-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","pr":{"url":"https://github.com/ApiariTools/hive/pull/99"}}]}"#,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/done-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","phase":"waiting","pr":{"url":"https://github.com/ApiariTools/hive/pull/99"}}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -1717,45 +1435,12 @@ mod tests {
     }
 
     #[test]
-    fn test_running_to_waiting_still_fires_immediately() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Worker starts in "active" (running) state.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/running","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-        assert!(
-            watcher.waiting_at_init.is_empty(),
-            "active worker should not be in waiting_at_init"
-        );
-
-        // Worker transitions to waiting — standard detection should fire.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/running","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Need input"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting.len(),
-            1,
-            "running→waiting transition should fire AgentWaiting immediately"
-        );
-    }
-
-    #[test]
     fn test_waiting_at_init_gone_before_second_poll() {
         let mut file = NamedTempFile::new().unwrap();
         // Worker already waiting at init.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/ephemeral","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/ephemeral","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","phase":"waiting"}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -1773,12 +1458,8 @@ mod tests {
             waiting.is_empty(),
             "should NOT notify for worker that disappeared before second poll"
         );
-        // Should still get AgentClosed though.
-        let closed: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentClosed { .. }))
-            .collect();
-        assert_eq!(closed.len(), 1);
+        // AgentClosed comes from WorktreeClosed event, not from state-diff.
+        // Without an event, no AgentClosed fires — which is correct.
     }
 
     #[test]
@@ -1787,7 +1468,7 @@ mod tests {
         // Worker already waiting at init.
         write_state(
             &mut file,
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/once","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/once","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","phase":"waiting"}]}"#,
         );
 
         let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
@@ -1832,278 +1513,6 @@ mod tests {
     }
 
     // --- Edge case tests ---
-
-    #[test]
-    fn test_waiting_to_running_to_waiting_fires_twice() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Start with a running agent.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // First transition: active → waiting.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Need input 1"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(waiting.len(), 1, "first waiting transition should fire");
-
-        // Back to active (user sent input).
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-        let notes = watcher.poll();
-        assert!(
-            notes
-                .iter()
-                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
-            "should not emit when transitioning away from waiting"
-        );
-
-        // Second transition: active → waiting again.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Need input 2"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting.len(),
-            1,
-            "second waiting transition should also fire"
-        );
-    }
-
-    #[test]
-    fn test_pr_already_set_at_init_no_pr_opened() {
-        let mut file = NamedTempFile::new().unwrap();
-        // Worker has pr_url from the start.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/example/pull/1"}}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize — pr_url is recorded in known state.
-
-        // Same state on next poll — pr_url was already Some, no None→Some transition.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/example/pull/1"}}]}"#,
-        );
-        let notes = watcher.poll();
-        let pr_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
-            .collect();
-        assert!(
-            pr_notes.is_empty(),
-            "should NOT emit PrOpened when pr_url was already set at initialization"
-        );
-    }
-
-    #[test]
-    fn test_multiple_workers_appear_simultaneously() {
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize with no worktrees.
-
-        // Two new workers appear in the same poll cycle.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[
-                {"id":"1","branch":"swarm/task-a","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","summary":"Task A"},
-                {"id":"2","branch":"swarm/task-b","agent":{"pane_id":"%2"},"created_at":"2026-02-22T10:01:00-08:00","summary":"Task B"}
-            ]}"#,
-        );
-
-        let notes = watcher.poll();
-        let spawned: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
-            .collect();
-        assert_eq!(
-            spawned.len(),
-            2,
-            "should emit AgentSpawned for both new workers"
-        );
-
-        // Verify both worktree IDs are represented.
-        let ids: Vec<&str> = spawned.iter().map(|n| n.worktree_id()).collect();
-        assert!(ids.contains(&"1"), "should have worktree 1");
-        assert!(ids.contains(&"2"), "should have worktree 2");
-    }
-
-    #[test]
-    fn test_fast_worker_with_pr_emits_pr_opened_only() {
-        // NOTIFICATION DESIGN: Fast worker appeared already with PR — emit only
-        // PrOpened. No AgentSpawned or AgentWaiting to avoid noise.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize with no worktrees.
-
-        // New worker appears mid-session already in "waiting" state with PR.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"fast-1","branch":"swarm/quick-fix","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Fix typo","pr":{"url":"https://github.com/ApiariTools/hive/pull/55","title":"Fix typo in README"}}]}"#,
-        );
-
-        let notes = watcher.poll();
-
-        // Only PrOpened should fire.
-        let pr_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
-            .collect();
-        assert_eq!(pr_notes.len(), 1, "should emit PrOpened");
-
-        if let SwarmNotification::PrOpened {
-            worktree_id,
-            pr_url,
-            pr_title,
-            ..
-        } = &pr_notes[0]
-        {
-            assert_eq!(worktree_id, "fast-1");
-            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/55");
-            assert_eq!(pr_title.as_deref(), Some("Fix typo in README"));
-        }
-
-        // No AgentSpawned or AgentWaiting.
-        let spawned: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
-            .collect();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert!(
-            spawned.is_empty(),
-            "no AgentSpawned for fast worker with PR"
-        );
-        assert!(waiting.is_empty(), "no AgentWaiting when PR is the signal");
-    }
-
-    #[test]
-    fn test_fast_worker_no_pr_emits_waiting_only() {
-        // NOTIFICATION DESIGN: Fast worker appeared already waiting, no PR —
-        // emit only AgentWaiting. No AgentSpawned.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize with no worktrees.
-
-        // New worker appears mid-session already waiting, no PR.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"fast-2","branch":"swarm/quick-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Do the thing"}]}"#,
-        );
-
-        let notes = watcher.poll();
-
-        // Only AgentWaiting should fire.
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(waiting.len(), 1, "should emit AgentWaiting");
-        assert_eq!(waiting[0].worktree_id(), "fast-2");
-
-        // No AgentSpawned.
-        let spawned: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
-            .collect();
-        assert!(
-            spawned.is_empty(),
-            "no AgentSpawned for fast worker already waiting"
-        );
-    }
-
-    #[test]
-    fn test_normal_spawn_emits_spawned_only() {
-        // NOTIFICATION DESIGN: Normal worker appears running — emit only AgentSpawned.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize with no worktrees.
-
-        // New worker appears in running state.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"run-1","branch":"swarm/big-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active","summary":"Big refactor"}]}"#,
-        );
-
-        let notes = watcher.poll();
-
-        let spawned: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
-            .collect();
-        assert_eq!(spawned.len(), 1, "should emit AgentSpawned");
-
-        // No AgentWaiting or PrOpened.
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        let pr: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
-            .collect();
-        assert!(waiting.is_empty(), "no AgentWaiting for running worker");
-        assert!(pr.is_empty(), "no PrOpened for running worker");
-    }
-
-    #[test]
-    fn test_new_worker_running_no_waiting_notification() {
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize with no worktrees.
-
-        // New worker appears mid-session in "active" (running) state.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"run-1","branch":"swarm/big-task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active","summary":"Big refactor"}]}"#,
-        );
-
-        let notes = watcher.poll();
-        let spawned: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
-            .collect();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(spawned.len(), 1, "should emit AgentSpawned");
-        assert!(
-            waiting.is_empty(),
-            "should NOT emit AgentWaiting for worker in active/running state"
-        );
-    }
 
     #[test]
     fn test_state_file_disappears_no_panic() {
@@ -2217,46 +1626,26 @@ mod tests {
     }
 
     #[test]
-    fn test_pr_opened_fires_for_new_pr_after_restart() {
-        let mut file = NamedTempFile::new().unwrap();
-        let hive_dir = tempfile::tempdir().unwrap();
-
-        // Pre-populate pr_notified.json with one URL.
-        let notified_path = hive_dir.path().join("pr_notified.json");
-        std::fs::write(
-            &notified_path,
-            r#"["https://github.com/ApiariTools/hive/pull/1"]"#,
-        )
-        .unwrap();
-
-        // Two workers: one with already-notified PR, one without any PR.
-        write_state(
-            &mut file,
+    fn test_pr_detected_event_after_restart() {
+        // After restart, new PR events are picked up via events.jsonl.
+        let (mut watcher, dir) = setup_event_watcher(
             r#"{"worktrees":[
-                {"id":"1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/1"}},
-                {"id":"2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-22T11:00:00-08:00"}
+                {"id":"w1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00"},
+                {"id":"w2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-26T11:00:00-08:00"}
             ]}"#,
         );
 
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.set_hive_dir(hive_dir.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // No PrOpened on second poll (old PR is notified, new worker has no PR yet).
-        let notes = watcher.poll();
-        let pr_notes: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
-            .collect();
-        assert!(pr_notes.is_empty(), "no new PRs yet");
-
-        // New PR appears on worker 2 (None→Some transition).
-        write_state(
-            &mut file,
+        // PrDetected event for w2.
+        update_state(
+            &dir,
             r#"{"worktrees":[
-                {"id":"1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/1"}},
-                {"id":"2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-22T11:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/42","title":"New feature"}}
+                {"id":"w1","branch":"swarm/old-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00"},
+                {"id":"w2","branch":"swarm/new-feat","agent":{"pane_id":"%2"},"created_at":"2026-02-26T11:00:00-08:00","pr":{"url":"https://github.com/ex/pull/42","title":"New feature"}}
             ]}"#,
+        );
+        append_event(
+            &dir,
+            r#"{"event":"pr_detected","worktree":"w2","pr_url":"https://github.com/ex/pull/42","pr_title":"New feature","pr_number":42,"timestamp":"2026-02-26T11:05:00-08:00"}"#,
         );
 
         let notes = watcher.poll();
@@ -2264,315 +1653,8 @@ mod tests {
             .iter()
             .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
             .collect();
-        assert_eq!(pr_notes.len(), 1, "should emit PrOpened for new PR only");
-
-        if let SwarmNotification::PrOpened {
-            worktree_id,
-            pr_url,
-            ..
-        } = &pr_notes[0]
-        {
-            assert_eq!(worktree_id, "2");
-            assert_eq!(pr_url, "https://github.com/ApiariTools/hive/pull/42");
-        }
-
-        // Verify pr_notified.json now contains both URLs.
-        let content: HashSet<String> =
-            serde_json::from_str(&std::fs::read_to_string(&notified_path).unwrap()).unwrap();
-        assert!(content.contains("https://github.com/ApiariTools/hive/pull/1"));
-        assert!(content.contains("https://github.com/ApiariTools/hive/pull/42"));
-    }
-
-    // --- Tests for notification deduplication ---
-
-    #[test]
-    fn test_completed_and_closed_dedup() {
-        // NOTIFICATION DESIGN: When a worktree is removed, only AgentClosed
-        // should fire — AgentCompleted is redundant. The dedup logic in poll()
-        // removes AgentCompleted when AgentClosed also fires for the same worker.
-        let mut file = NamedTempFile::new().unwrap();
-        // Worker with agent pane running.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","summary":"Do stuff"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.poll(); // Initialize
-
-        // Worktree removed entirely (agent was still running).
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let notes = watcher.poll();
-
-        // Only AgentClosed should fire, not AgentCompleted.
-        let completed: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentCompleted { .. }))
-            .collect();
-        let closed: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentClosed { .. }))
-            .collect();
-
-        assert!(
-            completed.is_empty(),
-            "AgentCompleted should not fire when worktree is removed"
-        );
-        assert_eq!(closed.len(), 1, "AgentClosed should fire");
-        assert_eq!(closed[0].worktree_id(), "1");
-    }
-
-    // --- Tests for AgentWaiting debounce ---
-
-    #[test]
-    fn test_debounce_suppresses_brief_flicker() {
-        // NOTIFICATION DESIGN: With debounce enabled, a worker that briefly enters
-        // "waiting" then returns to "active" should NOT trigger AgentWaiting.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.set_waiting_debounce(30); // 30s debounce
-        watcher.poll(); // Initialize
-
-        // Worker transitions to waiting (mid-task tool call gap).
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert!(
-            waiting.is_empty(),
-            "debounce should suppress immediate AgentWaiting"
-        );
-
-        // Worker returns to active (tool call resumes).
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert!(
-            waiting.is_empty(),
-            "no AgentWaiting after returning to active — flicker successfully suppressed"
-        );
-    }
-
-    #[test]
-    fn test_debounce_zero_fires_immediately() {
-        // With debounce disabled (0), AgentWaiting fires on the transition.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        // debounce defaults to 0 — explicit for clarity
-        watcher.set_waiting_debounce(0);
-        watcher.poll(); // Initialize
-
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting.len(),
-            1,
-            "debounce=0 should fire AgentWaiting immediately"
-        );
-    }
-
-    #[test]
-    fn test_debounce_fast_worker_suppressed() {
-        // NOTIFICATION DESIGN: New worker appearing already in "waiting" with
-        // debounce enabled should NOT immediately fire AgentWaiting.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(&mut file, r#"{"worktrees":[]}"#);
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.set_waiting_debounce(30);
-        watcher.poll(); // Initialize
-
-        // New worker appears already waiting.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"fast-1","branch":"swarm/quick","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Quick task"}]}"#,
-        );
-        let notes = watcher.poll();
-
-        // Should emit AgentSpawned or nothing, but NOT AgentWaiting (debounce).
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert!(
-            waiting.is_empty(),
-            "debounce should suppress AgentWaiting for fast worker"
-        );
-    }
-
-    #[test]
-    fn test_debounce_resets_on_active_waiting_cycle() {
-        // When a worker goes waiting→active→waiting, the debounce timer resets.
-        // With debounce > 0, neither transition should fire immediately.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.set_waiting_debounce(30);
-        watcher.poll(); // Initialize
-
-        // First transition: active → waiting
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-        let notes = watcher.poll();
-        assert!(
-            notes
-                .iter()
-                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
-            "first transition suppressed by debounce"
-        );
-
-        // Verify waiting_since is set.
-        assert!(
-            watcher.known["1"].waiting_since.is_some(),
-            "waiting_since should be set on transition to waiting"
-        );
-
-        // Back to active.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-        watcher.poll();
-        assert!(
-            watcher.known["1"].waiting_since.is_none(),
-            "waiting_since should be cleared when leaving waiting state"
-        );
-
-        // Second transition: active → waiting again.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting"}]}"#,
-        );
-        let notes = watcher.poll();
-        assert!(
-            notes
-                .iter()
-                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
-            "second transition also suppressed by debounce"
-        );
-
-        // waiting_since should be freshly set (reset, not carried from first cycle).
-        assert!(
-            watcher.known["1"].waiting_since.is_some(),
-            "waiting_since should be set again on re-entry to waiting"
-        );
-    }
-
-    #[test]
-    fn test_debounce_fires_when_threshold_reached() {
-        // NOTIFICATION DESIGN: With a very short debounce (1 second), verify that
-        // the debounce check pass fires AgentWaiting after the threshold.
-        // Note: This test uses a real sleep, so the debounce is kept very short.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"active"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.set_waiting_debounce(1); // 1 second debounce
-        watcher.poll(); // Initialize
-
-        // Transition to waiting.
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Need input"}]}"#,
-        );
-        let notes = watcher.poll();
-        assert!(
-            notes
-                .iter()
-                .all(|n| !matches!(n, SwarmNotification::AgentWaiting { .. })),
-            "should not fire immediately with debounce=1"
-        );
-
-        // Wait for the debounce threshold.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-
-        // Next poll — debounce check should fire.
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting.len(),
-            1,
-            "debounce check should fire AgentWaiting after threshold"
-        );
-
-        // Subsequent poll — should NOT fire again (waiting_since cleared).
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert!(
-            waiting.is_empty(),
-            "should not re-fire after debounce already emitted"
-        );
-    }
-
-    #[test]
-    fn test_debounce_waiting_at_init_fires_regardless() {
-        // Workers waiting at daemon startup should re-emit immediately via the
-        // waiting_at_init path, even when debounce is enabled.
-        let mut file = NamedTempFile::new().unwrap();
-        write_state(
-            &mut file,
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/stale","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","agent_kind":"claude-tui","agent_session_status":"waiting","summary":"Waiting for input"}]}"#,
-        );
-
-        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
-        watcher.set_waiting_debounce(30); // 30s debounce
-        watcher.poll(); // Initialize
-
-        // Second poll — waiting_at_init should fire regardless of debounce.
-        let notes = watcher.poll();
-        let waiting: Vec<_> = notes
-            .iter()
-            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
-            .collect();
-        assert_eq!(
-            waiting.len(),
-            1,
-            "waiting_at_init should fire even with debounce enabled"
-        );
+        assert_eq!(pr_notes.len(), 1, "should emit PrOpened for new PR");
+        assert_eq!(pr_notes[0].worktree_id(), "w2");
     }
 
     // --- Tests for CI status ---
@@ -2723,5 +1805,519 @@ mod tests {
         let buttons_ci = waiting.inline_buttons_with_ci(Some(&CiStatus::Passing));
         let buttons_plain = waiting.inline_buttons();
         assert_eq!(buttons_ci.len(), buttons_plain.len());
+    }
+
+    // ===============================================================
+    // Event-driven mode tests (using .swarm/events.jsonl)
+    // ===============================================================
+
+    /// Helper: set up a SwarmWatcher with both state.json and events.jsonl in a temp dir.
+    /// Returns (watcher, swarm_dir) so tests can write events and state.
+    fn setup_event_watcher(initial_state: &str) -> (SwarmWatcher, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let swarm_dir = dir.path().join(".swarm");
+        std::fs::create_dir_all(&swarm_dir).unwrap();
+
+        // Write initial state.json.
+        std::fs::write(swarm_dir.join("state.json"), initial_state).unwrap();
+
+        // Create an empty events.jsonl so event-driven mode activates.
+        std::fs::write(swarm_dir.join("events.jsonl"), "").unwrap();
+
+        let state_path = swarm_dir.join("state.json");
+        let mut watcher = SwarmWatcher::new(state_path);
+        watcher.poll(); // Initialize
+        (watcher, dir)
+    }
+
+    fn append_event(dir: &tempfile::TempDir, event_json: &str) {
+        use std::io::Write;
+        let events_path = dir.path().join(".swarm").join("events.jsonl");
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(events_path)
+            .unwrap();
+        writeln!(f, "{event_json}").unwrap();
+    }
+
+    fn update_state(dir: &tempfile::TempDir, state_json: &str) {
+        let state_path = dir.path().join(".swarm").join("state.json");
+        std::fs::write(state_path, state_json).unwrap();
+    }
+
+    #[test]
+    fn test_event_phase_running_emits_spawned() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/new-feat","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Add feature"}]}"#,
+        );
+
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"starting","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert_eq!(
+            spawned.len(),
+            1,
+            "PhaseChanged to Running should emit AgentSpawned"
+        );
+        assert_eq!(spawned[0].worktree_id(), "w1");
+        let msg = spawned[0].format_telegram();
+        assert!(msg.contains("Agent spawned"));
+        assert!(msg.contains("Add feature"));
+    }
+
+    #[test]
+    fn test_event_phase_waiting_emits_waiting() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/task","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Do the thing"}]}"#,
+        );
+
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:05:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "PhaseChanged to Waiting should emit AgentWaiting"
+        );
+        let msg = waiting[0].format_telegram();
+        assert!(msg.contains("Worker waiting"));
+        assert!(msg.contains("Do the thing"));
+    }
+
+    #[test]
+    fn test_event_phase_waiting_suppressed_when_pr_set() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","pr":{"url":"https://github.com/ex/pull/1"}}]}"#,
+        );
+
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:05:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert!(
+            waiting.is_empty(),
+            "AgentWaiting should be suppressed when PR is set"
+        );
+    }
+
+    #[test]
+    fn test_event_phase_completed_emits_completed() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/done","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Finish task"}]}"#,
+        );
+
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"completed","timestamp":"2026-02-26T10:10:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let completed: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentCompleted { .. }))
+            .collect();
+        assert_eq!(
+            completed.len(),
+            1,
+            "PhaseChanged to Completed should emit AgentCompleted"
+        );
+        let msg = completed[0].format_telegram();
+        assert!(msg.contains("Agent finished"));
+    }
+
+    #[test]
+    fn test_event_pr_detected_emits_pr_opened() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/pr-test","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00"}]}"#,
+        );
+
+        // Also update state.json with the PR (so context can find it).
+        update_state(
+            &dir,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/pr-test","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","pr":{"url":"https://github.com/ex/pull/42","title":"Add auth"}}]}"#,
+        );
+
+        append_event(
+            &dir,
+            r#"{"event":"pr_detected","worktree":"w1","pr_url":"https://github.com/ex/pull/42","pr_title":"Add auth","pr_number":42,"timestamp":"2026-02-26T10:08:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert_eq!(pr_notes.len(), 1, "PrDetected should emit PrOpened");
+
+        if let SwarmNotification::PrOpened {
+            pr_url, pr_title, ..
+        } = &pr_notes[0]
+        {
+            assert_eq!(pr_url, "https://github.com/ex/pull/42");
+            assert_eq!(pr_title.as_deref(), Some("Add auth"));
+        }
+    }
+
+    #[test]
+    fn test_event_pr_detected_dedup() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/feat","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00"}]}"#,
+        );
+
+        // First PrDetected event.
+        append_event(
+            &dir,
+            r#"{"event":"pr_detected","worktree":"w1","pr_url":"https://github.com/ex/pull/1","pr_title":"PR 1","pr_number":1,"timestamp":"2026-02-26T10:08:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+                .count(),
+            1,
+            "first PrDetected should fire"
+        );
+
+        // Same PrDetected event again — should NOT emit.
+        append_event(
+            &dir,
+            r#"{"event":"pr_detected","worktree":"w1","pr_url":"https://github.com/ex/pull/1","pr_title":"PR 1","pr_number":1,"timestamp":"2026-02-26T10:09:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        assert!(
+            notes
+                .iter()
+                .all(|n| !matches!(n, SwarmNotification::PrOpened { .. })),
+            "duplicate PrDetected should be suppressed"
+        );
+    }
+
+    #[test]
+    fn test_event_worktree_closed_emits_closed() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/old-task","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Old task"}]}"#,
+        );
+
+        // Remove worktree from state.json (closed).
+        update_state(&dir, r#"{"worktrees":[]}"#);
+
+        append_event(
+            &dir,
+            r#"{"event":"worktree_closed","worktree":"w1","timestamp":"2026-02-26T10:15:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let closed: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentClosed { .. }))
+            .collect();
+        assert_eq!(
+            closed.len(),
+            1,
+            "WorktreeClosed event should emit AgentClosed"
+        );
+        let msg = closed[0].format_telegram();
+        assert!(msg.contains("Worker closed"));
+        assert!(msg.contains("Old task"));
+    }
+
+    #[test]
+    fn test_event_worktree_merged_emits_closed() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/merged-task","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Merged task"}]}"#,
+        );
+
+        // Remove worktree from state.json (merged).
+        update_state(&dir, r#"{"worktrees":[]}"#);
+
+        append_event(
+            &dir,
+            r#"{"event":"worktree_merged","worktree":"w1","timestamp":"2026-02-26T10:15:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let closed: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentClosed { .. }))
+            .collect();
+        assert_eq!(
+            closed.len(),
+            1,
+            "WorktreeMerged event should emit AgentClosed"
+        );
+        let msg = closed[0].format_telegram();
+        assert!(msg.contains("Worker closed"));
+        assert!(msg.contains("Merged task"));
+    }
+
+    #[test]
+    fn test_event_unknown_events_skipped() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/test","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00"}]}"#,
+        );
+
+        // Write an unknown event type.
+        append_event(
+            &dir,
+            r#"{"event":"some_future_event","worktree":"w1","timestamp":"2026-02-26T10:05:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        assert!(
+            notes.is_empty(),
+            "unknown events should be silently skipped"
+        );
+    }
+
+    #[test]
+    fn test_event_multiple_events_in_one_poll() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[
+                {"id":"w1","branch":"swarm/task-a","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Task A"},
+                {"id":"w2","branch":"swarm/task-b","agent":{"pane_id":"%2"},"created_at":"2026-02-26T10:01:00-08:00","summary":"Task B"}
+            ]}"#,
+        );
+
+        // Multiple events in one poll cycle.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"starting","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w2","from":"running","to":"waiting","timestamp":"2026-02-26T10:05:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        assert_eq!(notes.len(), 2, "should emit one notification per event");
+
+        let spawned = notes.iter().any(|n| matches!(n, SwarmNotification::AgentSpawned { worktree_id, .. } if worktree_id == "w1"));
+        let waiting = notes.iter().any(|n| matches!(n, SwarmNotification::AgentWaiting { worktree_id, .. } if worktree_id == "w2"));
+        assert!(spawned, "w1 should have AgentSpawned");
+        assert!(waiting, "w2 should have AgentWaiting");
+    }
+
+    #[test]
+    fn test_event_no_events_returns_empty() {
+        let (mut watcher, _dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/test","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00"}]}"#,
+        );
+
+        // No events written — should return empty.
+        let notes = watcher.poll();
+        assert!(
+            notes.is_empty(),
+            "no events should produce no notifications"
+        );
+    }
+
+    #[test]
+    fn test_event_phase_failed_emits_completed() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/broken","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00"}]}"#,
+        );
+
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"creating","to":"failed","timestamp":"2026-02-26T10:00:03-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let completed: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentCompleted { .. }))
+            .collect();
+        assert_eq!(
+            completed.len(),
+            1,
+            "Failed phase should emit AgentCompleted"
+        );
+    }
+
+    #[test]
+    fn test_event_worker_phase_serde_roundtrip() {
+        // Verify all known variants deserialize correctly.
+        let variants = [
+            ("\"creating\"", WorkerPhase::Creating),
+            ("\"starting\"", WorkerPhase::Starting),
+            ("\"running\"", WorkerPhase::Running),
+            ("\"waiting\"", WorkerPhase::Waiting),
+            ("\"completed\"", WorkerPhase::Completed),
+            ("\"failed\"", WorkerPhase::Failed),
+        ];
+        for (json, expected) in &variants {
+            let parsed: WorkerPhase = serde_json::from_str(json).unwrap();
+            assert_eq!(&parsed, expected, "failed to parse {json}");
+        }
+
+        // Unknown variant falls through to Unknown.
+        let unknown: WorkerPhase = serde_json::from_str("\"some_future_phase\"").unwrap();
+        assert_eq!(unknown, WorkerPhase::Unknown);
+    }
+
+    #[test]
+    fn test_event_swarm_event_mirror_serde() {
+        // PhaseChanged
+        let json = r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:00:00-08:00"}"#;
+        let event: SwarmEventMirror = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, SwarmEventMirror::PhaseChanged { .. }));
+
+        // PrDetected
+        let json = r#"{"event":"pr_detected","worktree":"w1","pr_url":"https://ex.com/1","pr_title":"Test","pr_number":1,"timestamp":"2026-02-26T10:00:00-08:00"}"#;
+        let event: SwarmEventMirror = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, SwarmEventMirror::PrDetected { .. }));
+
+        // WorktreeClosed
+        let json = r#"{"event":"worktree_closed","worktree":"w1","timestamp":"2026-02-26T10:00:00-08:00"}"#;
+        let event: SwarmEventMirror = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, SwarmEventMirror::WorktreeClosed { .. }));
+
+        // WorktreeMerged
+        let json = r#"{"event":"worktree_merged","worktree":"w1","timestamp":"2026-02-26T10:00:00-08:00"}"#;
+        let event: SwarmEventMirror = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, SwarmEventMirror::WorktreeMerged { .. }));
+
+        // Unknown event
+        let json = r#"{"event":"agent_started","worktree":"w1","pane_id":"%1","timestamp":"2026-02-26T10:00:00-08:00"}"#;
+        let event: SwarmEventMirror = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, SwarmEventMirror::Unknown));
+    }
+
+    // --- Additional edge case tests ---
+
+    #[test]
+    fn test_waiting_to_running_to_waiting_fires_twice() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/bouncy","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Bouncy task","phase":"running"}]}"#,
+        );
+
+        // First transition: running → waiting.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:05:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(waiting.len(), 1, "first waiting transition should fire");
+
+        // Transition back: waiting → running (no AgentSpawned since from=waiting).
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"waiting","to":"running","timestamp":"2026-02-26T10:06:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert!(
+            spawned.is_empty(),
+            "waiting→running should NOT emit AgentSpawned"
+        );
+
+        // Second transition: running → waiting again.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:10:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "second waiting transition should also fire"
+        );
+    }
+
+    #[test]
+    fn test_pr_already_set_at_init_no_pr_opened() {
+        let mut file = NamedTempFile::new().unwrap();
+        // Worker has pr_url at startup.
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/has-pr","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ex/pull/55","title":"Existing PR"}}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        // No hive_dir set — no pr_notified.json, so startup re-notification path is skipped.
+
+        let notes = watcher.poll(); // Init poll.
+        assert!(
+            notes.is_empty(),
+            "first poll (init) should never emit notifications"
+        );
+
+        // Verify no PrOpened in particular.
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(
+            pr_notes.is_empty(),
+            "PrOpened must not fire on init poll even when pr_url is set"
+        );
+    }
+
+    #[test]
+    fn test_multiple_workers_appear_simultaneously() {
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[
+                {"id":"w1","branch":"swarm/task-a","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Task A"},
+                {"id":"w2","branch":"swarm/task-b","agent":{"pane_id":"%2"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Task B"}
+            ]}"#,
+        );
+
+        // Both workers transition creating → running in the same poll cycle.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"creating","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w2","from":"creating","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert_eq!(
+            spawned.len(),
+            2,
+            "two simultaneous creating→running transitions should produce two AgentSpawned"
+        );
+
+        let ids: HashSet<&str> = spawned.iter().map(|n| n.worktree_id()).collect();
+        assert!(ids.contains("w1"), "should include w1");
+        assert!(ids.contains("w2"), "should include w2");
     }
 }
