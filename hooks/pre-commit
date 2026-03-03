@@ -1,14 +1,40 @@
 #!/usr/bin/env bash
 set -e
 
+# Detect the Cargo workspace root — handles both normal repos and git worktrees.
+# Walk up from the git-common-dir to find a Cargo.toml containing [workspace].
+find_workspace_manifest() {
+  local git_common_dir
+  git_common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || return
+  # Start from the parent of the .git dir (the repo root).
+  local dir
+  dir="$(cd "$(dirname "$git_common_dir")" && pwd)"
+  while [ "$dir" != "/" ]; do
+    if [ -f "$dir/Cargo.toml" ] && grep -q '\[workspace\]' "$dir/Cargo.toml" 2>/dev/null; then
+      echo "$dir/Cargo.toml"
+      return
+    fi
+    dir="$(dirname "$dir")"
+  done
+}
+
+MANIFEST="$(find_workspace_manifest || true)"
+
+FMT_ARGS=(-p hive --check)
+CLIPPY_ARGS=(-p hive -- -D warnings)
+if [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ]; then
+  FMT_ARGS=(--manifest-path "$MANIFEST" "${FMT_ARGS[@]}")
+  CLIPPY_ARGS=(--manifest-path "$MANIFEST" "${CLIPPY_ARGS[@]}")
+fi
+
 echo "[hook] Running cargo fmt check..."
-cargo fmt -p hive --check || {
+cargo fmt "${FMT_ARGS[@]}" || {
   echo "[hook] Formatting issues found. Run: cargo fmt -p hive"
   exit 1
 }
 
 echo "[hook] Running cargo clippy..."
-cargo clippy -p hive -- -D warnings || {
+cargo clippy "${CLIPPY_ARGS[@]}" || {
   echo "[hook] Clippy errors found."
   exit 1
 }
