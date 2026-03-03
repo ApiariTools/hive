@@ -2204,4 +2204,153 @@ mod tests {
         let event: SwarmEventMirror = serde_json::from_str(json).unwrap();
         assert!(matches!(event, SwarmEventMirror::Unknown));
     }
+
+    // --- Additional edge case tests ---
+
+    #[test]
+    fn test_waiting_to_running_to_waiting_fires_twice() {
+        // Worker goes waiting → running → waiting. Both AgentWaiting events should fire.
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/flip-flop","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Flip flop task","phase":"running"}]}"#,
+        );
+
+        // First transition: running → waiting.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:05:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "first running→waiting should emit AgentWaiting"
+        );
+
+        // Worker resumes: waiting → running.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"waiting","to":"running","timestamp":"2026-02-26T10:06:00-08:00"}"#,
+        );
+        let notes = watcher.poll();
+        // running from waiting is not a spawn (only creating/starting → running triggers spawn).
+        assert!(
+            notes.iter().all(|n| !matches!(n, SwarmNotification::AgentSpawned { .. })),
+            "waiting→running should NOT emit AgentSpawned"
+        );
+
+        // Worker goes waiting again: running → waiting.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"running","to":"waiting","timestamp":"2026-02-26T10:10:00-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let waiting: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentWaiting { .. }))
+            .collect();
+        assert_eq!(
+            waiting.len(),
+            1,
+            "second running→waiting should also emit AgentWaiting"
+        );
+    }
+
+    #[test]
+    fn test_pr_already_set_at_init_no_pr_opened() {
+        // Worker already has a pr_url when the daemon starts AND the PR was
+        // already notified (persisted in pr_notified.json). PrOpened should NOT
+        // be emitted on the init poll or any subsequent poll.
+        let mut file = NamedTempFile::new().unwrap();
+        let hive_dir = tempfile::tempdir().unwrap();
+
+        // Pre-populate pr_notified.json — simulates a previous daemon run that
+        // already sent the notification.
+        let notified_path = hive_dir.path().join("pr_notified.json");
+        std::fs::write(
+            &notified_path,
+            r#"["https://github.com/ApiariTools/hive/pull/50"]"#,
+        )
+        .unwrap();
+
+        write_state(
+            &mut file,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/already-pr","agent":{"pane_id":"%1"},"created_at":"2026-02-22T10:00:00-08:00","pr":{"url":"https://github.com/ApiariTools/hive/pull/50","title":"Already notified PR"}}]}"#,
+        );
+
+        let mut watcher = SwarmWatcher::new(file.path().to_path_buf());
+        watcher.set_hive_dir(hive_dir.path().to_path_buf());
+
+        // First poll — initialization.
+        let notes = watcher.poll();
+        assert!(
+            notes.is_empty(),
+            "first poll should not emit any notifications"
+        );
+
+        // Second poll — the PR was already notified, so no PrOpened.
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(
+            pr_notes.is_empty(),
+            "PrOpened should NOT be emitted when PR was already notified"
+        );
+
+        // Third poll — still no PrOpened.
+        let notes = watcher.poll();
+        let pr_notes: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::PrOpened { .. }))
+            .collect();
+        assert!(
+            pr_notes.is_empty(),
+            "PrOpened should remain suppressed on subsequent polls"
+        );
+    }
+
+    #[test]
+    fn test_multiple_workers_appear_simultaneously() {
+        // Two new workers appear in the same poll cycle via events.jsonl.
+        // Both should get AgentSpawned notifications.
+        let (mut watcher, dir) = setup_event_watcher(
+            r#"{"worktrees":[
+                {"id":"w1","branch":"swarm/task-a","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Task A"},
+                {"id":"w2","branch":"swarm/task-b","agent":{"pane_id":"%2"},"created_at":"2026-02-26T10:00:00-08:00","summary":"Task B"}
+            ]}"#,
+        );
+
+        // Both workers transition to running in the same poll cycle.
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w1","from":"creating","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+        append_event(
+            &dir,
+            r#"{"event":"phase_changed","worktree":"w2","from":"creating","to":"running","timestamp":"2026-02-26T10:00:05-08:00"}"#,
+        );
+
+        let notes = watcher.poll();
+        let spawned: Vec<_> = notes
+            .iter()
+            .filter(|n| matches!(n, SwarmNotification::AgentSpawned { .. }))
+            .collect();
+        assert_eq!(
+            spawned.len(),
+            2,
+            "two simultaneous workers should produce two AgentSpawned notifications"
+        );
+
+        let ids: std::collections::HashSet<&str> =
+            spawned.iter().map(|n| n.worktree_id()).collect();
+        assert!(ids.contains("w1"), "w1 should have AgentSpawned");
+        assert!(ids.contains("w2"), "w2 should have AgentSpawned");
+    }
 }
