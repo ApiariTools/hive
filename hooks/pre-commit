@@ -1,14 +1,26 @@
 #!/usr/bin/env bash
 set -e
 
+# Resolve the workspace Cargo.toml. In a git worktree the local Cargo.toml
+# uses `edition.workspace = true` which requires the workspace root manifest.
+# We find it by locating the main worktree's parent directory.
+MANIFEST=""
+MAIN_WT="$(dirname "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null)"
+if [ -n "$MAIN_WT" ]; then
+  WS_DIR="$(dirname "$MAIN_WT")"
+  if [ -f "$WS_DIR/Cargo.toml" ]; then
+    MANIFEST="--manifest-path $WS_DIR/Cargo.toml"
+  fi
+fi
+
 echo "[hook] Running cargo fmt check..."
-cargo fmt -p hive --check || {
+cargo fmt $MANIFEST -p hive --check || {
   echo "[hook] Formatting issues found. Run: cargo fmt -p hive"
   exit 1
 }
 
 echo "[hook] Running cargo clippy..."
-cargo clippy -p hive -- -D warnings || {
+cargo clippy $MANIFEST -p hive -- -D warnings || {
   echo "[hook] Clippy errors found."
   exit 1
 }
