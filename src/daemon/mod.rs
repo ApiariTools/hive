@@ -1107,7 +1107,7 @@ impl DaemonRunner {
                 args,
                 ..
             } => {
-                eprintln!("[daemon] Command from {user_name}: /{command} {args}");
+                eprintln!("[daemon] Command from {user_name} (chat={chat_id}): /{command} {args}");
                 self.handle_command(chat_id, &command, &args).await
             }
             ChannelEvent::Message {
