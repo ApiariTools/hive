@@ -59,7 +59,11 @@ enum Command {
     },
 
     /// Show workspace and quest status.
-    Status,
+    Status {
+        /// Output machine-readable JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Initialize a new workspace.
     Init,
@@ -167,7 +171,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Init => cmd_init(&cwd),
-        Command::Status => cmd_status(&cwd),
+        Command::Status { json } => cmd_status(&cwd, json),
         Command::Chat => cmd_chat(&cwd).await,
         Command::Plan { description } => cmd_plan(&cwd, &description).await,
         Command::Start { quest_id } => cmd_start(&cwd, quest_id.as_deref()).await,
@@ -227,8 +231,48 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+// ── JSON output types for `hive status --json` ────────────
+
+#[derive(serde::Serialize)]
+struct StatusOutput {
+    workers: Vec<WorkerJson>,
+}
+
+#[derive(serde::Serialize)]
+struct WorkerJson {
+    id: String,
+    branch: String,
+    agent_kind: String,
+    agent_session_status: Option<String>,
+    pr_url: Option<String>,
+    pr_title: Option<String>,
+    created_at: Option<String>,
+    phase: Option<String>,
+}
+
 /// Show workspace and quest status.
-fn cmd_status(cwd: &Path) -> Result<()> {
+fn cmd_status(cwd: &Path, json: bool) -> Result<()> {
+    if json {
+        let sessions = keeper::discovery::discover_sessions()?;
+        let workers: Vec<WorkerJson> = sessions
+            .into_iter()
+            .flat_map(|s| s.worktrees)
+            .map(|wt| WorkerJson {
+                id: wt.id,
+                branch: wt.branch,
+                agent_kind: wt.agent_kind,
+                agent_session_status: wt.agent_session_status,
+                pr_url: wt.pr.as_ref().map(|p| p.url.clone()),
+                pr_title: wt.pr.as_ref().map(|p| p.title.clone()),
+                created_at: wt.created_at.map(|dt| dt.to_rfc3339()),
+                phase: wt.phase,
+            })
+            .collect();
+        let output = StatusOutput { workers };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
     let workspace = load_workspace(cwd)?;
     let store = QuestStore::new(default_store_path(&workspace.root));
 
