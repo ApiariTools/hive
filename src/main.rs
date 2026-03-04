@@ -60,7 +60,11 @@ enum Command {
     },
 
     /// Show workspace and quest status.
-    Status,
+    Status {
+        /// Output status as JSON for machine consumption.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Initialize a new workspace.
     Init,
@@ -210,7 +214,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Init => cmd_init(&cwd),
-        Command::Status => cmd_status(&cwd),
+        Command::Status { json } => cmd_status(&cwd, json),
         Command::Chat => cmd_chat(&cwd).await,
         Command::Plan { description } => cmd_plan(&cwd, &description).await,
         Command::Start { quest_id } => cmd_start(&cwd, quest_id.as_deref()).await,
@@ -293,8 +297,67 @@ fn cmd_init(cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+// ── JSON output types for `hive status --json` ───────────
+
+#[derive(serde::Serialize)]
+struct StatusOutput {
+    workers: Vec<WorkerOutput>,
+}
+
+#[derive(serde::Serialize)]
+struct WorkerOutput {
+    id: String,
+    branch: String,
+    agent_kind: String,
+    #[serde(default)]
+    agent_session_status: Option<String>,
+    #[serde(default)]
+    pr: Option<PrOutput>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    phase: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct PrOutput {
+    url: String,
+    title: String,
+    number: u64,
+    state: String,
+}
+
 /// Show workspace and quest status.
-fn cmd_status(cwd: &Path) -> Result<()> {
+fn cmd_status(cwd: &Path, json: bool) -> Result<()> {
+    if json {
+        let sessions = keeper::discovery::discover_sessions().unwrap_or_default();
+
+        let workers: Vec<WorkerOutput> = sessions
+            .into_iter()
+            .flat_map(|s| s.worktrees)
+            .map(|wt| WorkerOutput {
+                id: wt.id,
+                branch: wt.branch,
+                agent_kind: wt.agent_kind,
+                agent_session_status: wt.agent_session_status,
+                pr: wt.pr.map(|p| PrOutput {
+                    url: p.url,
+                    title: p.title,
+                    number: p.number,
+                    state: p.state,
+                }),
+                summary: wt.summary,
+                phase: wt.phase,
+            })
+            .collect();
+
+        let output = StatusOutput { workers };
+        let json_str =
+            serde_json::to_string_pretty(&output).wrap_err("serializing status JSON")?;
+        println!("{json_str}");
+        return Ok(());
+    }
+
     let workspace = load_workspace(cwd)?;
     let store = QuestStore::new(default_store_path(&workspace.root));
 
