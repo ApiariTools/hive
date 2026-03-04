@@ -924,8 +924,8 @@ impl SwarmWatcher {
                 continue;
             }
 
-            // claude-tui agents sit idle waiting for user input — not a stall.
-            if tracked.agent_kind.as_deref() == Some("claude-tui") {
+            // Claude agents sit idle waiting for user input — not a stall.
+            if matches!(tracked.agent_kind.as_deref(), Some("claude" | "claude-tui")) {
                 continue;
             }
 
@@ -1198,7 +1198,7 @@ mod tests {
     #[test]
     fn test_stall_notification_not_repeated() {
         let (mut watcher, dir) = setup_event_watcher(
-            r#"{"worktrees":[{"id":"w1","branch":"swarm/stuck","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","agent_kind":"claude"}]}"#,
+            r#"{"worktrees":[{"id":"w1","branch":"swarm/stuck","agent":{"pane_id":"%1"},"created_at":"2026-02-26T10:00:00-08:00","agent_kind":"codex"}]}"#,
         );
         watcher.set_stall_timeout(1); // 1 second — triggers immediately
 
