@@ -11,6 +11,7 @@ mod doctor;
 #[allow(dead_code)]
 mod github;
 mod keeper;
+mod pipeline;
 mod presence;
 mod quest;
 mod reminder;
@@ -118,6 +119,48 @@ enum Command {
         message: Vec<String>,
     },
 
+    /// Run the task pipeline: refine → context → plan → dispatch to swarm.
+    Dispatch {
+        /// Raw task description.
+        description: String,
+        /// Target repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Stop after a specific stage (refine, context, plan).
+        #[arg(long)]
+        until: Option<String>,
+        /// Profile slug for the agent.
+        #[arg(long, default_value = "default")]
+        profile: String,
+        /// Print artifacts without dispatching.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Verify a worktree against its task's acceptance criteria.
+    Verify {
+        /// Worktree ID to verify.
+        worktree_id: String,
+    },
+
+    /// Identify relevant codebase context for a task (CONTEXT.md).
+    Context {
+        /// Path to TASK.md file, or raw task description.
+        input: String,
+        /// Write output to a file instead of stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+
+    /// Refine a raw prompt into a structured task specification (TASK.md).
+    Refine {
+        /// Raw task description.
+        description: String,
+        /// Write output to a file instead of stdout.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+
     /// Run diagnostic checks on workspace, daemon, and tooling health.
     Doctor {
         /// Automatically fix issues that can be resolved safely.
@@ -208,6 +251,29 @@ async fn main() -> Result<()> {
             cron.as_deref(),
             &message.join(" "),
         ),
+        Command::Verify { worktree_id } => cmd_verify(&cwd, &worktree_id).await,
+        Command::Dispatch {
+            description,
+            repo,
+            until,
+            profile,
+            dry_run,
+        } => {
+            cmd_dispatch(
+                &cwd,
+                &description,
+                repo.as_deref(),
+                until.as_deref(),
+                &profile,
+                dry_run,
+            )
+            .await
+        }
+        Command::Context { input, output } => cmd_context(&cwd, &input, output.as_deref()).await,
+        Command::Refine {
+            description,
+            output,
+        } => cmd_refine(&cwd, &description, output.as_deref()).await,
         Command::Doctor { fix } => doctor::run(&cwd, fix),
         Command::Reminders { action } => match action {
             None => cmd_list_reminders(&cwd),
@@ -369,6 +435,161 @@ fn cmd_list_reminders(cwd: &Path) -> Result<()> {
     let active = store.active();
     eprintln!("[reminder] Listed {} active reminder(s)", active.len());
     println!("{}", reminder::format_reminder_list(&active));
+
+    Ok(())
+}
+
+/// Verify a worktree against its TASK.md acceptance criteria.
+async fn cmd_verify(cwd: &Path, worktree_id: &str) -> Result<()> {
+    let worktree_path = pipeline::verify::resolve_worktree_path(cwd, worktree_id)?;
+
+    eprintln!(
+        "[verify] Verifying worktree {} at {}",
+        worktree_id,
+        worktree_path.display()
+    );
+
+    let result = pipeline::verify::verify(&worktree_path).await?;
+
+    for c in &result.criteria {
+        let status = if c.passed { "PASS" } else { "FAIL" };
+        println!("[{status}] {}", c.criterion);
+        if !c.evidence.is_empty() {
+            println!("       {}", c.evidence);
+        }
+    }
+
+    println!();
+    if result.passed {
+        println!("Result: ALL CRITERIA PASSED");
+    } else {
+        let failed = result.criteria.iter().filter(|c| !c.passed).count();
+        println!(
+            "Result: {} of {} criteria FAILED",
+            failed,
+            result.criteria.len()
+        );
+    }
+
+    if !result.summary.is_empty() {
+        println!("\nSummary: {}", result.summary);
+    }
+
+    Ok(())
+}
+
+/// Run the full task pipeline.
+async fn cmd_dispatch(
+    cwd: &Path,
+    description: &str,
+    repo: Option<&str>,
+    until: Option<&str>,
+    profile: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let workspace = load_workspace(cwd)?;
+
+    let until_stage = if let Some(s) = until {
+        Some(pipeline::PipelineStage::from_str(s).ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "unknown pipeline stage: {s:?} (options: refine, context, plan)"
+            )
+        })?)
+    } else {
+        None
+    };
+
+    let result = pipeline::run_pipeline(pipeline::PipelineOptions {
+        raw_prompt: description,
+        workspace_root: &workspace.root,
+        conventions: workspace.conventions.as_deref(),
+        repo,
+        profile,
+        until: until_stage,
+        dry_run,
+    })
+    .await?;
+
+    eprintln!(
+        "[dispatch] Pipeline completed at stage: {}",
+        result.stage_reached
+    );
+
+    // Print artifacts if dry-run or stopped early
+    if dry_run || result.worktree_id.is_none() {
+        println!("--- TASK.md ---");
+        println!("{}", result.task_md);
+        if let Some(ctx) = &result.context_md {
+            println!("\n--- CONTEXT.md ---");
+            println!("{ctx}");
+        }
+        if let Some(plan) = &result.plan_md {
+            println!("\n--- PLAN.md ---");
+            println!("{plan}");
+        }
+    }
+
+    if let Some(wt_id) = &result.worktree_id {
+        println!("{wt_id}");
+    }
+
+    Ok(())
+}
+
+/// Identify relevant codebase context for a task.
+async fn cmd_context(cwd: &Path, input: &str, output: Option<&Path>) -> Result<()> {
+    // If input looks like a file path, read it; otherwise treat as raw description
+    let task_md = if Path::new(input).is_file() {
+        std::fs::read_to_string(input)?
+    } else {
+        input.to_string()
+    };
+
+    let workspace = load_workspace(cwd).ok();
+    let repo_path = workspace.as_ref().map(|w| w.root.as_path());
+
+    eprintln!("[context] Identifying context...");
+    let result = pipeline::context::identify_context(&task_md, repo_path).await?;
+    eprintln!(
+        "[context] Found {} relevant files",
+        result.relevant_files.len()
+    );
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &result.context_md)?;
+            eprintln!("[context] Written to {}", path.display());
+        }
+        None => {
+            println!("{}", result.context_md);
+        }
+    }
+
+    Ok(())
+}
+
+/// Refine a raw prompt into a structured TASK.md.
+async fn cmd_refine(cwd: &Path, description: &str, output: Option<&Path>) -> Result<()> {
+    let workspace = load_workspace(cwd).ok();
+    let conventions = workspace.as_ref().and_then(|w| w.conventions.as_deref());
+
+    eprintln!("[refine] Refining: {description:?}");
+    let result = pipeline::refine::refine(description, conventions).await?;
+    eprintln!("[refine] Title: {}", result.title);
+    eprintln!(
+        "[refine] Acceptance criteria: {}",
+        result.acceptance_criteria.len()
+    );
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &result.task_md)?;
+            eprintln!("[refine] Written to {}", path.display());
+        }
+        None => {
+            println!("{}", result.task_md);
+        }
+    }
 
     Ok(())
 }

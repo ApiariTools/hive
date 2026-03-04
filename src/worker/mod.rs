@@ -6,6 +6,7 @@
 use crate::quest::Task;
 use color_eyre::eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Status reported by a worker.
 #[allow(dead_code)]
@@ -151,6 +152,74 @@ impl Worker {
         }
 
         Ok(())
+    }
+
+    /// Dispatch a pipeline task to swarm with artifacts.
+    ///
+    /// Writes the prompt to a temp file (`--prompt-file`) and artifacts to a
+    /// temp JSON file (`--task-dir`), then calls `swarm create`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_pipeline_task(
+        &self,
+        workspace_root: &Path,
+        prompt: &str,
+        repo: Option<&str>,
+        profile: &str,
+        task_md: &str,
+        context_md: Option<&str>,
+        plan_md: Option<&str>,
+    ) -> Result<String> {
+        use std::io::Write as _;
+
+        // Write prompt to temp file
+        let mut prompt_file =
+            tempfile::NamedTempFile::new().wrap_err("failed to create temp prompt file")?;
+        prompt_file
+            .write_all(prompt.as_bytes())
+            .wrap_err("failed to write prompt file")?;
+
+        // Write task-dir payload to temp JSON file
+        let payload = serde_json::json!({
+            "task_md": task_md,
+            "context_md": context_md,
+            "plan_md": plan_md,
+        });
+        let mut task_dir_file =
+            tempfile::NamedTempFile::new().wrap_err("failed to create temp task-dir file")?;
+        task_dir_file
+            .write_all(payload.to_string().as_bytes())
+            .wrap_err("failed to write task-dir file")?;
+
+        let mut args = vec![
+            "--dir".to_string(),
+            workspace_root.to_string_lossy().to_string(),
+            "create".to_string(),
+            "--prompt-file".to_string(),
+            prompt_file.path().to_string_lossy().to_string(),
+            "--profile".to_string(),
+            profile.to_string(),
+            "--task-dir".to_string(),
+            task_dir_file.path().to_string_lossy().to_string(),
+        ];
+
+        if let Some(repo) = repo {
+            args.push("--repo".to_string());
+            args.push(repo.to_string());
+        }
+
+        let output = tokio::process::Command::new(&self.swarm_bin)
+            .args(&args)
+            .output()
+            .await
+            .wrap_err("failed to run swarm create")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            color_eyre::eyre::bail!("swarm create failed: {stderr}");
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.trim().to_owned())
     }
 
     /// Merge a worker's changes via `swarm merge`.
@@ -386,6 +455,73 @@ mod tests {
         let worker = Worker::with_swarm_bin("echo");
         let result = worker.merge_worker("wt-77").await;
         assert!(result.is_ok());
+    }
+
+    // ---- dispatch_pipeline_task ----
+
+    #[tokio::test]
+    async fn dispatch_pipeline_task_constructs_args() {
+        // `echo` prints all args, including --dir, create, --prompt-file, etc.
+        let worker = Worker::with_swarm_bin("echo");
+        let result = worker
+            .dispatch_pipeline_task(
+                Path::new("/tmp/workspace"),
+                "Do the thing",
+                Some("hive"),
+                "default",
+                "# Task\nDo stuff",
+                Some("# Context\nFiles here"),
+                None,
+            )
+            .await
+            .unwrap();
+        // echo outputs all the args; verify key flags are present
+        assert!(result.contains("--dir"));
+        assert!(result.contains("create"));
+        assert!(result.contains("--prompt-file"));
+        assert!(result.contains("--profile"));
+        assert!(result.contains("default"));
+        assert!(result.contains("--task-dir"));
+        assert!(result.contains("--repo"));
+        assert!(result.contains("hive"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_pipeline_task_no_repo() {
+        let worker = Worker::with_swarm_bin("echo");
+        let result = worker
+            .dispatch_pipeline_task(
+                Path::new("/tmp/workspace"),
+                "Do the thing",
+                None,
+                "strict",
+                "# Task",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.contains("--profile"));
+        assert!(result.contains("strict"));
+        // No --repo flag when repo is None
+        assert!(!result.contains("--repo"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_pipeline_task_error_on_bad_binary() {
+        let worker = Worker::with_swarm_bin("/nonexistent/binary");
+        let result = worker
+            .dispatch_pipeline_task(
+                Path::new("/tmp"),
+                "test",
+                None,
+                "default",
+                "# Task",
+                None,
+                None,
+            )
+            .await;
+        assert!(result.is_err());
     }
 
     // ---- spawn_worker prompt edge cases ----
