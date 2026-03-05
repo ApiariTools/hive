@@ -11,6 +11,8 @@ pub mod plan;
 pub mod refine;
 pub mod verify;
 
+use tracing::info;
+
 use crate::worker::Worker;
 use color_eyre::eyre::Result;
 use std::path::Path;
@@ -82,9 +84,9 @@ pub struct PipelineResult {
 /// Stops early if `until` is set or `dry_run` is true.
 pub async fn run_pipeline(opts: PipelineOptions<'_>) -> Result<PipelineResult> {
     // Stage 1: Refine
-    eprintln!("[pipeline] Stage 1/4: Refine");
+    info!("Stage 1/4: Refine");
     let refined = refine::refine(opts.raw_prompt, opts.conventions).await?;
-    eprintln!("[pipeline] Refined: \"{}\"", refined.title);
+    info!("Refined: \"{}\"", refined.title);
 
     if opts.until == Some(PipelineStage::Refined) {
         return Ok(PipelineResult {
@@ -97,10 +99,10 @@ pub async fn run_pipeline(opts: PipelineOptions<'_>) -> Result<PipelineResult> {
     }
 
     // Stage 2: Context
-    eprintln!("[pipeline] Stage 2/4: Context");
+    info!("Stage 2/4: Context");
     let ctx = context::identify_context(&refined.task_md, Some(opts.workspace_root)).await?;
-    eprintln!(
-        "[pipeline] Context: {} relevant files",
+    info!(
+        "Context: {} relevant files",
         ctx.relevant_files.len()
     );
 
@@ -115,9 +117,9 @@ pub async fn run_pipeline(opts: PipelineOptions<'_>) -> Result<PipelineResult> {
     }
 
     // Stage 3: Plan
-    eprintln!("[pipeline] Stage 3/4: Plan");
+    info!("Stage 3/4: Plan");
     let planned = plan::create_plan(&refined.task_md, &ctx.context_md).await?;
-    eprintln!("[pipeline] Plan: {} steps", planned.steps.len());
+    info!("Plan: {} steps", planned.steps.len());
 
     if opts.until == Some(PipelineStage::Planned) || opts.dry_run {
         return Ok(PipelineResult {
@@ -130,7 +132,7 @@ pub async fn run_pipeline(opts: PipelineOptions<'_>) -> Result<PipelineResult> {
     }
 
     // Stage 4: Dispatch
-    eprintln!("[pipeline] Stage 4/4: Dispatch");
+    info!("Stage 4/4: Dispatch");
     let prompt = dispatch::build_dispatch_prompt(&refined.title);
     let worker = Worker::new();
     let worktree_id = worker
@@ -145,7 +147,7 @@ pub async fn run_pipeline(opts: PipelineOptions<'_>) -> Result<PipelineResult> {
         )
         .await?;
 
-    eprintln!("[pipeline] Dispatched: {worktree_id}");
+    info!("Dispatched: {worktree_id}");
 
     Ok(PipelineResult {
         task_md: refined.task_md,

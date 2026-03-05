@@ -7,6 +7,7 @@ use crate::buzz::config::BuzzConfig;
 use color_eyre::eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 // ── Global Workspace Registry ────────────────────────────
 
@@ -193,7 +194,7 @@ pub fn load_workspace(start_dir: &Path) -> Result<Workspace> {
                     Ok(ws) => return Ok(ws),
                     Err(e) => {
                         // Not a valid hive workspace config — skip and try next candidate.
-                        eprintln!("Skipping {}: {e:#}", path.display());
+                        warn!("Skipping {}: {e:#}", path.display());
                     }
                 }
             }
@@ -205,7 +206,7 @@ pub fn load_workspace(start_dir: &Path) -> Result<Workspace> {
     }
 
     // No config found; return a default workspace rooted at start_dir.
-    eprintln!(
+    info!(
         "No workspace config found; using defaults (root: {})",
         start_dir.display()
     );
@@ -245,7 +246,7 @@ pub fn init_workspace(dir: &Path) -> Result<PathBuf> {
 
     let config_path = hive_dir.join("workspace.yaml");
     if config_path.exists() {
-        eprintln!("Workspace config already exists: {}", config_path.display());
+        info!("Workspace config already exists: {}", config_path.display());
         return Ok(config_path);
     }
 

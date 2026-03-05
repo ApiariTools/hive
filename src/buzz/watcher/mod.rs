@@ -17,6 +17,7 @@ use apiari_common::state::{load_state, save_state};
 use async_trait::async_trait;
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error};
 
 use super::config::BuzzConfig;
 
@@ -101,15 +102,15 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
     let state: WatcherState = match load_state(&state_path) {
         Ok(state) => state,
         Err(e) => {
-            eprintln!("[buzz] failed to load watcher state: {e}");
+            error!("failed to load watcher state: {e}");
             WatcherState::default()
         }
     };
 
     for watcher in watchers.iter_mut() {
         if let Some(cursor) = state.cursors.get(watcher.name()) {
-            eprintln!(
-                "[buzz] restored cursor for '{}': {}",
+            debug!(
+                "restored cursor for '{}': {}",
                 watcher.name(),
                 cursor
             );
@@ -121,8 +122,8 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
     if !state.seen_issues.is_empty()
         && let Some(sentry_watcher) = find_sentry_watcher_mut(watchers)
     {
-        eprintln!(
-            "[buzz] restored {} seen issue(s) for sweep",
+        debug!(
+            "restored {} seen issue(s) for sweep",
             state.seen_issues.len()
         );
         sentry_watcher.restore_seen_issues(state.seen_issues);
@@ -132,8 +133,8 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
     if !state.seen_github.is_empty()
         && let Some(github_watcher) = find_github_watcher_mut(watchers)
     {
-        eprintln!(
-            "[buzz] restored {} seen github signal(s)",
+        debug!(
+            "restored {} seen github signal(s)",
             state.seen_github.len()
         );
         github_watcher.restore_seen(state.seen_github);
@@ -162,7 +163,7 @@ pub fn save_cursors(watchers: &[Box<dyn Watcher>], base: &Path) {
 
     let state_path = base.join(STATE_REL);
     if let Err(e) = save_state(&state_path, &state) {
-        eprintln!("[buzz] failed to save watcher state: {e}");
+        error!("failed to save watcher state: {e}");
     }
 }
 

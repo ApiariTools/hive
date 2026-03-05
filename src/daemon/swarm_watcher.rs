@@ -14,6 +14,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracing::info;
 
 /// CI check status for a PR.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -708,10 +709,7 @@ impl SwarmWatcher {
         self.events_reader = Some(reader);
 
         if !self.known.is_empty() {
-            eprintln!(
-                "[swarm-watcher] Initialized with {} worktree(s)",
-                self.known.len()
-            );
+            info!("Initialized with {} worktree(s)", self.known.len());
         }
     }
 

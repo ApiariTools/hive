@@ -12,6 +12,7 @@ pub mod watcher;
 use std::path::Path;
 
 use color_eyre::Result;
+use tracing::{debug, error, info};
 use tokio::time::{Duration, sleep};
 
 use self::config::BuzzConfig;
@@ -67,8 +68,8 @@ pub async fn run(
     } else {
         // Daemon mode — poll on interval.
         let interval = Duration::from_secs(config.poll_interval_secs);
-        eprintln!(
-            "[buzz] daemon mode — polling every {}s with {} watcher(s)",
+        info!(
+            "daemon mode — polling every {}s with {} watcher(s)",
             config.poll_interval_secs,
             watchers.len()
         );
@@ -96,15 +97,15 @@ async fn run_sweep(
         }
         match watcher.sweep().await {
             Ok(signals) => {
-                eprintln!(
-                    "[buzz] {} sweep returned {} signal(s)",
+                debug!(
+                    "{} sweep returned {} signal(s)",
                     watcher.name(),
                     signals.len()
                 );
                 all_signals.extend(signals);
             }
             Err(e) => {
-                eprintln!("[buzz] {} sweep error: {e}", watcher.name());
+                error!("{} sweep error: {e}", watcher.name());
             }
         }
     }
@@ -135,15 +136,15 @@ async fn run_once(
     for watcher in watchers.iter_mut() {
         match watcher.poll().await {
             Ok(signals) => {
-                eprintln!(
-                    "[buzz] {} returned {} signal(s)",
+                debug!(
+                    "{} returned {} signal(s)",
                     watcher.name(),
                     signals.len()
                 );
                 all_signals.extend(signals);
             }
             Err(e) => {
-                eprintln!("[buzz] {} error: {e}", watcher.name());
+                error!("{} error: {e}", watcher.name());
             }
         }
     }
@@ -151,7 +152,7 @@ async fn run_once(
     // Check reminders.
     let reminder_signals = reminder::check_reminders(reminders);
     if !reminder_signals.is_empty() {
-        eprintln!("[buzz] {} reminder(s) fired", reminder_signals.len());
+        info!("{} reminder(s) fired", reminder_signals.len());
         all_signals.extend(reminder_signals);
     }
 

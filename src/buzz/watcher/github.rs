@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use crate::signal::{Severity, Signal};
 use async_trait::async_trait;
 use color_eyre::Result;
+use tracing::{error, warn};
 
 use super::Watcher;
 use crate::buzz::config::GithubConfig;
@@ -71,7 +72,7 @@ impl GithubWatcher {
         match which_result {
             Ok(output) if output.status.success() => {}
             _ => {
-                eprintln!("[github] `gh` CLI is not installed or not on PATH");
+                warn!("`gh` CLI is not installed or not on PATH");
                 self.gh_available = Some(false);
                 return false;
             }
@@ -87,12 +88,12 @@ impl GithubWatcher {
             Ok(output) if output.status.success() => {}
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("[github] `gh` is not authenticated: {}", stderr.trim());
+                warn!("`gh` is not authenticated: {}", stderr.trim());
                 self.gh_available = Some(false);
                 return false;
             }
             Err(e) => {
-                eprintln!("[github] failed to check `gh auth status`: {e}");
+                error!("failed to check `gh auth status`: {e}");
                 self.gh_available = Some(false);
                 return false;
             }
@@ -109,7 +110,7 @@ impl GithubWatcher {
                 self.username = Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
             }
             _ => {
-                eprintln!("[github] could not resolve username, some queries may be skipped");
+                warn!("could not resolve username, some queries may be skipped");
             }
         }
 
@@ -126,14 +127,14 @@ impl GithubWatcher {
         {
             Ok(output) => output,
             Err(e) => {
-                eprintln!("[github] failed to run `gh api {endpoint}`: {e}");
+                error!("failed to run `gh api {endpoint}`: {e}");
                 return None;
             }
         };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("[github] `gh api {endpoint}` failed: {}", stderr.trim());
+            error!("`gh api {endpoint}` failed: {}", stderr.trim());
             return None;
         }
 
@@ -141,7 +142,7 @@ impl GithubWatcher {
         match serde_json::from_str::<serde_json::Value>(&body) {
             Ok(value) => Some(value),
             Err(e) => {
-                eprintln!("[github] failed to parse JSON from `gh api {endpoint}`: {e}");
+                error!("failed to parse JSON from `gh api {endpoint}`: {e}");
                 None
             }
         }

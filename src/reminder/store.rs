@@ -8,6 +8,7 @@ use chrono::Utc;
 use croner::Cron;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::{debug, info};
 
 /// Errors returned by [`ReminderStore::cancel`].
 #[derive(Debug)]
@@ -156,16 +157,16 @@ impl ReminderStore {
                         match advance_cron(expr, &now) {
                             Some(next) => {
                                 r.fire_at = Some(next);
-                                eprintln!(
-                                    "[reminder] Cron reminder {} advanced to {}",
+                                debug!(
+                                    "Cron reminder {} advanced to {}",
                                     &r.id[..8.min(r.id.len())],
                                     next.format("%Y-%m-%d %H:%M UTC")
                                 );
                             }
                             None => {
                                 // Cron expression has no future occurrences — remove it.
-                                eprintln!(
-                                    "[reminder] Cron reminder {} has no future occurrences, removing",
+                                info!(
+                                    "Cron reminder {} has no future occurrences, removing",
                                     &r.id[..8.min(r.id.len())]
                                 );
                                 to_remove.push(i);

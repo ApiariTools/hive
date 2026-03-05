@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, error, warn};
 
 use super::Watcher;
 
@@ -113,8 +114,8 @@ impl SentryWatcher {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unreadable>".to_string());
-            eprintln!(
-                "[sentry] API returned {status} for {org}/{project}: {body}",
+            warn!(
+                "API returned {status} for {org}/{project}: {body}",
                 org = self.config.org,
                 project = self.config.project,
             );
@@ -153,8 +154,8 @@ impl SentryWatcher {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unreadable>".to_string());
-            eprintln!(
-                "[sentry] sweep API returned {status} for {org}/{project}: {body}",
+            warn!(
+                "sweep API returned {status} for {org}/{project}: {body}",
                 org = self.config.org,
                 project = self.config.project,
             );
@@ -267,8 +268,8 @@ impl Watcher for SentryWatcher {
         let issues = match self.fetch_issues().await {
             Ok(issues) => issues,
             Err(e) => {
-                eprintln!(
-                    "[sentry] failed to fetch issues for {org}/{project}: {e}",
+                error!(
+                    "failed to fetch issues for {org}/{project}: {e}",
                     org = self.config.org,
                     project = self.config.project,
                 );
@@ -341,8 +342,8 @@ impl Watcher for SentryWatcher {
         let issues = match self.fetch_all_issues(sweep_config.max_issues).await {
             Ok(issues) => issues,
             Err(e) => {
-                eprintln!(
-                    "[sentry] sweep failed for {org}/{project}: {e}",
+                error!(
+                    "sweep failed for {org}/{project}: {e}",
                     org = self.config.org,
                     project = self.config.project,
                 );
@@ -396,8 +397,8 @@ impl Watcher for SentryWatcher {
             self.record_seen(id, level, event_count);
         }
 
-        eprintln!(
-            "[sentry] sweep found {} issue(s) to re-triage out of {} total",
+        debug!(
+            "sweep found {} issue(s) to re-triage out of {} total",
             signals.len(),
             issues.len()
         );

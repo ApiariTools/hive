@@ -10,6 +10,7 @@ use crate::signal::Signal;
 use async_trait::async_trait;
 use color_eyre::Result;
 use std::sync::{Arc, Mutex};
+use tracing::{debug, error, info};
 
 use super::Watcher;
 use crate::buzz::config::WebhookConfig;
@@ -45,11 +46,11 @@ impl WebhookWatcher {
 
         tokio::spawn(async move {
             if let Err(e) = run_server(port, buffer).await {
-                eprintln!("[webhook] server error: {e}");
+                error!("server error: {e}");
             }
         });
 
-        eprintln!("[webhook] HTTP server started on 0.0.0.0:{port}");
+        info!("HTTP server started on 0.0.0.0:{port}");
     }
 }
 
@@ -100,7 +101,7 @@ async fn run_server(port: u16, buffer: Arc<Mutex<Vec<Signal>>>) -> Result<()> {
             });
 
             if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                eprintln!("[webhook] connection error: {e}");
+                error!("connection error: {e}");
             }
         });
     }
@@ -131,8 +132,8 @@ async fn handle_request(
 
             match serde_json::from_slice::<Signal>(&body) {
                 Ok(signal) => {
-                    eprintln!(
-                        "[webhook] received signal: {} ({})",
+                    debug!(
+                        "received signal: {} ({})",
                         signal.title, signal.severity
                     );
                     buffer.lock().unwrap().push(signal);
