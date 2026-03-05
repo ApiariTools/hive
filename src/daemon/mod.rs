@@ -112,19 +112,20 @@ pub async fn start(foreground: bool) -> Result<()> {
         return spawn_background();
     }
 
+    // Init file logging FIRST, before writing PID or any tracing calls.
+    // _log_guard must stay alive — dropping it loses buffered log lines.
+    let _log_guard = crate::logging::init_file(&log_path());
+
     // Foreground mode — write PID and run inline.
     write_pid()?;
     let pid = std::process::id();
-    eprintln!("[daemon] Started (PID {pid})");
+    tracing::info!(pid, "Daemon started");
 
     // Discover workspaces from global registry.
     let workspace_configs = discover_daemon_workspaces()?;
-    eprintln!(
-        "[daemon] Discovered {} workspace(s) with daemon.toml",
-        workspace_configs.len()
-    );
+    tracing::info!(count = workspace_configs.len(), "Discovered workspaces");
     for (name, path, _config) in &workspace_configs {
-        eprintln!("[daemon]   - {name} ({})", path.display());
+        tracing::debug!(name, path = %path.display(), "Workspace");
     }
 
     let mut runner = DaemonRunner::new(workspace_configs)?;
@@ -132,39 +133,27 @@ pub async fn start(foreground: bool) -> Result<()> {
 
     // Clean up PID file before exit or restart.
     remove_pid();
-    eprintln!("[daemon] PID file removed");
+    tracing::info!("PID file removed");
 
     if restart {
         // Spawn a new daemon process (new PID, fresh logs).
-        eprintln!("[daemon] Spawning new daemon process...");
+        tracing::info!("Spawning new daemon process");
         spawn_background()?;
     }
 
     Ok(())
 }
 
-/// Spawn `hive daemon start --foreground` as a detached background process,
-/// with stdout/stderr redirected to `~/.config/hive/daemon.log`.
+/// Spawn `hive daemon start --foreground` as a detached background process.
+/// The foreground process initializes its own file logger via `logging::init_file`.
 fn spawn_background() -> Result<()> {
     let exe = std::env::current_exe().wrap_err("failed to find hive executable")?;
     let log = log_path();
 
-    // Ensure the log directory exists.
-    if let Some(parent) = log.parent() {
-        std::fs::create_dir_all(parent)
-            .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let log_file = std::fs::File::create(&log)
-        .wrap_err_with(|| format!("failed to create log file {}", log.display()))?;
-    let stderr_file = log_file
-        .try_clone()
-        .wrap_err("failed to clone log file handle")?;
-
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["daemon", "start", "--foreground"]);
-    cmd.stdout(log_file);
-    cmd.stderr(stderr_file);
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
     cmd.stdin(std::process::Stdio::null());
 
     // Detach from parent process group so it survives our exit.
@@ -188,13 +177,13 @@ pub fn stop() -> Result<()> {
     let pid = match read_pid() {
         Some(pid) => pid,
         None => {
-            eprintln!("daemon is not running (no PID file)");
+            tracing::warn!("Daemon is not running (no PID file)");
             return Ok(());
         }
     };
 
     if !is_process_alive(pid) {
-        eprintln!("daemon is not running (PID {pid} is stale), removing PID file");
+        tracing::warn!(pid, "Daemon is not running (stale PID), removing PID file");
         remove_pid();
         return Ok(());
     }
@@ -208,7 +197,7 @@ pub fn stop() -> Result<()> {
     for _ in 0..50 {
         if !is_process_alive(pid) {
             remove_pid();
-            eprintln!("daemon stopped (PID {pid})");
+            tracing::info!(pid, "Daemon stopped");
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -219,7 +208,7 @@ pub fn stop() -> Result<()> {
         .args(["-9", &pid.to_string()])
         .status();
     remove_pid();
-    eprintln!("daemon killed (PID {pid})");
+    tracing::warn!(pid, "Daemon killed (force)");
 
     Ok(())
 }
@@ -295,7 +284,7 @@ impl BuzzSlot {
         let ws = match load_workspace(workspace_root) {
             Ok(ws) => ws,
             Err(e) => {
-                eprintln!("[daemon] BuzzSlot '{name}': failed to load workspace: {e}");
+                tracing::error!(name, error = %e, "BuzzSlot failed to load workspace");
                 return None;
             }
         };
@@ -303,7 +292,7 @@ impl BuzzSlot {
         // Resolve buzz config: workspace.yaml buzz section first,
         // then legacy config_path fallback (home workspace only).
         let buzz_config = if let Some(buzz) = &ws.buzz {
-            eprintln!("[daemon] BuzzSlot '{name}': loaded buzz config from workspace.yaml");
+            tracing::info!(name, "BuzzSlot loaded buzz config from workspace.yaml");
             buzz.clone()
         } else if let Some(daemon_cfg) = daemon_buzz_config {
             // Legacy fallback: load from config_path in daemon.toml.
@@ -315,7 +304,7 @@ impl BuzzSlot {
             match BuzzConfig::load(&config_path) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    eprintln!("[daemon] BuzzSlot '{name}': failed to load legacy config: {e}");
+                    tracing::error!(name, error = %e, "BuzzSlot failed to load legacy config");
                     return None;
                 }
             }
@@ -325,7 +314,7 @@ impl BuzzSlot {
 
         let watchers = create_watchers(&buzz_config, workspace_root);
         if watchers.is_empty() && buzz_config.reminders.is_empty() {
-            eprintln!("[daemon] BuzzSlot '{name}': no watchers or reminders — skipping");
+            tracing::info!(name, "BuzzSlot has no watchers or reminders — skipping");
             return None;
         }
 
@@ -347,11 +336,12 @@ impl BuzzSlot {
         // Compute sweep schedule from watchers.
         let (next_sweep_at, sweep_cron_expr) = DaemonRunner::compute_sweep_schedule(&watchers);
 
-        eprintln!(
-            "[daemon] BuzzSlot '{name}': {} watcher(s), {} reminder(s), sweep={}",
-            watchers.len(),
-            reminders.len(),
-            if next_sweep_at.is_some() { "yes" } else { "no" },
+        tracing::info!(
+            name,
+            watchers = watchers.len(),
+            reminders = reminders.len(),
+            sweep = next_sweep_at.is_some(),
+            "BuzzSlot initialized",
         );
 
         Some(Self {
@@ -566,12 +556,12 @@ fn save_dispatch_state(workspace_root: &Path, d: &ActiveTuiDispatch) {
     match serde_json::to_string_pretty(&response) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
-                eprintln!("[daemon] Failed to save dispatch state: {e}");
+                tracing::error!(error = %e, "Failed to save dispatch state");
             } else {
-                eprintln!("[daemon] Dispatch state saved to {}", path.display());
+                tracing::debug!(path = %path.display(), "Dispatch state saved");
             }
         }
-        Err(e) => eprintln!("[daemon] Failed to serialize dispatch state: {e}"),
+        Err(e) => tracing::error!(error = %e, "Failed to serialize dispatch state"),
     }
 }
 
@@ -619,7 +609,7 @@ fn clear_dispatch_state(workspace_root: &Path) {
     let path = workspace_root.join(DISPATCH_STATE_FILE);
     if path.exists() {
         let _ = std::fs::remove_file(&path);
-        eprintln!("[daemon] Dispatch state cleared");
+        tracing::debug!("Dispatch state cleared");
     }
 }
 
@@ -788,7 +778,7 @@ impl DaemonRunner {
                 token_to_bot_idx.insert(token.clone(), idx);
             }
         }
-        eprintln!("[daemon] {} unique Telegram bot(s)", bots.len());
+        tracing::info!(count = bots.len(), "Telegram bots");
 
         // Phase 2: Build WorkspaceSlots.
         let mut workspaces: Vec<WorkspaceSlot> = Vec::new();
@@ -805,7 +795,7 @@ impl DaemonRunner {
                 match build_coordinator_prompt(&path, config.telegram.bot_username.as_deref()) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("[daemon] Failed to build coordinator prompt for '{name}': {e}");
+                        tracing::error!(name, error = %e, "Failed to build coordinator prompt");
                         continue;
                     }
                 };
@@ -819,17 +809,17 @@ impl DaemonRunner {
             let saved_offset = sessions.buzz_offset();
             if saved_offset > 0 {
                 buzz_reader.set_offset(saved_offset);
-                eprintln!("[daemon] [{name}] Restored buzz reader offset: {saved_offset}");
+                tracing::info!(name, saved_offset, "Restored buzz reader offset");
             } else {
                 let offset = buzz_reader.skip_to_end().unwrap_or(0);
                 sessions.set_buzz_offset(offset);
-                eprintln!("[daemon] [{name}] Skipped to end of buzz signals (offset: {offset})");
+                tracing::info!(name, offset, "Skipped to end of buzz signals");
             }
 
             // Init buzz slot if enabled.
             let buzz_slot = if config.buzz.as_ref().is_some_and(|b| b.enabled) {
                 if let Some(slot) = BuzzSlot::try_new(&name, &path, config.buzz.as_ref()) {
-                    eprintln!("[daemon] [{name}] Buzz slot initialized");
+                    tracing::info!(name, "Buzz slot initialized");
                     Some(slot)
                 } else {
                     None
@@ -839,32 +829,34 @@ impl DaemonRunner {
             };
 
             // Init swarm watcher.
-            let swarm_watcher_instance = if let Some(state_path) =
-                config.resolved_swarm_state_path(&path)
-            {
-                let stall_timeout = config
-                    .swarm_watch
-                    .as_ref()
-                    .map(|sw| sw.stall_timeout_secs)
-                    .unwrap_or(300);
-                eprintln!(
-                    "[daemon] [{name}] Swarm watcher enabled (state: {}, stall_timeout: {stall_timeout}s)",
-                    state_path.display()
-                );
-                let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
-                watcher.set_stall_timeout(stall_timeout);
-                watcher.set_hive_dir(path.join(".hive"));
-                Some(watcher)
-            } else {
-                None
-            };
+            let swarm_watcher_instance =
+                if let Some(state_path) = config.resolved_swarm_state_path(&path) {
+                    let stall_timeout = config
+                        .swarm_watch
+                        .as_ref()
+                        .map(|sw| sw.stall_timeout_secs)
+                        .unwrap_or(300);
+                    tracing::info!(
+                        name,
+                        state_path = %state_path.display(),
+                        stall_timeout_secs = stall_timeout,
+                        "Swarm watcher enabled",
+                    );
+                    let mut watcher = swarm_watcher::SwarmWatcher::new(state_path);
+                    watcher.set_stall_timeout(stall_timeout);
+                    watcher.set_hive_dir(path.join(".hive"));
+                    Some(watcher)
+                } else {
+                    None
+                };
 
             // Load origin map.
             let origin_map = OriginMap::load(&path);
             if !origin_map.entries.is_empty() {
-                eprintln!(
-                    "[daemon] [{name}] Loaded {} origin mapping(s)",
-                    origin_map.entries.len()
+                tracing::info!(
+                    name,
+                    count = origin_map.entries.len(),
+                    "Loaded origin mappings",
                 );
             }
 
@@ -872,7 +864,7 @@ impl DaemonRunner {
             let reminder_store = ReminderStore::load(&path);
             let active_reminders = reminder_store.active().len();
             if active_reminders > 0 {
-                eprintln!("[daemon] [{name}] Loaded {active_reminders} active reminder(s)");
+                tracing::info!(name, count = active_reminders, "Loaded active reminders");
             }
 
             // Register routing: (bot_idx, alert_chat_id, topic_id) → ws_idx
@@ -891,9 +883,11 @@ impl DaemonRunner {
                     .or_insert(ws_idx);
             }
 
-            eprintln!(
-                "[daemon] [{name}] Model: {}, max_turns: {}",
-                config.model, config.max_turns
+            tracing::info!(
+                name,
+                model = %config.model,
+                max_turns = config.max_turns,
+                "Workspace configured",
             );
 
             workspaces.push(WorkspaceSlot {
@@ -915,9 +909,9 @@ impl DaemonRunner {
         // Resolve swarm binary for dispatch blocks.
         let swarm_bin = which_swarm();
         if let Some(ref path) = swarm_bin {
-            eprintln!("[daemon] Swarm binary: {}", path.display());
+            tracing::info!(path = %path.display(), "Swarm binary found");
         } else {
-            eprintln!("[daemon] Swarm binary not found — dispatch blocks will fail");
+            tracing::warn!("Swarm binary not found — dispatch blocks will fail");
         }
 
         // Start TUI socket server on the first workspace (home workspace).
@@ -925,7 +919,7 @@ impl DaemonRunner {
             match TuiSocketServer::start(&ws.workspace_root) {
                 Ok((rx, server)) => (Some(server), Some(rx)),
                 Err(e) => {
-                    eprintln!("[daemon] Failed to start TUI socket: {e}");
+                    tracing::error!(error = %e, "Failed to start TUI socket");
                     (None, None)
                 }
             }
@@ -938,7 +932,7 @@ impl DaemonRunner {
             .first()
             .and_then(|ws| load_dispatch_state(&ws.workspace_root));
         if active_tui_dispatch.is_some() {
-            eprintln!("[daemon] Restored dispatch state from disk");
+            tracing::info!("Restored dispatch state from disk");
         }
 
         Ok(Self {
@@ -1018,7 +1012,7 @@ impl DaemonRunner {
             {
                 let _ = ctrl_c.await;
             }
-            eprintln!("\n[daemon] Shutdown signal received");
+            tracing::info!("Shutdown signal received");
             shutdown_cancel.cancel();
         });
 
@@ -1089,12 +1083,12 @@ impl DaemonRunner {
         let mut tui_rx = self.tui_rx.take();
         let has_tui = tui_rx.is_some();
 
-        eprintln!("[daemon] Ready. Listening for Telegram messages and buzz signals.");
+        tracing::info!("Ready. Listening for Telegram messages and buzz signals.");
 
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    eprintln!("[daemon] Shutting down...");
+                    tracing::info!("Shutting down...");
                     break;
                 }
 
@@ -1102,11 +1096,11 @@ impl DaemonRunner {
                     match event {
                         Some((bot_idx, event)) => {
                             if let Err(e) = self.handle_channel_event(bot_idx, event).await {
-                                eprintln!("[daemon] Error handling event: {e}");
+                                tracing::error!(error = %e, "Error handling event");
                             }
                         }
                         None => {
-                            eprintln!("[daemon] All channels closed, shutting down.");
+                            tracing::info!("All channels closed, shutting down.");
                             break;
                         }
                     }
@@ -1122,25 +1116,25 @@ impl DaemonRunner {
 
                 _ = buzz_timer.tick() => {
                     if let Err(e) = self.poll_buzz().await {
-                        eprintln!("[daemon] Buzz poll error: {e}");
+                        tracing::error!(error = %e, "Buzz poll error");
                     }
                 }
 
                 _ = swarm_timer.tick(), if has_swarm => {
                     if let Err(e) = self.poll_swarm().await {
-                        eprintln!("[daemon] Swarm poll error: {e}");
+                        tracing::error!(error = %e, "Swarm poll error");
                     }
                 }
 
                 _ = reminder_timer.tick() => {
                     if let Err(e) = self.poll_reminders().await {
-                        eprintln!("[daemon] Reminder poll error: {e}");
+                        tracing::error!(error = %e, "Reminder poll error");
                     }
                 }
 
                 _ = async { sweep_sleep.as_mut().unwrap().as_mut().await }, if sweep_sleep.is_some() => {
                     if let Err(e) = self.poll_sweep().await {
-                        eprintln!("[daemon] Sweep error: {e}");
+                        tracing::error!(error = %e, "Sweep error");
                     }
                     self.advance_sweep_timer();
                     sweep_sleep = self.sweep_instant().map(|i| Box::pin(tokio::time::sleep_until(i)));
@@ -1151,13 +1145,13 @@ impl DaemonRunner {
         // Persist state before exiting — iterate all workspaces.
         for ws in &self.workspaces {
             if let Err(e) = ws.sessions.save() {
-                eprintln!("[daemon] Failed to save sessions for '{}': {e}", ws.name);
+                tracing::error!(name = %ws.name, error = %e, "Failed to save sessions");
             }
             if let Err(e) = ws.reminder_store.save() {
-                eprintln!("[daemon] Failed to save reminders for '{}': {e}", ws.name);
+                tracing::error!(name = %ws.name, error = %e, "Failed to save reminders");
             }
             if let Err(e) = ws.origin_map.save(&ws.workspace_root) {
-                eprintln!("[daemon] Failed to save origin map for '{}': {e}", ws.name);
+                tracing::error!(name = %ws.name, error = %e, "Failed to save origin map");
             }
             // Save buzz watcher cursors.
             if let Some(ref slot) = ws.buzz_slot {
@@ -1167,9 +1161,9 @@ impl DaemonRunner {
 
         let restart = self.restart_requested.load(Ordering::Relaxed);
         if restart {
-            eprintln!("[daemon] State saved. Restarting...");
+            tracing::info!("State saved. Restarting...");
         } else {
-            eprintln!("[daemon] State saved. Goodbye.");
+            tracing::info!("State saved. Goodbye.");
         }
         Ok(restart)
     }
@@ -1209,7 +1203,7 @@ impl DaemonRunner {
             // Check user auth.
             // (user_id not available on callback queries — skip user check)
 
-            eprintln!("[daemon] Callback from {user_name}: {data}");
+            tracing::debug!(user_name, data, "Callback received");
             self.bots[bot_idx]
                 .channel
                 .answer_callback(&callback_query_id)
@@ -1242,22 +1236,20 @@ impl DaemonRunner {
         let ws_idx = match self.resolve_workspace(bot_idx, chat_id, topic_id) {
             Some(idx) => idx,
             None => {
-                eprintln!(
-                    "[daemon] Ignoring message from unroutable chat={chat_id} topic={topic_id:?}"
-                );
+                tracing::debug!(chat_id, ?topic_id, "Ignoring message from unroutable chat");
                 return Ok(());
             }
         };
 
         // Check chat auth.
         if !self.workspaces[ws_idx].config.is_chat_allowed(chat_id) {
-            eprintln!("[daemon] Ignoring message from disallowed chat {chat_id}");
+            tracing::debug!(chat_id, "Ignoring message from disallowed chat");
             return Ok(());
         }
 
         // Check user auth.
         if !self.workspaces[ws_idx].config.is_user_allowed(user_id) {
-            eprintln!("[daemon] Ignoring message from unauthorized user {user_id}");
+            tracing::debug!(user_id, "Ignoring message from unauthorized user");
             return Ok(());
         }
 
@@ -1279,7 +1271,7 @@ impl DaemonRunner {
                 args,
                 ..
             } => {
-                eprintln!("[daemon] Command from {user_name}: /{command} {args}");
+                tracing::info!(user_name, command, args, "Command received");
                 self.handle_command(chat_id, &command, &args).await
             }
             ChannelEvent::Message {
@@ -1289,9 +1281,12 @@ impl DaemonRunner {
                 text,
                 ..
             } => {
-                eprintln!(
-                    "[daemon] Message from {user_name} (chat={chat_id}, topic={topic_id:?}): {}",
-                    truncate(&text, 80)
+                tracing::info!(
+                    user_name,
+                    chat_id,
+                    ?topic_id,
+                    text = %truncate(&text, 80),
+                    "Message received",
                 );
                 self.handle_message(chat_id, user_id, &user_name, &text)
                     .await
@@ -1323,7 +1318,7 @@ impl DaemonRunner {
                 .cloned()
                 .unwrap_or_else(|| data.to_owned());
             let synthetic_message = format!("User tapped: \"{label}\"");
-            eprintln!("[daemon] Routing callback to coordinator: {synthetic_message}");
+            tracing::debug!(synthetic_message, "Routing callback to coordinator");
             self.handle_message(chat_id, 0, "button_tap", &synthetic_message)
                 .await
         }
@@ -1735,10 +1730,10 @@ impl DaemonRunner {
 
                     // Send the final response to Telegram.
                     if !clean_response.is_empty() {
-                        eprintln!(
-                            "[daemon] Responding ({} chars): {}",
-                            clean_response.len(),
-                            truncate(&clean_response, 80)
+                        tracing::debug!(
+                            chars = clean_response.len(),
+                            text = %truncate(&clean_response, 80),
+                            "Responding",
                         );
                         if buttons.is_empty() {
                             let _ = send_to_telegram(&channel, chat_id, &clean_response, topic_id)
@@ -1757,7 +1752,7 @@ impl DaemonRunner {
 
                     // Process dispatch blocks after sending the text response.
                     if !dispatches.is_empty() {
-                        eprintln!("[daemon] Processing {} dispatch block(s)", dispatches.len());
+                        tracing::info!(count = dispatches.len(), "Processing dispatch blocks");
                         run_dispatches_standalone(
                             chat_id,
                             dispatches,
@@ -1776,7 +1771,7 @@ impl DaemonRunner {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[daemon] Claude session error: {e}");
+                    tracing::error!(error = %e, "Claude session error");
                     let error_msg = format!(
                         "⚠️ Error: {}\n\nSession has been reset. Send another message to reconnect.",
                         truncate(&e.to_string(), 200),
@@ -1810,7 +1805,7 @@ impl DaemonRunner {
         // Guard against stale workspace index (workspaces are fixed at startup,
         // but be defensive).
         if ws_idx >= self.workspaces.len() {
-            eprintln!("[daemon] Stale message result for ws_idx={ws_idx}, ignoring");
+            tracing::warn!(ws_idx, "Stale message result, ignoring");
             return;
         }
 
@@ -1832,7 +1827,7 @@ impl DaemonRunner {
                     .sessions
                     .record_turn(chat_id, threshold);
                 if let Err(e) = self.workspaces[ws_idx].sessions.save() {
-                    eprintln!("[daemon] Failed to save sessions: {e}");
+                    tracing::error!(error = %e, "Failed to save sessions");
                 }
 
                 // Send nudge hint if threshold crossed.
@@ -1866,7 +1861,7 @@ impl DaemonRunner {
                 if had_resume {
                     self.workspaces[ws_idx].sessions.remove_active(chat_id);
                     if let Err(e) = self.workspaces[ws_idx].sessions.save() {
-                        eprintln!("[daemon] Failed to save sessions: {e}");
+                        tracing::error!(error = %e, "Failed to save sessions");
                     }
                 }
             }
@@ -1978,7 +1973,7 @@ impl DaemonRunner {
         self.active_workspace = Some(ws_idx);
         let chat_id = Self::TUI_CHAT_ID;
 
-        eprintln!("[daemon] TUI message: {}", truncate(text, 80));
+        tracing::info!(message = %truncate(text, 80), "TUI message");
 
         // Check if we have an active session to resume.
         let resume_id = self.workspaces[ws_idx]
@@ -2037,7 +2032,7 @@ impl DaemonRunner {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[daemon] TUI coordinator error: {e}");
+                    tracing::error!(error = %e, "TUI coordinator error");
                     let _ = responder.send(TuiResponse::Error {
                         text: format!("{e}"),
                     });
@@ -2218,14 +2213,11 @@ impl DaemonRunner {
 
             let outcome = match result {
                 Ok(pipeline_result) => {
-                    eprintln!(
-                        "[daemon] Pipeline complete: {} repo(s)",
-                        pipeline_result.per_repo.len()
-                    );
+                    tracing::info!(repos = pipeline_result.per_repo.len(), "Pipeline complete");
                     MessageOutcome::PipelineComplete(pipeline_result)
                 }
                 Err(e) => {
-                    eprintln!("[daemon] Pipeline error: {e}");
+                    tracing::error!(error = %e, "Pipeline error");
                     let _ = _responder.send(TuiResponse::Error {
                         text: format!("{e}"),
                     });
@@ -2433,27 +2425,27 @@ impl DaemonRunner {
                     match watcher.poll().await {
                         Ok(signals) => {
                             if !signals.is_empty() {
-                                eprintln!(
-                                    "[daemon] [{}] {} returned {} signal(s)",
-                                    slot.name,
-                                    watcher.name(),
-                                    signals.len()
+                                tracing::debug!(
+                                    name = %slot.name,
+                                    watcher = %watcher.name(),
+                                    count = signals.len(),
+                                    "Watcher returned signals",
                                 );
                             }
                             slot_signals.extend(signals);
                         }
                         Err(e) => {
-                            eprintln!("[daemon] [{}] {} error: {e}", slot.name, watcher.name());
+                            tracing::error!(name = %slot.name, watcher = %watcher.name(), error = %e, "Watcher poll error");
                         }
                     }
                 }
 
                 let reminder_signals = reminder::check_reminders(&mut slot.reminders);
                 if !reminder_signals.is_empty() {
-                    eprintln!(
-                        "[daemon] [{}] {} reminder(s) fired",
-                        slot.name,
-                        reminder_signals.len()
+                    tracing::info!(
+                        name = %slot.name,
+                        count = reminder_signals.len(),
+                        "Buzz reminders fired",
                     );
                     slot_signals.extend(reminder_signals);
                 }
@@ -2461,7 +2453,7 @@ impl DaemonRunner {
                 save_cursors(&slot.watchers, &slot.workspace_root);
 
                 if let Err(e) = output::emit(&slot_signals, &slot.output) {
-                    eprintln!("[daemon] [{}] Failed to write buzz signals: {e}", slot.name);
+                    tracing::error!(name = %slot.name, error = %e, "Failed to write buzz signals");
                 }
 
                 let mut deduped = deduplicate(&slot_signals);
@@ -2491,7 +2483,7 @@ impl DaemonRunner {
             return Ok(());
         }
 
-        eprintln!("[daemon] {} new buzz signal(s) to triage", important.len());
+        tracing::info!(count = important.len(), "New buzz signals to triage");
 
         for t in important {
             self.active_workspace = Some(t.ws_idx);
@@ -2517,10 +2509,10 @@ impl DaemonRunner {
                 continue;
             }
 
-            eprintln!(
-                "[daemon] [{}] {} reminder(s) fired",
-                self.workspaces[idx].name,
-                fired.len()
+            tracing::info!(
+                name = %self.workspaces[idx].name,
+                count = fired.len(),
+                "User reminders fired",
             );
 
             self.active_workspace = Some(idx);
@@ -2529,9 +2521,10 @@ impl DaemonRunner {
                 let chat_id = r.chat_id.unwrap_or(alert_chat_id);
                 let text = format!("🔔 Reminder: {}", r.message);
                 self.send(chat_id, &text).await?;
-                eprintln!(
-                    "[daemon] Reminder fired: \"{}\" -> chat {}",
-                    r.message, chat_id
+                tracing::info!(
+                    message = %r.message,
+                    chat_id,
+                    "Reminder fired",
                 );
             }
 
@@ -2586,7 +2579,7 @@ impl DaemonRunner {
             {
                 slot.next_sweep_at = cron.find_next_occurrence(&now, false).ok();
                 if let Some(ref next) = slot.next_sweep_at {
-                    eprintln!("[daemon] Next sweep for '{}' at {next}", slot.name);
+                    tracing::debug!(name = %slot.name, %next, "Next sweep scheduled");
                 }
             }
         }
@@ -2627,20 +2620,21 @@ impl DaemonRunner {
                 match watcher.sweep().await {
                     Ok(signals) => {
                         if !signals.is_empty() {
-                            eprintln!(
-                                "[daemon] [{}] {} sweep returned {} signal(s)",
-                                slot.name,
-                                watcher.name(),
-                                signals.len()
+                            tracing::info!(
+                                name = %slot.name,
+                                watcher = %watcher.name(),
+                                count = signals.len(),
+                                "Sweep returned signals",
                             );
                         }
                         slot_signals.extend(signals);
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[daemon] [{}] {} sweep error: {e}",
-                            slot.name,
-                            watcher.name()
+                        tracing::error!(
+                            name = %slot.name,
+                            watcher = %watcher.name(),
+                            error = %e,
+                            "Sweep error",
                         );
                     }
                 }
@@ -2649,15 +2643,12 @@ impl DaemonRunner {
             save_cursors(&slot.watchers, &slot.workspace_root);
 
             if slot_signals.is_empty() {
-                eprintln!(
-                    "[daemon] [{}] Sweep complete — no issues to re-triage",
-                    slot.name
-                );
+                tracing::debug!(name = %slot.name, "Sweep complete — no issues to re-triage");
                 continue;
             }
 
             let message = build_sweep_summary(&slot.name, &slot_signals);
-            eprintln!("[daemon] [{}] Sweep digest ready", slot.name);
+            tracing::info!(name = %slot.name, "Sweep digest ready");
             write_last_sweep(&slot.workspace_root, &message);
 
             total_count += slot_signals.len();
@@ -2676,7 +2667,7 @@ impl DaemonRunner {
         self.active_workspace = None;
 
         if results.is_empty() {
-            eprintln!("[daemon] Sweep complete — no issues to re-triage across all workspaces");
+            tracing::info!("Sweep complete — no issues to re-triage across all workspaces");
         }
 
         Ok(total_count)
@@ -2800,7 +2791,7 @@ impl DaemonRunner {
                 ws.reminder_store.add(r);
                 ws.reminder_store.save()?;
 
-                eprintln!("[daemon] Created reminder {short_id} from Telegram chat {chat_id}");
+                tracing::info!(short_id, chat_id, "Created reminder from Telegram");
                 self.send(
                     chat_id,
                     &format!(
@@ -2831,7 +2822,11 @@ impl DaemonRunner {
                 Ok(cancelled_id) => {
                     self.active_ws_mut().reminder_store.save()?;
                     let short = &cancelled_id[..8.min(cancelled_id.len())];
-                    eprintln!("[daemon] Cancelled reminder {short} from Telegram chat {chat_id}");
+                    tracing::info!(
+                        reminder_id = short,
+                        chat_id,
+                        "Cancelled reminder from Telegram"
+                    );
                     self.send(chat_id, &format!("Cancelled reminder `{short}`."))
                         .await
                 }
@@ -3000,9 +2995,7 @@ impl DaemonRunner {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                     if let Err(e) = self.send(*chat_id, &text).await {
-                        eprintln!(
-                            "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
-                        );
+                        tracing::error!(chat_id, error = %e, "Failed to send to chat — retrying on alert_chat_id");
                         if *chat_id != alert_chat_id {
                             let _ = self.send(alert_chat_id, &text).await;
                         }
@@ -3017,10 +3010,10 @@ impl DaemonRunner {
                             if let swarm_watcher::SwarmNotification::PrOpened { pr_url, .. } = n {
                                 let ci = swarm_watcher::fetch_ci_status(pr_url).await;
                                 if let Some(ref status) = ci {
-                                    eprintln!(
-                                        "[daemon] CI status for {}: {}",
-                                        n.worktree_id(),
-                                        status.status_line()
+                                    tracing::debug!(
+                                        worktree_id = %n.worktree_id(),
+                                        status = %status.status_line(),
+                                        "CI status",
                                     );
                                 }
                                 ci
@@ -3035,9 +3028,7 @@ impl DaemonRunner {
                             self.send_with_buttons(*chat_id, &text, buttons).await
                         };
                         if let Err(e) = result {
-                            eprintln!(
-                                "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
-                            );
+                            tracing::error!(chat_id, error = %e, "Failed to send to chat — retrying on alert_chat_id");
                             if *chat_id != alert_chat_id {
                                 let _ = self.send(alert_chat_id, &text).await;
                             }
@@ -3086,8 +3077,10 @@ impl DaemonRunner {
                             _ => "notification",
                         };
                         tokio::spawn(async move {
-                            eprintln!(
-                                "[daemon] Auto-triaging {notification_kind} for {worktree_id}"
+                            tracing::info!(
+                                notification_kind,
+                                worktree_id,
+                                "Auto-triaging notification",
                             );
 
                             let system_prompt = format!(
@@ -3120,7 +3113,7 @@ impl DaemonRunner {
                             let session = match client.spawn(opts).await {
                                 Ok(s) => s,
                                 Err(e) => {
-                                    eprintln!("[daemon] Failed to spawn auto-triage session: {e}");
+                                    tracing::error!(error = %e, "Failed to spawn auto-triage session");
                                     return;
                                 }
                             };
@@ -3128,19 +3121,19 @@ impl DaemonRunner {
                             let response = match run_ephemeral_session(session, &prompt).await {
                                 Ok(text) if !text.is_empty() => text,
                                 Ok(_) => {
-                                    eprintln!("[daemon] Auto-triage session produced no output");
+                                    tracing::warn!("Auto-triage session produced no output");
                                     return;
                                 }
                                 Err(e) => {
-                                    eprintln!("[daemon] Auto-triage session error: {e}");
+                                    tracing::error!(error = %e, "Auto-triage session error");
                                     return;
                                 }
                             };
 
-                            eprintln!(
-                                "[daemon] Auto-triage suggestion ({} chars): {}",
-                                response.len(),
-                                truncate(&response, 80)
+                            tracing::debug!(
+                                chars = response.len(),
+                                text = %truncate(&response, 80),
+                                "Auto-triage suggestion",
                             );
 
                             let header = match notification_kind {
@@ -3171,7 +3164,7 @@ impl DaemonRunner {
                                     })
                                     .await
                                 {
-                                    eprintln!("[daemon] Failed to send auto-triage result: {e}");
+                                    tracing::error!(error = %e, "Failed to send auto-triage result");
                                 }
                             }
                         });
@@ -3185,7 +3178,7 @@ impl DaemonRunner {
                     .origin_map
                     .save(&self.workspaces[idx].workspace_root)
             {
-                eprintln!("[daemon] Failed to save origin map: {e}");
+                tracing::error!(error = %e, "Failed to save origin map");
             }
         } // end per-workspace loop
 
@@ -3227,7 +3220,7 @@ impl DaemonRunner {
         let session = match client.spawn(opts).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[daemon] Failed to spawn triage session: {e}");
+                tracing::error!(error = %e, "Failed to spawn triage session");
                 return "[Triage session could not be started]".to_owned();
             }
         };
@@ -3236,7 +3229,7 @@ impl DaemonRunner {
             Ok(text) if !text.is_empty() => text,
             Ok(_) => "[Triage session produced no output]".to_owned(),
             Err(e) => {
-                eprintln!("[daemon] Triage session error: {e}");
+                tracing::error!(error = %e, "Triage session error");
                 "[Triage session produced no output]".to_owned()
             }
         }
@@ -3434,9 +3427,10 @@ where
                     match block {
                         ContentBlock::Text { text } => block_text.push_str(text),
                         ContentBlock::ToolUse { name, input, .. } => {
-                            eprintln!(
-                                "[daemon] Coordinator tool call: {name}({})",
-                                truncate(&input.to_string(), 120)
+                            tracing::debug!(
+                                tool = %name,
+                                input = %truncate(&input.to_string(), 120),
+                                "Coordinator tool call",
                             );
                         }
                         _ => {}
@@ -3450,13 +3444,13 @@ where
                     if is_end_turn {
                         final_text = clean_text;
                     } else if !clean_text.is_empty() {
-                        eprintln!(
-                            "[daemon] Streaming intermediate ({} chars): {}",
-                            clean_text.len(),
-                            truncate(&clean_text, 80)
+                        tracing::debug!(
+                            chars = clean_text.len(),
+                            text = %truncate(&clean_text, 80),
+                            "Streaming intermediate",
                         );
                         if let Err(e) = send_fn(clean_text).await {
-                            eprintln!("[daemon] Failed to send intermediate text: {e}");
+                            tracing::error!(error = %e, "Failed to send intermediate text");
                         } else {
                             sent_any = true;
                         }
@@ -3479,7 +3473,7 @@ where
             }
             Some(Event::RateLimit(rl)) => {
                 if let Some(info) = &rl.rate_limit_info {
-                    eprintln!("[daemon] Rate limit status: {info}");
+                    tracing::warn!(info, "Rate limit status");
                 }
             }
             Some(Event::System(sys)) => {
@@ -3493,7 +3487,7 @@ where
                     .get("model")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                eprintln!("[daemon] Coordinator session: session_id={sid}, model={model}",);
+                tracing::debug!(session_id = sid, model, "Coordinator session");
                 if session_id.is_empty() {
                     session_id = sid.to_owned();
                 }
@@ -3531,7 +3525,7 @@ async fn run_dispatches_standalone(
         )
         .await
         {
-            eprintln!("[daemon] Failed to send dispatch error: {e}");
+            tracing::error!(error = %e, "Failed to send dispatch error");
         }
         return;
     };
@@ -3540,7 +3534,7 @@ async fn run_dispatches_standalone(
         let prompt_file =
             std::env::temp_dir().join(format!("dispatch-{}.txt", uuid::Uuid::new_v4()));
         if let Err(e) = std::fs::write(&prompt_file, &dispatch.prompt) {
-            eprintln!("[daemon] Failed to write dispatch prompt file: {e}");
+            tracing::error!(error = %e, "Failed to write dispatch prompt file");
             let _ = send_to_telegram(
                 &channel,
                 chat_id,
@@ -3568,11 +3562,11 @@ async fn run_dispatches_standalone(
             args.push(agent.clone());
         }
 
-        eprintln!(
-            "[daemon] Dispatching to repo={} agent={}: {}",
-            dispatch.repo,
-            dispatch.agent.as_deref().unwrap_or("default"),
-            truncate(&dispatch.prompt, 80)
+        tracing::info!(
+            repo = %dispatch.repo,
+            agent = %dispatch.agent.as_deref().unwrap_or("default"),
+            prompt = %truncate(&dispatch.prompt, 80),
+            "Dispatching worker",
         );
 
         let output = tokio::process::Command::new(&swarm_bin)
@@ -3598,7 +3592,7 @@ async fn run_dispatches_standalone(
                     format!("🚀 Dispatched `{worktree_id}`")
                 };
                 if let Err(e) = send_to_telegram(&channel, chat_id, &msg, topic_id).await {
-                    eprintln!("[daemon] Failed to send dispatch confirmation: {e}");
+                    tracing::error!(error = %e, "Failed to send dispatch confirmation");
                 }
             }
             Ok(out) => {
@@ -3609,10 +3603,10 @@ async fn run_dispatches_standalone(
                 } else {
                     stdout.to_string()
                 };
-                eprintln!(
-                    "[daemon] Dispatch to {} failed: {}",
-                    dispatch.repo,
-                    truncate(&detail, 200)
+                tracing::error!(
+                    repo = %dispatch.repo,
+                    detail = %truncate(&detail, 200),
+                    "Dispatch failed",
                 );
                 let _ = send_to_telegram(
                     &channel,
@@ -3627,7 +3621,7 @@ async fn run_dispatches_standalone(
                 .await;
             }
             Err(e) => {
-                eprintln!("[daemon] Failed to run swarm create: {e}");
+                tracing::error!(error = %e, "Failed to run swarm create");
                 let _ = send_to_telegram(
                     &channel,
                     chat_id,
@@ -3664,9 +3658,10 @@ async fn run_ephemeral_session(
                     match block {
                         ContentBlock::Text { text: t } => text.push_str(t),
                         ContentBlock::ToolUse { name, input, .. } => {
-                            eprintln!(
-                                "[daemon] Ephemeral session tool call: {name}({})",
-                                truncate(&input.to_string(), 120)
+                            tracing::debug!(
+                                tool = %name,
+                                input = %truncate(&input.to_string(), 120),
+                                "Ephemeral session tool call",
                             );
                         }
                         _ => {}
@@ -3686,7 +3681,7 @@ async fn run_ephemeral_session(
             }
             Some(Event::RateLimit(rl)) => {
                 if let Some(info) = &rl.rate_limit_info {
-                    eprintln!("[daemon] Ephemeral session rate limit: {info}");
+                    tracing::warn!(info, "Ephemeral session rate limit");
                 }
             }
             Some(Event::System(sys)) => {
@@ -3700,9 +3695,7 @@ async fn run_ephemeral_session(
                     .get("model")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                eprintln!(
-                    "[daemon] Ephemeral session started: session_id={session_id}, model={model}",
-                );
+                tracing::debug!(session_id, model, "Ephemeral session started");
             }
             Some(Event::User(_)) => {
                 // Echo of our own prompt — nothing to do.
@@ -3943,7 +3936,7 @@ fn write_last_sweep(workspace_root: &Path, message: &str) {
     let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
     let content = format!("<!-- Last sweep: {timestamp} -->\n\n{message}\n");
     if let Err(e) = std::fs::write(&path, &content) {
-        eprintln!("[daemon] Failed to write {}: {e}", path.display());
+        tracing::error!(path = %path.display(), error = %e, "Failed to write last sweep");
     }
 }
 
@@ -4065,9 +4058,7 @@ pub(crate) async fn dispatch_notifications(
                 })
                 .await
             {
-                eprintln!(
-                    "[daemon] Failed to send to chat {chat_id}: {e} — retrying on alert_chat_id"
-                );
+                tracing::error!(chat_id, error = %e, "Failed to send to chat — retrying on alert_chat_id");
                 if *chat_id != alert_chat_id {
                     let _ = channel
                         .send_message(&OutboundMessage {
