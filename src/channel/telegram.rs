@@ -9,7 +9,7 @@ use color_eyre::eyre::Result;
 use serde::Deserialize;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Maximum message length for Telegram (we chunk below this).
 const MAX_MESSAGE_LEN: usize = 4000;
@@ -260,7 +260,7 @@ impl TelegramChannel {
                 let body: TgResponse<serde_json::Value> = resp.json().await?;
                 if !body.ok {
                     let desc = body.description.unwrap_or_default();
-                    warn!("sendMessage failed: {desc}");
+                    error!("sendMessage failed: {desc}");
                 }
             }
         }
@@ -304,7 +304,7 @@ impl Channel for TelegramChannel {
                     match result {
                         Ok(updates) => updates,
                         Err(e) => {
-                            warn!("Poll error: {e}");
+                            error!("Poll error: {e}");
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
                         }

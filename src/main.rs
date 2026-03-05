@@ -11,6 +11,7 @@ mod doctor;
 #[allow(dead_code)]
 mod github;
 mod keeper;
+mod logging;
 mod pipeline;
 mod presence;
 mod quest;
@@ -25,6 +26,7 @@ mod workspace;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Result, WrapErr};
 use std::path::{Path, PathBuf};
+use tracing::{debug, error, info, warn};
 
 use crate::coordinator::Coordinator;
 use crate::quest::{QuestStore, default_store_path};
@@ -203,6 +205,20 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
 
     let cli = Cli::parse();
+
+    // Initialize tracing: daemon foreground gets a file appender, everything else gets stderr.
+    let _guard = if matches!(
+        &cli.command,
+        Command::Daemon {
+            action: DaemonAction::Start { foreground: true }
+        }
+    ) {
+        Some(logging::init_daemon(&daemon::global_hive_dir()))
+    } else {
+        logging::init_interactive();
+        None
+    };
+
     let cwd = match &cli.dir {
         Some(d) => d.clone(),
         None => std::env::current_dir().wrap_err("failed to get current directory")?,
@@ -369,9 +385,9 @@ async fn cmd_start(cwd: &Path, quest_id: Option<&str>) -> Result<()> {
                     println!("Started quest: {}", quest.summary());
                 }
                 _ => {
-                    eprintln!("Multiple quests match {id:?}:");
+                    warn!("Multiple quests match {id:?}:");
                     for q in &matching {
-                        eprintln!("  {}", q.summary());
+                        warn!("  {}", q.summary());
                     }
                     color_eyre::eyre::bail!("ambiguous quest ID prefix");
                 }
@@ -419,7 +435,7 @@ fn cmd_remind(cwd: &Path, duration: Option<&str>, cron: Option<&str>, message: &
     store.add(r);
     store.save()?;
 
-    eprintln!("[reminder] Created {kind} reminder {short_id}: \"{message}\" fires at {fire_str}");
+    info!("Created {kind} reminder {short_id}: \"{message}\" fires at {fire_str}");
     println!("Reminder set (ID: {short_id})");
     println!("Next fire: {fire_str}");
     println!("Message: {message}");
@@ -433,7 +449,7 @@ fn cmd_list_reminders(cwd: &Path) -> Result<()> {
     let store = reminder::ReminderStore::load(&workspace.root);
 
     let active = store.active();
-    eprintln!("[reminder] Listed {} active reminder(s)", active.len());
+    debug!("Listed {} active reminder(s)", active.len());
     println!("{}", reminder::format_reminder_list(&active));
 
     Ok(())
@@ -443,8 +459,8 @@ fn cmd_list_reminders(cwd: &Path) -> Result<()> {
 async fn cmd_verify(cwd: &Path, worktree_id: &str) -> Result<()> {
     let worktree_path = pipeline::verify::resolve_worktree_path(cwd, worktree_id)?;
 
-    eprintln!(
-        "[verify] Verifying worktree {} at {}",
+    info!(
+        "Verifying worktree {} at {}",
         worktree_id,
         worktree_path.display()
     );
@@ -510,8 +526,8 @@ async fn cmd_dispatch(
     })
     .await?;
 
-    eprintln!(
-        "[dispatch] Pipeline completed at stage: {}",
+    info!(
+        "Pipeline completed at stage: {}",
         result.stage_reached
     );
 
@@ -548,17 +564,17 @@ async fn cmd_context(cwd: &Path, input: &str, output: Option<&Path>) -> Result<(
     let workspace = load_workspace(cwd).ok();
     let repo_path = workspace.as_ref().map(|w| w.root.as_path());
 
-    eprintln!("[context] Identifying context...");
+    info!("Identifying context...");
     let result = pipeline::context::identify_context(&task_md, repo_path).await?;
-    eprintln!(
-        "[context] Found {} relevant files",
+    info!(
+        "Found {} relevant files",
         result.relevant_files.len()
     );
 
     match output {
         Some(path) => {
             std::fs::write(path, &result.context_md)?;
-            eprintln!("[context] Written to {}", path.display());
+            info!("Context written to {}", path.display());
         }
         None => {
             println!("{}", result.context_md);
@@ -573,18 +589,18 @@ async fn cmd_refine(cwd: &Path, description: &str, output: Option<&Path>) -> Res
     let workspace = load_workspace(cwd).ok();
     let conventions = workspace.as_ref().and_then(|w| w.conventions.as_deref());
 
-    eprintln!("[refine] Refining: {description:?}");
+    info!("Refining: {description:?}");
     let result = pipeline::refine::refine(description, conventions).await?;
-    eprintln!("[refine] Title: {}", result.title);
-    eprintln!(
-        "[refine] Acceptance criteria: {}",
+    info!("Title: {}", result.title);
+    info!(
+        "Acceptance criteria: {}",
         result.acceptance_criteria.len()
     );
 
     match output {
         Some(path) => {
             std::fs::write(path, &result.task_md)?;
-            eprintln!("[refine] Written to {}", path.display());
+            info!("Refine written to {}", path.display());
         }
         None => {
             println!("{}", result.task_md);
@@ -603,16 +619,16 @@ fn cmd_cancel_reminder(cwd: &Path, id_prefix: &str) -> Result<()> {
         Ok(id) => {
             store.save()?;
             let short = &id[..8.min(id.len())];
-            eprintln!("[reminder] Cancelled reminder {short}");
+            info!("Cancelled reminder {short}");
             println!("Cancelled reminder {short}.");
         }
         Err(reminder::CancelError::NotFound) => {
             color_eyre::eyre::bail!("no reminder found matching \"{id_prefix}\"");
         }
         Err(reminder::CancelError::Ambiguous(ids)) => {
-            eprintln!("Multiple reminders match \"{id_prefix}\":");
+            warn!("Multiple reminders match \"{id_prefix}\":");
             for id in &ids {
-                eprintln!("  {}", &id[..8.min(id.len())]);
+                warn!("  {}", &id[..8.min(id.len())]);
             }
             color_eyre::eyre::bail!("ambiguous reminder ID prefix");
         }

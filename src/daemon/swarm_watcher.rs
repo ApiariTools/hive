@@ -709,10 +709,7 @@ impl SwarmWatcher {
         self.events_reader = Some(reader);
 
         if !self.known.is_empty() {
-            info!(
-                "Initialized with {} worktree(s)",
-                self.known.len()
-            );
+            info!("Initialized with {} worktree(s)", self.known.len());
         }
     }
 
