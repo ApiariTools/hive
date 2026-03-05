@@ -4,6 +4,7 @@ use crate::signal::Signal;
 use apiari_common::ipc::JsonlWriter;
 use color_eyre::Result;
 use std::path::PathBuf;
+use tracing::warn;
 
 /// Where to send emitted signals.
 #[derive(Debug, Clone)]
@@ -58,7 +59,7 @@ pub fn emit(signals: &[Signal], mode: &OutputMode) -> Result<()> {
         }
         OutputMode::Webhook(url) => {
             // Stub: in a real implementation this would POST to the URL.
-            eprintln!(
+            warn!(
                 "webhook output to {url} not yet implemented, {n} signals dropped",
                 n = signals.len()
             );
