@@ -331,7 +331,7 @@ impl Coordinator {
     /// The `--print` mode is single-turn, so we spawn a fresh session for each
     /// user message and resume the previous conversation by session ID.
     async fn run_chat_with_session(&self, mut session: apiari_claude_sdk::Session) -> Result<()> {
-        eprintln!("\x1b[33mHive Coordinator\x1b[0m — Ctrl-D to exit\n");
+        info!("Hive Coordinator — Ctrl-D to exit");
 
         let stdin = io::stdin();
         let mut stdout = io::stdout();
@@ -389,7 +389,7 @@ impl Coordinator {
                                 match self.try_spawn_session(opts).await? {
                                     Some(s) => session = s,
                                     None => {
-                                        eprintln!("\x1b[31mFailed to resume session.\x1b[0m");
+                                        error!("Failed to resume session.");
                                         break;
                                     }
                                 }
@@ -397,7 +397,7 @@ impl Coordinator {
 
                             // Send the message.
                             if let Err(e) = session.send_message(&input).await {
-                                eprintln!("\x1b[31mError: {e}\x1b[0m");
+                                error!("Error: {e}");
                                 break;
                             }
 
@@ -415,7 +415,7 @@ impl Coordinator {
                             stdout.flush()?;
                         }
                         None => {
-                            eprintln!("\n\x1b[2mSession closed.\x1b[0m");
+                            info!("Session closed.");
                             break;
                         }
                     }
@@ -485,7 +485,7 @@ impl Coordinator {
                 }
                 None => {
                     eprint!("\r\x1b[K");
-                    eprintln!("\x1b[31mSession ended unexpectedly.\x1b[0m");
+                    error!("Session ended unexpectedly.");
                     break;
                 }
             }
@@ -495,8 +495,8 @@ impl Coordinator {
 
     /// Fallback chat loop when Claude CLI is not available.
     fn run_chat_fallback(&self) -> Result<()> {
-        eprintln!("\x1b[33mHive Coordinator\x1b[0m — \x1b[2moffline mode\x1b[0m");
-        eprintln!("\x1b[2mClaude CLI not available. Ctrl-D to exit.\x1b[0m\n");
+        warn!("Hive Coordinator — offline mode");
+        warn!("Claude CLI not available. Ctrl-D to exit.");
 
         let stdin = io::stdin();
         let mut stdout = io::stdout();
