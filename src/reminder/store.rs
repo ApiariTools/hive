@@ -156,17 +156,13 @@ impl ReminderStore {
                         match advance_cron(expr, &now) {
                             Some(next) => {
                                 r.fire_at = Some(next);
-                                eprintln!(
-                                    "[reminder] Cron reminder {} advanced to {}",
-                                    &r.id[..8.min(r.id.len())],
-                                    next.format("%Y-%m-%d %H:%M UTC")
-                                );
+                                tracing::debug!(id = &r.id[..8.min(r.id.len())], next = %next.format("%Y-%m-%d %H:%M UTC"), "Cron reminder advanced");
                             }
                             None => {
                                 // Cron expression has no future occurrences — remove it.
-                                eprintln!(
-                                    "[reminder] Cron reminder {} has no future occurrences, removing",
-                                    &r.id[..8.min(r.id.len())]
+                                tracing::info!(
+                                    id = &r.id[..8.min(r.id.len())],
+                                    "Cron reminder has no future occurrences, removing"
                                 );
                                 to_remove.push(i);
                             }

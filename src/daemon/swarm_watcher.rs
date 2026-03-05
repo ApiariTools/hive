@@ -708,10 +708,7 @@ impl SwarmWatcher {
         self.events_reader = Some(reader);
 
         if !self.known.is_empty() {
-            eprintln!(
-                "[swarm-watcher] Initialized with {} worktree(s)",
-                self.known.len()
-            );
+            tracing::info!(count = self.known.len(), "Swarm watcher initialized");
         }
     }
 

@@ -111,9 +111,9 @@ pub async fn run_pipeline_multi(opts: MultiPipelineOptions<'_>) -> Result<MultiP
     let progress = opts.on_progress;
 
     // Stage 1: Refine (shared across all repos)
-    eprintln!("[pipeline] Stage 1: Refine");
+    tracing::info!("Stage 1: Refine");
     let refined = refine::refine(opts.raw_prompt, opts.conventions).await?;
-    eprintln!("[pipeline] Refined: \"{}\"", refined.title);
+    tracing::info!(title = %refined.title, "Refined");
     emit(
         &progress,
         PipelineEvent::RefineComplete {
@@ -175,7 +175,7 @@ pub async fn run_pipeline_multi(opts: MultiPipelineOptions<'_>) -> Result<MultiP
             let label = &target.name;
 
             // Stage 2: Context
-            eprintln!("[pipeline] Context for {label}...");
+            tracing::info!(repo = %label, "Context started");
             emit(
                 &progress,
                 PipelineEvent::RepoContextStarted {
@@ -184,7 +184,7 @@ pub async fn run_pipeline_multi(opts: MultiPipelineOptions<'_>) -> Result<MultiP
             );
             let ctx = context::identify_context(&task_md, Some(&target.search_path)).await?;
             let file_count = ctx.relevant_files.len();
-            eprintln!("[pipeline] Context for {label}: {file_count} relevant files");
+            tracing::info!(repo = %label, file_count, "Context complete");
             emit(
                 &progress,
                 PipelineEvent::RepoContextComplete {
@@ -203,7 +203,7 @@ pub async fn run_pipeline_multi(opts: MultiPipelineOptions<'_>) -> Result<MultiP
             }
 
             // Stage 3: Plan
-            eprintln!("[pipeline] Plan for {label}...");
+            tracing::info!(repo = %label, "Plan started");
             emit(
                 &progress,
                 PipelineEvent::RepoPlanStarted {
@@ -212,7 +212,7 @@ pub async fn run_pipeline_multi(opts: MultiPipelineOptions<'_>) -> Result<MultiP
             );
             let planned = plan::create_plan(&task_md, &ctx.context_md).await?;
             let step_count = planned.steps.len();
-            eprintln!("[pipeline] Plan for {label}: {step_count} steps");
+            tracing::info!(repo = %label, step_count, "Plan complete");
             emit(
                 &progress,
                 PipelineEvent::RepoPlanComplete {
@@ -231,7 +231,7 @@ pub async fn run_pipeline_multi(opts: MultiPipelineOptions<'_>) -> Result<MultiP
             }
 
             // Stage 4: Dispatch
-            eprintln!("[pipeline] Dispatch for {label}...");
+            tracing::info!(repo = %label, "Dispatch started");
             let prompt = dispatch::build_dispatch_prompt(&title, target.repo_flag.as_deref());
             let worker = Worker::new();
             let worktree_id = worker
@@ -245,7 +245,7 @@ pub async fn run_pipeline_multi(opts: MultiPipelineOptions<'_>) -> Result<MultiP
                     Some(&planned.plan_md),
                 )
                 .await?;
-            eprintln!("[pipeline] Dispatched {label}: {worktree_id}");
+            tracing::info!(repo = %label, worktree_id, "Dispatched");
 
             Ok(PerRepoPipelineResult {
                 repo: label.clone(),

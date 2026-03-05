@@ -193,7 +193,7 @@ pub fn load_workspace(start_dir: &Path) -> Result<Workspace> {
                     Ok(ws) => return Ok(ws),
                     Err(e) => {
                         // Not a valid hive workspace config — skip and try next candidate.
-                        eprintln!("Skipping {}: {e:#}", path.display());
+                        tracing::debug!(path = %path.display(), error = %e, "Skipping invalid config");
                     }
                 }
             }
@@ -205,10 +205,7 @@ pub fn load_workspace(start_dir: &Path) -> Result<Workspace> {
     }
 
     // No config found; return a default workspace rooted at start_dir.
-    eprintln!(
-        "No workspace config found; using defaults (root: {})",
-        start_dir.display()
-    );
+    tracing::debug!(root = %start_dir.display(), "No workspace config found, using defaults");
     Ok(Workspace {
         root: start_dir.to_path_buf(),
         ..Workspace::default()
@@ -245,7 +242,7 @@ pub fn init_workspace(dir: &Path) -> Result<PathBuf> {
 
     let config_path = hive_dir.join("workspace.yaml");
     if config_path.exists() {
-        eprintln!("Workspace config already exists: {}", config_path.display());
+        tracing::info!(path = %config_path.display(), "Workspace config already exists");
         return Ok(config_path);
     }
 
