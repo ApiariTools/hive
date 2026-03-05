@@ -17,7 +17,7 @@ use apiari_common::state::{load_state, save_state};
 use async_trait::async_trait;
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, error};
 
 use super::config::BuzzConfig;
 
@@ -102,7 +102,7 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
     let state: WatcherState = match load_state(&state_path) {
         Ok(state) => state,
         Err(e) => {
-            warn!("failed to load watcher state: {e}");
+            error!("failed to load watcher state: {e}");
             WatcherState::default()
         }
     };
@@ -163,7 +163,7 @@ pub fn save_cursors(watchers: &[Box<dyn Watcher>], base: &Path) {
 
     let state_path = base.join(STATE_REL);
     if let Err(e) = save_state(&state_path, &state) {
-        warn!("failed to save watcher state: {e}");
+        error!("failed to save watcher state: {e}");
     }
 }
 
