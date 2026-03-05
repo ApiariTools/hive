@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use color_eyre::eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Where a quest/task originated from, for routing notifications back.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -237,11 +238,11 @@ impl QuestStore {
                     Ok(data) => match serde_json::from_str::<Quest>(&data) {
                         Ok(quest) => quests.push(quest),
                         Err(e) => {
-                            eprintln!("warning: failed to parse {}: {e}", path.display());
+                            warn!("Failed to parse {}: {e}", path.display());
                         }
                     },
                     Err(e) => {
-                        eprintln!("warning: failed to read {}: {e}", path.display());
+                        warn!("Failed to read {}: {e}", path.display());
                     }
                 }
             }

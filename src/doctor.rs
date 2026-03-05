@@ -5,6 +5,7 @@ use crate::workspace::{self, load_workspace};
 use color_eyre::eyre::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use tracing::error;
 
 // ── Data types ───────────────────────────────────────────
 
@@ -528,11 +529,11 @@ fn apply_fixes(categories: &[Category]) {
         match check.fix {
             Some(Fix::PruneRegistry) => match prune_registry() {
                 Ok(n) => println!("  Pruned {n} stale registry entry(ies)"),
-                Err(e) => eprintln!("  Failed to prune registry: {e}"),
+                Err(e) => error!("Failed to prune registry: {e}"),
             },
             Some(Fix::RemoveFile(ref path)) => match std::fs::remove_file(path) {
                 Ok(()) => println!("  Removed {}", path.display()),
-                Err(e) => eprintln!("  Failed to remove {}: {e}", path.display()),
+                Err(e) => error!("Failed to remove {}: {e}", path.display()),
             },
             None => {}
         }
