@@ -67,10 +67,10 @@ pub async fn run(
     } else {
         // Daemon mode — poll on interval.
         let interval = Duration::from_secs(config.poll_interval_secs);
-        eprintln!(
-            "[buzz] daemon mode — polling every {}s with {} watcher(s)",
-            config.poll_interval_secs,
-            watchers.len()
+        tracing::info!(
+            interval_secs = config.poll_interval_secs,
+            watchers = watchers.len(),
+            "daemon mode — polling"
         );
 
         loop {
@@ -96,15 +96,15 @@ async fn run_sweep(
         }
         match watcher.sweep().await {
             Ok(signals) => {
-                eprintln!(
-                    "[buzz] {} sweep returned {} signal(s)",
-                    watcher.name(),
-                    signals.len()
+                tracing::info!(
+                    name = watcher.name(),
+                    count = signals.len(),
+                    "sweep returned signal(s)"
                 );
                 all_signals.extend(signals);
             }
             Err(e) => {
-                eprintln!("[buzz] {} sweep error: {e}", watcher.name());
+                tracing::error!(name = watcher.name(), error = %e, "sweep error");
             }
         }
     }
@@ -135,15 +135,15 @@ async fn run_once(
     for watcher in watchers.iter_mut() {
         match watcher.poll().await {
             Ok(signals) => {
-                eprintln!(
-                    "[buzz] {} returned {} signal(s)",
-                    watcher.name(),
-                    signals.len()
+                tracing::info!(
+                    name = watcher.name(),
+                    count = signals.len(),
+                    "returned signal(s)"
                 );
                 all_signals.extend(signals);
             }
             Err(e) => {
-                eprintln!("[buzz] {} error: {e}", watcher.name());
+                tracing::error!(name = watcher.name(), error = %e, "poll error");
             }
         }
     }
@@ -151,7 +151,7 @@ async fn run_once(
     // Check reminders.
     let reminder_signals = reminder::check_reminders(reminders);
     if !reminder_signals.is_empty() {
-        eprintln!("[buzz] {} reminder(s) fired", reminder_signals.len());
+        tracing::info!(count = reminder_signals.len(), "reminder(s) fired");
         all_signals.extend(reminder_signals);
     }
 

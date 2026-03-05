@@ -45,11 +45,11 @@ impl WebhookWatcher {
 
         tokio::spawn(async move {
             if let Err(e) = run_server(port, buffer).await {
-                eprintln!("[webhook] server error: {e}");
+                tracing::error!(error = %e, "server error");
             }
         });
 
-        eprintln!("[webhook] HTTP server started on 0.0.0.0:{port}");
+        tracing::info!(port = port, "HTTP server started");
     }
 }
 
@@ -100,7 +100,7 @@ async fn run_server(port: u16, buffer: Arc<Mutex<Vec<Signal>>>) -> Result<()> {
             });
 
             if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                eprintln!("[webhook] connection error: {e}");
+                tracing::error!(error = %e, "connection error");
             }
         });
     }
@@ -131,9 +131,10 @@ async fn handle_request(
 
             match serde_json::from_slice::<Signal>(&body) {
                 Ok(signal) => {
-                    eprintln!(
-                        "[webhook] received signal: {} ({})",
-                        signal.title, signal.severity
+                    tracing::debug!(
+                        title = signal.title.as_str(),
+                        severity = %signal.severity,
+                        "received signal"
                     );
                     buffer.lock().unwrap().push(signal);
                     hyper::Response::builder()

@@ -187,13 +187,10 @@ impl BuzzConfig {
         let config = if path.exists() {
             let contents = std::fs::read_to_string(path)?;
             let config: BuzzConfig = toml::from_str(&contents)?;
-            eprintln!("[buzz] loaded config from {}", path.display());
+            tracing::info!(path = %path.display(), "loaded config from file");
             config
         } else {
-            eprintln!(
-                "[buzz] config file {} not found, using defaults",
-                path.display()
-            );
+            tracing::info!(path = %path.display(), "config file not found, using defaults");
             Self::default()
         };
 
@@ -219,7 +216,7 @@ impl BuzzConfig {
 
         // 2. workspace.yaml buzz section.
         if let Some(buzz) = &workspace.buzz {
-            eprintln!("[buzz] loaded config from workspace.yaml");
+            tracing::info!("loaded config from workspace.yaml");
             let config = buzz.clone();
             config.validate();
             return Ok(config);
@@ -235,41 +232,37 @@ impl BuzzConfig {
     pub fn validate(&self) {
         if let Some(sentry) = &self.sentry {
             if sentry.token.is_empty() {
-                eprintln!("[buzz] warning: sentry.token is empty — Sentry API calls will fail");
+                tracing::warn!("sentry.token is empty — Sentry API calls will fail");
             }
             if sentry.org.is_empty() {
-                eprintln!("[buzz] warning: sentry.org is empty");
+                tracing::warn!("sentry.org is empty");
             }
             if sentry.project.is_empty() {
-                eprintln!("[buzz] warning: sentry.project is empty");
+                tracing::warn!("sentry.project is empty");
             }
             if let Some(sweep) = &sentry.sweep
                 && let Err(e) = sweep.schedule.parse::<croner::Cron>()
             {
-                eprintln!("[buzz] warning: sentry.sweep.schedule is invalid cron: {e}");
+                tracing::warn!(error = %e, "sentry.sweep.schedule is invalid cron");
             }
         }
 
         if let Some(github) = &self.github
             && github.repos.is_empty()
         {
-            eprintln!("[buzz] warning: github.repos is empty — no repositories to watch");
+            tracing::warn!("github.repos is empty — no repositories to watch");
         }
 
         if self.output.mode == "webhook" && self.output.url.is_none() {
-            eprintln!("[buzz] warning: output.mode is 'webhook' but output.url is not set");
+            tracing::warn!("output.mode is 'webhook' but output.url is not set");
         }
 
         if self.output.mode == "file" && self.output.path.is_none() {
-            eprintln!(
-                "[buzz] note: output.mode is 'file' but output.path is not set, will use .buzz/signals.jsonl"
-            );
+            tracing::info!("output.mode is 'file' but output.path is not set, will use .buzz/signals.jsonl");
         }
 
         if self.poll_interval_secs == 0 {
-            eprintln!(
-                "[buzz] warning: poll_interval_secs is 0, this will poll as fast as possible"
-            );
+            tracing::warn!("poll_interval_secs is 0, this will poll as fast as possible");
         }
 
         let num_sources = self.sentry.is_some() as u8
@@ -278,7 +271,7 @@ impl BuzzConfig {
             + (!self.reminders.is_empty()) as u8;
 
         if num_sources == 0 {
-            eprintln!("[buzz] note: no watchers or reminders configured — nothing to poll");
+            tracing::info!("no watchers or reminders configured — nothing to poll");
         }
     }
 }
