@@ -4,6 +4,8 @@
 //! context, active quests, and incoming signals. It helps the user plan work,
 //! break quests into tasks, and dispatch workers.
 
+use tracing::{info, warn, error};
+
 use crate::daemon::config::DaemonConfig;
 use crate::quest::{Quest, QuestStore, TaskStatus};
 use crate::worker::Worker;
@@ -282,8 +284,8 @@ impl Coordinator {
         match client.spawn(opts).await {
             Ok(session) => Ok(Some(session)),
             Err(apiari_claude_sdk::SdkError::ProcessSpawn(e)) => {
-                eprintln!("[coordinator] Could not spawn Claude CLI: {e}");
-                eprintln!("[coordinator] Make sure `claude` is installed and on your PATH.");
+                error!("Could not spawn Claude CLI: {e}");
+                error!("Make sure `claude` is installed and on your PATH.");
                 Ok(None)
             }
             Err(e) => Err(color_eyre::eyre::eyre!(e).wrap_err("failed to spawn Claude session")),
@@ -329,7 +331,7 @@ impl Coordinator {
     /// The `--print` mode is single-turn, so we spawn a fresh session for each
     /// user message and resume the previous conversation by session ID.
     async fn run_chat_with_session(&self, mut session: apiari_claude_sdk::Session) -> Result<()> {
-        eprintln!("\x1b[33mHive Coordinator\x1b[0m — Ctrl-D to exit\n");
+        info!("Hive Coordinator — Ctrl-D to exit");
 
         let stdin = io::stdin();
         let mut stdout = io::stdout();
@@ -387,7 +389,7 @@ impl Coordinator {
                                 match self.try_spawn_session(opts).await? {
                                     Some(s) => session = s,
                                     None => {
-                                        eprintln!("\x1b[31mFailed to resume session.\x1b[0m");
+                                        error!("Failed to resume session.");
                                         break;
                                     }
                                 }
@@ -395,7 +397,7 @@ impl Coordinator {
 
                             // Send the message.
                             if let Err(e) = session.send_message(&input).await {
-                                eprintln!("\x1b[31mError: {e}\x1b[0m");
+                                error!("Error: {e}");
                                 break;
                             }
 
@@ -413,7 +415,7 @@ impl Coordinator {
                             stdout.flush()?;
                         }
                         None => {
-                            eprintln!("\n\x1b[2mSession closed.\x1b[0m");
+                            info!("Session closed.");
                             break;
                         }
                     }
@@ -483,7 +485,7 @@ impl Coordinator {
                 }
                 None => {
                     eprint!("\r\x1b[K");
-                    eprintln!("\x1b[31mSession ended unexpectedly.\x1b[0m");
+                    error!("Session ended unexpectedly.");
                     break;
                 }
             }
@@ -493,8 +495,8 @@ impl Coordinator {
 
     /// Fallback chat loop when Claude CLI is not available.
     fn run_chat_fallback(&self) -> Result<()> {
-        eprintln!("\x1b[33mHive Coordinator\x1b[0m — \x1b[2moffline mode\x1b[0m");
-        eprintln!("\x1b[2mClaude CLI not available. Ctrl-D to exit.\x1b[0m\n");
+        info!("Hive Coordinator — offline mode");
+        info!("Claude CLI not available. Ctrl-D to exit.");
 
         let stdin = io::stdin();
         let mut stdout = io::stdout();
@@ -528,7 +530,7 @@ impl Coordinator {
     /// Sends the description to Claude to produce a quest with tasks.
     /// Falls back to stub tasks if the Claude CLI is unavailable.
     pub async fn plan_quest(&mut self, description: &str) -> Result<Quest> {
-        eprintln!("[coordinator] Planning quest from: {description:?}");
+        info!("Planning quest from: {description:?}");
 
         let planning_prompt = self.build_planning_prompt()?;
 
@@ -544,7 +546,7 @@ impl Coordinator {
         let tasks = match session {
             Some(session) => self.plan_with_session(session, description).await?,
             None => {
-                eprintln!("[coordinator] Claude CLI not available — creating stub quest.");
+                warn!("Claude CLI not available — creating stub quest.");
                 self.stub_tasks()
             }
         };
@@ -591,8 +593,8 @@ impl Coordinator {
                     }
                 }
                 Some(Event::Result(result)) => {
-                    eprintln!(
-                        "[coordinator] Planning complete. Turns: {}, Cost: ${:.4}",
+                    info!(
+                        "Planning complete. Turns: {}, Cost: ${:.4}",
                         result.num_turns,
                         result.total_cost_usd.unwrap_or(0.0)
                     );
@@ -615,7 +617,7 @@ impl Coordinator {
         let tasks = self.parse_task_list(&response_text);
 
         if tasks.is_empty() {
-            eprintln!("[coordinator] Claude did not return parseable tasks. Using stub tasks.");
+            warn!("Claude did not return parseable tasks. Using stub tasks.");
             Ok(self.stub_tasks())
         } else {
             Ok(tasks)
@@ -693,25 +695,25 @@ impl Coordinator {
         quest.updated_at = chrono::Utc::now();
         self.quest_store.save(&quest)?;
 
-        eprintln!("[coordinator] Quest {} is now active", &quest.id[..8]);
+        info!("Quest {} is now active", &quest.id[..8]);
 
         // Dispatch workers for pending tasks.
         let worker = Worker::new();
         for task in &mut quest.tasks {
             if task.status == TaskStatus::Pending {
-                eprintln!("[coordinator] Dispatching worker for: {}", task.title);
+                info!("Dispatching worker for: {}", task.title);
                 match worker.spawn_worker(task).await {
                     Ok(worktree_id) => {
-                        eprintln!(
-                            "[coordinator] Worker spawned: {} -> {}",
+                        info!(
+                            "Worker spawned: {} -> {}",
                             task.title, worktree_id
                         );
                         task.assigned_to = Some(worktree_id);
                         task.status = TaskStatus::InProgress;
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[coordinator] Failed to spawn worker for {}: {e}",
+                        error!(
+                            "Failed to spawn worker for {}: {e}",
                             task.title
                         );
                         // Don't fail the whole quest — just log and continue.
