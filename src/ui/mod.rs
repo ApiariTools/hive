@@ -172,7 +172,7 @@ async fn try_auto_start_daemon(workspace_root: &Path) -> bool {
     }
 
     // Try starting the daemon.
-    eprintln!("[ui] Auto-starting daemon...");
+    tracing::info!("Auto-starting daemon...");
     match crate::daemon::start(false).await {
         Ok(()) => {
             // Wait for socket to appear (up to 5s).
@@ -184,11 +184,11 @@ async fn try_auto_start_daemon(workspace_root: &Path) -> bool {
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            eprintln!("[ui] Daemon started but socket not ready");
+            tracing::warn!("Daemon started but socket not ready");
             false
         }
         Err(e) => {
-            eprintln!("[ui] Failed to auto-start daemon: {e}");
+            tracing::error!(error = %e, "Failed to auto-start daemon");
             false
         }
     }
@@ -214,7 +214,7 @@ async fn daemon_client_task(
 
     // On connect, request current dispatch state for sync.
     if let Err(e) = client.send_get_dispatch_state().await {
-        eprintln!("[ui] Failed to request dispatch state: {e}");
+        tracing::warn!(error = %e, "Failed to request dispatch state");
     }
 
     loop {
