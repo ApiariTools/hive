@@ -123,9 +123,9 @@ enum Command {
     Dispatch {
         /// Raw task description.
         description: String,
-        /// Target repo.
+        /// Target repo(s). Repeatable: --repo hive --repo swarm.
         #[arg(long)]
-        repo: Option<String>,
+        repo: Vec<String>,
         /// Stop after a specific stage (refine, context, plan).
         #[arg(long)]
         until: Option<String>,
@@ -262,7 +262,7 @@ async fn main() -> Result<()> {
             cmd_dispatch(
                 &cwd,
                 &description,
-                repo.as_deref(),
+                &repo,
                 until.as_deref(),
                 &profile,
                 dry_run,
@@ -482,7 +482,7 @@ async fn cmd_verify(cwd: &Path, worktree_id: &str) -> Result<()> {
 async fn cmd_dispatch(
     cwd: &Path,
     description: &str,
-    repo: Option<&str>,
+    repos: &[String],
     until: Option<&str>,
     profile: &str,
     dry_run: bool,
@@ -499,14 +499,16 @@ async fn cmd_dispatch(
         None
     };
 
-    let result = pipeline::run_pipeline(pipeline::PipelineOptions {
+    let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
+    let result = pipeline::run_pipeline_multi(pipeline::MultiPipelineOptions {
         raw_prompt: description,
         workspace_root: &workspace.root,
         conventions: workspace.conventions.as_deref(),
-        repo,
+        repos: repo_refs,
         profile,
         until: until_stage,
         dry_run,
+        on_progress: None,
     })
     .await?;
 
@@ -516,21 +518,27 @@ async fn cmd_dispatch(
     );
 
     // Print artifacts if dry-run or stopped early
-    if dry_run || result.worktree_id.is_none() {
+    let any_dispatched = result.per_repo.iter().any(|r| r.worktree_id.is_some());
+    if dry_run || !any_dispatched {
         println!("--- TASK.md ---");
         println!("{}", result.task_md);
-        if let Some(ctx) = &result.context_md {
-            println!("\n--- CONTEXT.md ---");
-            println!("{ctx}");
-        }
-        if let Some(plan) = &result.plan_md {
-            println!("\n--- PLAN.md ---");
-            println!("{plan}");
+        for pr in &result.per_repo {
+            println!("\n=== {} ===", pr.repo);
+            if let Some(ctx) = &pr.context_md {
+                println!("\n--- CONTEXT.md ---");
+                println!("{ctx}");
+            }
+            if let Some(plan) = &pr.plan_md {
+                println!("\n--- PLAN.md ---");
+                println!("{plan}");
+            }
         }
     }
 
-    if let Some(wt_id) = &result.worktree_id {
-        println!("{wt_id}");
+    for pr in &result.per_repo {
+        if let Some(wt_id) = &pr.worktree_id {
+            println!("{wt_id}");
+        }
     }
 
     Ok(())

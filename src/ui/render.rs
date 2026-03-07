@@ -1,6 +1,8 @@
 //! Rendering logic for the unified hive TUI.
 
-use super::app::{App, ChatLine, Panel, SidebarItem};
+use super::app::{
+    App, ChatLine, DispatchPhase, DispatchState, DispatchStatus, Panel, RepoStage, SidebarItem,
+};
 use crate::keeper::discovery::WorktreeInfo;
 use crate::keeper::tui::theme;
 use chrono::Local;
@@ -8,9 +10,15 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+
+/// Braille spinner animation frames.
+const SPINNER_FRAMES: &[char] = &[
+    '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
+    '\u{2807}', '\u{280F}',
+];
 
 /// Main draw entry point.
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -49,11 +57,17 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Right-aligned status.
-    let status_text = " hive ui  ^b n/p:tab  q:quit ";
+    let conn_indicator = if app.daemon_connected {
+        "\u{25cf}"
+    } else {
+        "\u{25cb}"
+    };
+    let status_text = format!(" {conn_indicator} hive ui  ^b n/p:tab  q:quit ");
     let used: usize = spans.iter().map(|s| s.width()).sum();
+    let status_len = status_text.chars().count();
     let padding = (area.width as usize)
         .saturating_sub(used.min(area.width as usize))
-        .saturating_sub(status_text.len().min(area.width as usize));
+        .saturating_sub(status_len.min(area.width as usize));
     if padding > 0 {
         spans.push(Span::raw(" ".repeat(padding)));
     }
@@ -67,6 +81,12 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
 // ── Body ─────────────────────────────────────────────────
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &App) {
+    if app.zoomed {
+        // Full-width content panel (no sidebar).
+        draw_content_panel(frame, area, app);
+        return;
+    }
+
     // Responsive split: wider sidebar for 3-line rows.
     let left_pct = if area.width > 120 {
         20
@@ -114,10 +134,14 @@ fn draw_sidebar_divider(frame: &mut Frame, area: Rect) {
 
 fn draw_sidebar_list(frame: &mut Frame, area: Rect, app: &App) {
     let workers = app.flat_workers();
+    let has_dispatch = app.active_dispatch.is_some();
     let viewport = area.height as usize;
 
-    // Build item heights: Chat=2, each Worker=3
+    // Build item heights: Chat=2, Dispatch=2 (optional), each Worker=3
     let mut heights: Vec<usize> = vec![2]; // Chat item
+    if has_dispatch {
+        heights.push(2); // Dispatch item
+    }
     if workers.is_empty() {
         heights.push(1); // "No workers" line
     } else {
@@ -133,14 +157,16 @@ fn draw_sidebar_list(frame: &mut Frame, area: Rect, app: &App) {
     }
     let total_height = cumulative;
 
-    // Find selected item index (0 = Chat, 1+ = workers)
+    // Find selected item index in the heights array
+    let dispatch_offset = usize::from(has_dispatch);
     let selected_item = match app.sidebar_selection {
         SidebarItem::Chat => 0,
+        SidebarItem::Dispatch => 1, // only valid when has_dispatch
         SidebarItem::Worker(i) => {
             if workers.is_empty() {
                 0
             } else {
-                i + 1
+                1 + dispatch_offset + i
             }
         }
     };
@@ -169,22 +195,35 @@ fn draw_sidebar_list(frame: &mut Frame, area: Rect, app: &App) {
     let mut render_y = area.y;
     let viewport_bottom = area.y + area.height;
 
-    // Item 0: Chat
-    {
-        let item_top = tops[0];
-        let item_bottom = item_top + heights[0];
-        if item_bottom > scroll && render_y < viewport_bottom {
-            let skip_top = scroll.saturating_sub(item_top);
-            let available = (viewport_bottom - render_y) as usize;
-            let render_h = (heights[0] - skip_top).min(available);
-            if render_h > 0 {
-                let rect = Rect::new(area.x, render_y, area.width, render_h as u16);
-                render_y += render_h as u16;
-                draw_chat_sidebar_item(frame, rect, app);
+    // Generic render helper for an item in the heights array.
+    let mut render_item =
+        |item_idx: usize, render_y: &mut u16, draw_fn: &dyn Fn(&mut Frame, Rect)| {
+            let item_top = tops[item_idx];
+            let item_bottom = item_top + heights[item_idx];
+            if item_bottom > scroll && *render_y < viewport_bottom {
+                let skip_top = scroll.saturating_sub(item_top);
+                let available = (viewport_bottom - *render_y) as usize;
+                let render_h = (heights[item_idx] - skip_top).min(available);
+                if render_h > 0 {
+                    let rect = Rect::new(area.x, *render_y, area.width, render_h as u16);
+                    *render_y += render_h as u16;
+                    draw_fn(frame, rect);
+                }
             }
-        }
+        };
+
+    // Item 0: Chat
+    render_item(0, &mut render_y, &|f, r| draw_chat_sidebar_item(f, r, app));
+
+    // Item 1 (optional): Dispatch
+    if has_dispatch {
+        render_item(1, &mut render_y, &|f, r| {
+            draw_dispatch_sidebar_item(f, r, app)
+        });
     }
 
+    // Workers
+    let worker_start = 1 + dispatch_offset;
     if workers.is_empty() {
         // "No workers" placeholder
         if render_y < viewport_bottom {
@@ -194,7 +233,7 @@ fn draw_sidebar_list(frame: &mut Frame, area: Rect, app: &App) {
         }
     } else {
         for (i, (_, wt)) in workers.iter().enumerate() {
-            let item_idx = i + 1;
+            let item_idx = worker_start + i;
             let item_top = tops[item_idx];
             let item_bottom = item_top + heights[item_idx];
 
@@ -260,12 +299,14 @@ fn draw_chat_sidebar_item(frame: &mut Frame, area: Rect, app: &App) {
         );
     }
 
-    // Line 2: "     ready|streaming..."
+    // Line 2: "     ready|streaming...|daemon"
     if area.height >= 2 {
         let status_text = if app.streaming {
             "streaming..."
+        } else if app.daemon_connected {
+            "daemon"
         } else {
-            "ready"
+            "local"
         };
         let line2 = Line::from(vec![
             Span::styled("    ", Style::default()),
@@ -273,6 +314,107 @@ fn draw_chat_sidebar_item(frame: &mut Frame, area: Rect, app: &App) {
                 status_text,
                 Style::default().fg(ratatui::style::Color::Rgb(100, 97, 90)),
             ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line2).style(row_style),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+    }
+}
+
+/// 2-line dispatch entry in the sidebar.
+fn draw_dispatch_sidebar_item(frame: &mut Frame, area: Rect, app: &App) {
+    let is_selected = app.sidebar_selection == SidebarItem::Dispatch;
+
+    let row_style = if is_selected {
+        Style::default().bg(ratatui::style::Color::Rgb(58, 50, 42))
+    } else {
+        Style::default().bg(theme::COMB)
+    };
+    frame.render_widget(Paragraph::new("").style(row_style), area);
+
+    let selector = if is_selected { "\u{25b8}" } else { " " };
+    let text_style = if is_selected {
+        theme::selected()
+    } else {
+        theme::text()
+    };
+
+    // Line 1: " ▸ ⚙ Dispatch"
+    if area.height >= 1 {
+        let line1 = Line::from(vec![
+            Span::styled(format!(" {selector}"), text_style),
+            Span::styled(" ", Style::default()),
+            Span::styled("\u{2699} ", theme::accent()),
+            Span::styled("Dispatch", text_style),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line1).style(row_style),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+
+    // Line 2: status text with spinner for active stages
+    if area.height >= 2 {
+        let (status_text, status_style) = if let Some(ref d) = app.active_dispatch {
+            match d.status {
+                DispatchStatus::Refining => {
+                    let spinner = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
+                    (
+                        format!("{spinner} Refining..."),
+                        Style::default().fg(theme::HONEY),
+                    )
+                }
+                DispatchStatus::Running => {
+                    let spinner = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
+                    // Find the first repo that isn't done yet.
+                    let active = d
+                        .per_repo
+                        .iter()
+                        .find(|r| r.stage != RepoStage::Done)
+                        .map(|r| {
+                            let stage = match r.stage {
+                                RepoStage::Context => "context",
+                                RepoStage::Planning => "plan",
+                                RepoStage::Pending => "pending",
+                                RepoStage::Done => "done",
+                            };
+                            format!("{}: {stage}", r.repo)
+                        })
+                        .unwrap_or_else(|| "running".into());
+                    (
+                        format!("{spinner} {active}"),
+                        Style::default().fg(theme::HONEY),
+                    )
+                }
+                DispatchStatus::Ready => {
+                    let count = d.per_repo.len();
+                    if count == 0 {
+                        (
+                            "no results".to_string(),
+                            Style::default().fg(ratatui::style::Color::Rgb(100, 97, 90)),
+                        )
+                    } else {
+                        (
+                            format!(
+                                "\u{2713} {count} repo{} ready",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                            Style::default().fg(theme::POLLEN),
+                        )
+                    }
+                }
+            }
+        } else {
+            (
+                String::new(),
+                Style::default().fg(ratatui::style::Color::Rgb(100, 97, 90)),
+            )
+        };
+
+        let line2 = Line::from(vec![
+            Span::styled("    ", Style::default()),
+            Span::styled(status_text, status_style),
         ]);
         frame.render_widget(
             Paragraph::new(line2).style(row_style),
@@ -443,7 +585,45 @@ fn draw_sidebar_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Context-sensitive hints.
-    let hints = if app.is_chat_selected() {
+    let hints = if let Some(ref d) = app.dispatch {
+        match d.phase {
+            super::app::DispatchPhase::SelectRepos => Line::from(vec![
+                Span::styled(" j", theme::key_hint()),
+                Span::styled("/", theme::key_desc()),
+                Span::styled("k", theme::key_hint()),
+                Span::styled(" nav  ", theme::key_desc()),
+                Span::styled("⎵", theme::key_hint()),
+                Span::styled(" toggle  ", theme::key_desc()),
+                Span::styled("↵", theme::key_hint()),
+                Span::styled(" next  ", theme::key_desc()),
+                Span::styled("esc", theme::key_hint()),
+                Span::styled(" cancel", theme::key_desc()),
+            ]),
+            super::app::DispatchPhase::EnterPrompt => Line::from(vec![
+                Span::styled(" ↵", theme::key_hint()),
+                Span::styled(" submit  ", theme::key_desc()),
+                Span::styled("alt+↵", theme::key_hint()),
+                Span::styled(" newline  ", theme::key_desc()),
+                Span::styled("esc", theme::key_hint()),
+                Span::styled(" back", theme::key_desc()),
+            ]),
+        }
+    } else if app.is_dispatch_selected() {
+        Line::from(vec![
+            Span::styled(" j", theme::key_hint()),
+            Span::styled("/", theme::key_desc()),
+            Span::styled("k", theme::key_hint()),
+            Span::styled(" nav  ", theme::key_desc()),
+            Span::styled("\u{21b5}", theme::key_hint()),
+            Span::styled(" toggle  ", theme::key_desc()),
+            Span::styled("c", theme::key_hint()),
+            Span::styled(" collapse  ", theme::key_desc()),
+            Span::styled("y", theme::key_hint()),
+            Span::styled("/", theme::key_desc()),
+            Span::styled("n", theme::key_hint()),
+            Span::styled(" confirm/cancel", theme::key_desc()),
+        ])
+    } else if app.is_chat_selected() {
         Line::from(vec![
             Span::styled(" j", theme::key_hint()),
             Span::styled("/", theme::key_desc()),
@@ -462,8 +642,8 @@ fn draw_sidebar_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(" close  ", theme::key_desc()),
             Span::styled("p", theme::key_hint()),
             Span::styled(" PR  ", theme::key_desc()),
-            Span::styled("c", theme::key_hint()),
-            Span::styled(" copy", theme::key_desc()),
+            Span::styled("d", theme::key_hint()),
+            Span::styled(" dispatch", theme::key_desc()),
         ])
     };
     frame.render_widget(Paragraph::new(hints), area);
@@ -472,6 +652,11 @@ fn draw_sidebar_status_bar(frame: &mut Frame, area: Rect, app: &App) {
 // ── Content Panel (contextual) ───────────────────────────
 
 fn draw_content_panel(frame: &mut Frame, area: Rect, app: &App) {
+    if let Some(ref dispatch) = app.dispatch {
+        draw_dispatch_overlay(frame, area, dispatch);
+        return;
+    }
+
     match app.sidebar_selection {
         SidebarItem::Chat => {
             let right = Layout::default()
@@ -485,8 +670,635 @@ fn draw_content_panel(frame: &mut Frame, area: Rect, app: &App) {
             draw_chat_panel(frame, right[0], app);
             draw_input_bar(frame, right[1], app, "> ");
         }
+        SidebarItem::Dispatch => {
+            draw_dispatch_review(frame, area, app);
+        }
         SidebarItem::Worker(_) => {
             draw_worker_output(frame, area, app);
+        }
+    }
+}
+
+// ── Dispatch Overlay ─────────────────────────────────────
+
+fn draw_dispatch_overlay(frame: &mut Frame, area: Rect, dispatch: &DispatchState) {
+    match dispatch.phase {
+        DispatchPhase::SelectRepos => {
+            let block = Block::default()
+                .title(Span::styled(" Dispatch ", theme::title()))
+                .borders(Borders::ALL)
+                .border_style(theme::border_active());
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Select repos (Space to toggle):",
+                theme::text(),
+            )));
+            lines.push(Line::from(""));
+
+            for (i, repo) in dispatch.repos.iter().enumerate() {
+                let check = if dispatch.selected[i] { "x" } else { " " };
+                let cursor = if i == dispatch.cursor {
+                    "\u{25b8}"
+                } else {
+                    " "
+                };
+                let style = if i == dispatch.cursor {
+                    theme::selected()
+                } else {
+                    theme::text()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("  {cursor} [{check}] {repo}"),
+                    style,
+                )));
+            }
+
+            let paragraph = Paragraph::new(lines);
+            frame.render_widget(paragraph, inner);
+        }
+        DispatchPhase::EnterPrompt => {
+            let selected: Vec<&str> = dispatch
+                .repos
+                .iter()
+                .zip(dispatch.selected.iter())
+                .filter(|&(_, sel)| *sel)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let title = format!(" Dispatch to: {} ", selected.join(", "));
+
+            let block = Block::default()
+                .title(Span::styled(title, theme::title()))
+                .borders(Borders::ALL)
+                .border_style(theme::border_active());
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            // Calculate cursor position in multiline text.
+            let buf_lines: Vec<&str> = dispatch.prompt.split('\n').collect();
+            let mut cursor_line = 0usize;
+            let mut cursor_col = 0usize;
+            let mut pos = 0usize;
+            for (i, line) in buf_lines.iter().enumerate() {
+                let line_chars = line.chars().count();
+                if pos + line_chars >= dispatch.prompt_cursor && i < buf_lines.len() {
+                    cursor_line = i;
+                    cursor_col = dispatch.prompt_cursor - pos;
+                    break;
+                }
+                pos += line_chars + 1; // +1 for \n
+            }
+
+            // Build styled lines with cursor highlight.
+            let mut styled_lines: Vec<Line> = Vec::new();
+            for (i, line_str) in buf_lines.iter().enumerate() {
+                let prefix = if i == 0 { " \u{25b8} " } else { "   " };
+                let prefix_style = if i == 0 {
+                    theme::accent()
+                } else {
+                    theme::muted()
+                };
+
+                if i == cursor_line {
+                    let before: String = line_str.chars().take(cursor_col).collect();
+                    let cursor_char = line_str.chars().nth(cursor_col).unwrap_or(' ');
+                    let after: String = line_str.chars().skip(cursor_col + 1).collect();
+                    styled_lines.push(Line::from(vec![
+                        Span::styled(prefix, prefix_style),
+                        Span::styled(before, theme::text()),
+                        Span::styled(
+                            cursor_char.to_string(),
+                            Style::default()
+                                .fg(ratatui::style::Color::Rgb(30, 28, 25))
+                                .bg(theme::HONEY),
+                        ),
+                        Span::styled(after, theme::text()),
+                    ]));
+                } else {
+                    styled_lines.push(Line::from(vec![
+                        Span::styled(prefix, prefix_style),
+                        Span::styled(line_str.to_string(), theme::text()),
+                    ]));
+                }
+            }
+
+            // Input area: leave 1 row for hint at the bottom.
+            let input_height = inner.height.saturating_sub(1);
+            let input_area = Rect::new(inner.x, inner.y, inner.width, input_height);
+
+            let text = Text::from(styled_lines);
+            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), input_area);
+
+            // Hint at bottom.
+            let hint = Line::from(vec![
+                Span::styled("\u{21b5}", theme::key_hint()),
+                Span::styled(" submit  ", theme::key_desc()),
+                Span::styled("alt+\u{21b5}", theme::key_hint()),
+                Span::styled(" newline  ", theme::key_desc()),
+                Span::styled("esc", theme::key_hint()),
+                Span::styled(" back", theme::key_desc()),
+            ]);
+            let hint_area = Rect::new(
+                inner.x + 1,
+                inner.y + inner.height - 1,
+                inner.width.saturating_sub(2),
+                1,
+            );
+            frame.render_widget(Paragraph::new(hint), hint_area);
+        }
+    }
+}
+
+// ── Dispatch Review Panel ────────────────────────────────
+
+fn draw_dispatch_review(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(ref dispatch) = app.active_dispatch else {
+        return;
+    };
+
+    let border_style = if app.focus == Panel::Chat {
+        theme::border_active()
+    } else {
+        theme::border()
+    };
+
+    let spinner = SPINNER_FRAMES[app.spinner_tick % SPINNER_FRAMES.len()];
+
+    match dispatch.status {
+        DispatchStatus::Refining | DispatchStatus::Running => {
+            let title_text = if dispatch.status == DispatchStatus::Refining {
+                format!(" Dispatch \u{2014} {spinner} refining... ")
+            } else {
+                " Dispatch ".to_string()
+            };
+            let block = Block::default()
+                .title(Span::styled(title_text, theme::title()))
+                .borders(Borders::ALL)
+                .border_style(border_style);
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let mut lines: Vec<Line> = Vec::new();
+
+            // Task description
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                if dispatch.title.is_empty() {
+                    format!("  {}", dispatch.task)
+                } else {
+                    format!("  {}", dispatch.title)
+                },
+                theme::accent(),
+            )));
+            lines.push(Line::from(""));
+
+            // Refine status
+            if dispatch.status == DispatchStatus::Refining {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {spinner} "), Style::default().fg(theme::HONEY)),
+                    Span::styled("Refining task...", Style::default().fg(theme::HONEY)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("  \u{2713} ", Style::default().fg(theme::POLLEN)),
+                    Span::styled("Refined", Style::default().fg(theme::POLLEN)),
+                ]));
+            }
+            lines.push(Line::from(""));
+
+            // Per-repo stage stepper (only in Running)
+            if dispatch.status == DispatchStatus::Running {
+                for r in &dispatch.per_repo {
+                    // Repo header
+                    let header = format!(
+                        "  \u{2500}\u{2500} {} {}",
+                        r.repo,
+                        "\u{2500}".repeat(
+                            (inner.width as usize)
+                                .saturating_sub(6 + r.repo.len())
+                                .min(40)
+                        )
+                    );
+                    lines.push(Line::from(Span::styled(
+                        header,
+                        Style::default().fg(theme::WAX),
+                    )));
+
+                    // Context line
+                    let (ctx_icon, ctx_style) = match r.stage {
+                        RepoStage::Pending => {
+                            ("\u{25CB}".to_string(), Style::default().fg(theme::SMOKE))
+                        }
+                        RepoStage::Context => {
+                            (format!("{spinner}"), Style::default().fg(theme::HONEY))
+                        }
+                        RepoStage::Planning | RepoStage::Done => {
+                            ("\u{2713}".to_string(), Style::default().fg(theme::POLLEN))
+                        }
+                    };
+                    let ctx_detail = if let Some(file_count) = r.file_count
+                        && matches!(r.stage, RepoStage::Planning | RepoStage::Done)
+                    {
+                        format!("  {} files", file_count)
+                    } else if r.stage == RepoStage::Context {
+                        "...".to_string()
+                    } else {
+                        String::new()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {ctx_icon} "), ctx_style),
+                        Span::styled("Context", ctx_style),
+                        Span::styled(
+                            ctx_detail,
+                            Style::default().fg(ratatui::style::Color::Rgb(100, 97, 90)),
+                        ),
+                    ]));
+
+                    // Plan line
+                    let (plan_icon, plan_style) = match r.stage {
+                        RepoStage::Pending | RepoStage::Context => {
+                            ("\u{25CB}".to_string(), Style::default().fg(theme::SMOKE))
+                        }
+                        RepoStage::Planning => {
+                            (format!("{spinner}"), Style::default().fg(theme::HONEY))
+                        }
+                        RepoStage::Done => {
+                            ("\u{2713}".to_string(), Style::default().fg(theme::POLLEN))
+                        }
+                    };
+                    let plan_detail = if let Some(step_count) = r.step_count
+                        && r.stage == RepoStage::Done
+                    {
+                        format!("  {} steps", step_count)
+                    } else if r.stage == RepoStage::Planning {
+                        "...".to_string()
+                    } else {
+                        String::new()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {plan_icon} "), plan_style),
+                        Span::styled("Plan", plan_style),
+                        Span::styled(
+                            plan_detail,
+                            Style::default().fg(ratatui::style::Color::Rgb(100, 97, 90)),
+                        ),
+                    ]));
+
+                    lines.push(Line::from(""));
+                }
+            }
+
+            let visible_height = inner.height as usize;
+            let visible_lines: Vec<Line> = lines.into_iter().take(visible_height).collect();
+            let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
+            frame.render_widget(paragraph, inner);
+        }
+        DispatchStatus::Ready => {
+            if dispatch.per_repo.is_empty() {
+                let block = Block::default()
+                    .title(Span::styled(" Dispatch Review ", theme::title()))
+                    .borders(Borders::ALL)
+                    .border_style(border_style);
+
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "  No pipeline results were generated.",
+                        Style::default().fg(ratatui::style::Color::Rgb(200, 60, 60)),
+                    )),
+                    Line::from(Span::styled(
+                        "  Try rephrasing your task or selecting different repos.",
+                        theme::muted(),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled("  Press n to dismiss.", theme::muted())),
+                ];
+                frame.render_widget(Paragraph::new(lines), inner);
+                return;
+            }
+
+            let hint = " y confirm  n cancel  j/k nav  \u{21b5} toggle  c collapse  u/d scroll ";
+            let block = Block::default()
+                .title(Span::styled(" Dispatch Review ", theme::title()))
+                .title_bottom(Line::from(Span::styled(hint, theme::subtitle())).centered())
+                .borders(Borders::ALL)
+                .border_style(border_style);
+
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+
+            let heading_style = Style::default().fg(theme::POLLEN);
+            let dim_style = Style::default().fg(ratatui::style::Color::Rgb(100, 97, 90));
+
+            let mut lines: Vec<Line> = Vec::new();
+            let mut focused_line: usize = 0; // line index of the focused section header
+
+            // ── Section 0: Task ──
+            let task_focused = dispatch.focused_section == 0;
+            let task_collapsed = dispatch
+                .sections
+                .first()
+                .map(|s| s.collapsed)
+                .unwrap_or(false);
+            let task_icon = if task_collapsed {
+                "\u{25b6}"
+            } else {
+                "\u{25bc}"
+            };
+            let task_summary = format!("scope: {}", dispatch.repos.join(", "));
+            let task_header_style = if task_focused {
+                Style::default()
+                    .fg(theme::HONEY)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme::NECTAR)
+                    .add_modifier(Modifier::BOLD)
+            };
+
+            if task_focused {
+                focused_line = lines.len();
+            }
+            let task_cursor = if task_focused { "\u{25b8}" } else { " " };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{task_cursor}{task_icon} "), task_header_style),
+                Span::styled("Task", task_header_style),
+                Span::styled(format!("  {task_summary}"), dim_style),
+            ]));
+
+            if !task_collapsed && !dispatch.task_md.is_empty() {
+                // Show Description + Scope + Acceptance Criteria
+                let mut in_section = false;
+                let mut blank_run = 0u8;
+                for md_line in dispatch.task_md.lines() {
+                    let trimmed = md_line.trim();
+                    if trimmed.starts_with("## ") {
+                        let section_name = trimmed.trim_start_matches('#').trim();
+                        match section_name {
+                            "Description" | "Scope" | "Acceptance Criteria" => {
+                                in_section = true;
+                                lines.push(Line::from(""));
+                                lines.push(Line::from(Span::styled(
+                                    format!("    {section_name}"),
+                                    heading_style,
+                                )));
+                                blank_run = 0;
+                                continue;
+                            }
+                            _ => {
+                                in_section = false;
+                                continue;
+                            }
+                        }
+                    }
+                    if trimmed.starts_with("# ") {
+                        let title = trimmed.trim_start_matches('#').trim();
+                        lines.push(Line::from(Span::styled(
+                            format!("    {title}"),
+                            Style::default()
+                                .fg(theme::HONEY)
+                                .add_modifier(Modifier::BOLD),
+                        )));
+                        continue;
+                    }
+                    if in_section {
+                        if trimmed.is_empty() {
+                            blank_run += 1;
+                            if blank_run <= 1 {
+                                lines.push(Line::from(""));
+                            }
+                        } else {
+                            blank_run = 0;
+                            lines.push(Line::from(Span::styled(
+                                format!("    {trimmed}"),
+                                theme::text(),
+                            )));
+                        }
+                    }
+                }
+                lines.push(Line::from(""));
+            }
+
+            // ── Sections 1..N: per-repo ──
+            for (i, r) in dispatch.per_repo.iter().enumerate() {
+                let section_idx = i + 1;
+                let focused = dispatch.focused_section == section_idx;
+                let collapsed = dispatch
+                    .sections
+                    .get(section_idx)
+                    .map(|s| s.collapsed)
+                    .unwrap_or(false);
+                let icon = if collapsed { "\u{25b6}" } else { "\u{25bc}" };
+
+                let counts = match (r.file_count, r.step_count) {
+                    (Some(f), Some(s)) => format!("  {f} files, {s} steps"),
+                    (Some(f), None) => format!("  {f} files"),
+                    (None, Some(s)) => format!("  {s} steps"),
+                    (None, None) => String::new(),
+                };
+
+                let header_style = if focused {
+                    Style::default()
+                        .fg(theme::HONEY)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(theme::NECTAR)
+                        .add_modifier(Modifier::BOLD)
+                };
+
+                if focused {
+                    focused_line = lines.len();
+                }
+                let cursor = if focused { "\u{25b8}" } else { " " };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{cursor}{icon} "), header_style),
+                    Span::styled(&r.repo, header_style),
+                    Span::styled(counts, dim_style),
+                ]));
+
+                if collapsed {
+                    continue;
+                }
+
+                // Context: relevant files
+                if let Some(ref ctx) = r.context_md {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled("    Files", heading_style)));
+                    let mut in_files = false;
+                    for ctx_line in ctx.lines() {
+                        let trimmed = ctx_line.trim();
+                        if trimmed.starts_with("## Relevant") {
+                            in_files = true;
+                            continue;
+                        }
+                        if trimmed.starts_with("## ") && in_files {
+                            break;
+                        }
+                        if in_files && trimmed.starts_with("- ") {
+                            let content = trimmed.trim_start_matches("- ");
+                            if let (Some(start), Some(end)) =
+                                (content.find('`'), content.rfind('`'))
+                            {
+                                if end > start {
+                                    let path = &content[start + 1..end];
+                                    let desc = content[end + 1..]
+                                        .trim()
+                                        .trim_start_matches('\u{2014}')
+                                        .trim_start_matches("—")
+                                        .trim_start_matches('-')
+                                        .trim();
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            format!("    {path}"),
+                                            Style::default().fg(theme::HONEY),
+                                        ),
+                                        Span::styled(
+                                            if desc.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!("  {desc}")
+                                            },
+                                            dim_style,
+                                        ),
+                                    ]));
+                                }
+                            } else {
+                                lines.push(Line::from(Span::styled(
+                                    format!("    {content}"),
+                                    theme::text(),
+                                )));
+                            }
+                        }
+                    }
+
+                    // Key patterns
+                    let mut in_patterns = false;
+                    for ctx_line in ctx.lines() {
+                        let trimmed = ctx_line.trim();
+                        if trimmed.starts_with("## Key Patterns") {
+                            in_patterns = true;
+                            lines.push(Line::from(""));
+                            lines.push(Line::from(Span::styled("    Patterns", heading_style)));
+                            continue;
+                        }
+                        if trimmed.starts_with("## ") && in_patterns {
+                            break;
+                        }
+                        if in_patterns && trimmed.starts_with("- ") {
+                            let content = trimmed.trim_start_matches("- ");
+                            lines.push(Line::from(Span::styled(
+                                format!("    {content}"),
+                                dim_style,
+                            )));
+                        }
+                    }
+                }
+
+                // Plan: approach + steps + testing
+                if let Some(ref plan) = r.plan_md {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled("    Plan", heading_style)));
+
+                    let mut in_approach = false;
+                    for plan_line in plan.lines() {
+                        let trimmed = plan_line.trim();
+                        if trimmed.starts_with("## Approach") {
+                            in_approach = true;
+                            continue;
+                        }
+                        if trimmed.starts_with("## ") && in_approach {
+                            break;
+                        }
+                        if in_approach && !trimmed.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                format!("    {trimmed}"),
+                                dim_style,
+                            )));
+                        }
+                    }
+
+                    lines.push(Line::from(""));
+                    let mut in_steps = false;
+                    for plan_line in plan.lines() {
+                        let trimmed = plan_line.trim();
+                        if trimmed.starts_with("## Steps") {
+                            in_steps = true;
+                            continue;
+                        }
+                        if trimmed.starts_with("## ") && in_steps {
+                            break;
+                        }
+                        if !in_steps {
+                            continue;
+                        }
+                        let is_step = trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
+                            && trimmed.contains('.');
+                        if is_step {
+                            let clean = trimmed.replace("**", "");
+                            lines.push(Line::from(Span::styled(
+                                format!("    {clean}"),
+                                theme::text(),
+                            )));
+                        } else if !trimmed.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                format!("      {trimmed}"),
+                                dim_style,
+                            )));
+                        }
+                    }
+
+                    let mut in_testing = false;
+                    for plan_line in plan.lines() {
+                        let trimmed = plan_line.trim();
+                        if trimmed.starts_with("## Testing") {
+                            in_testing = true;
+                            lines.push(Line::from(""));
+                            lines.push(Line::from(Span::styled("    Testing", heading_style)));
+                            continue;
+                        }
+                        if trimmed.starts_with("## ") && in_testing {
+                            break;
+                        }
+                        if in_testing && trimmed.starts_with("- ") {
+                            let content = trimmed.trim_start_matches("- ");
+                            lines.push(Line::from(Span::styled(
+                                format!("    {content}"),
+                                dim_style,
+                            )));
+                        }
+                    }
+                }
+
+                lines.push(Line::from(""));
+            }
+
+            // Scroll: use stored offset, but auto-adjust if focused section is out of view.
+            let visible_height = inner.height as usize;
+            let mut scroll = dispatch.scroll as usize;
+            if focused_line < scroll {
+                scroll = focused_line;
+            } else if focused_line >= scroll + visible_height {
+                scroll = focused_line.saturating_sub(visible_height / 3);
+            }
+            scroll = scroll.min(lines.len().saturating_sub(visible_height.min(lines.len())));
+
+            let visible_lines: Vec<Line> = lines
+                .into_iter()
+                .skip(scroll)
+                .take(visible_height)
+                .collect();
+            let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
+            frame.render_widget(paragraph, inner);
         }
     }
 }

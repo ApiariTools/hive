@@ -120,6 +120,17 @@ impl Coordinator {
         prompt.push_str("'Plan and implement this completely in one session — do not pause mid-task to ask for confirmation or approval. ");
         prompt.push_str("Use the Plan subagent internally if helpful, but then immediately proceed to implement, commit, and open a PR without waiting for input.'\n\n");
 
+        prompt.push_str("## Multi-repo Dispatch\n");
+        prompt.push_str("When you receive a message starting with [DISPATCH], the user wants to dispatch a task to multiple repos.\n");
+        prompt.push_str("For each listed target repo:\n");
+        prompt.push_str("1. Consider the repo's role (backend vs SDK, provider vs consumer, library vs binary)\n");
+        prompt.push_str("2. Produce a ```dispatch:<repo> block with a clear, actionable prompt tailored to that repo\n");
+        prompt.push_str("3. Include relevant context about shared API contracts or interfaces\n");
+        prompt.push_str(
+            "4. Each prompt must be self-contained — workers cannot see other repos' prompts\n",
+        );
+        prompt.push_str("Do NOT research the codebase or use tools when handling [DISPATCH]. Focus solely on producing dispatch blocks.\n\n");
+
         // Hive CLI subcommands the coordinator can invoke directly.
         prompt.push_str("## Hive CLI Subcommands\n");
         prompt.push_str("You can run these directly via Bash:\n");

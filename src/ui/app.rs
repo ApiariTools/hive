@@ -3,15 +3,67 @@
 use crate::keeper::discovery::{self, SwarmSession, WorktreeInfo};
 use crate::workspace::RegistryEntry;
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::history;
+
+/// Pipeline stage for a single repo in dispatch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RepoStage {
+    Pending,
+    Context,
+    Planning,
+    Done,
+}
+
+/// Per-repo pipeline artifacts for dispatch review.
+#[derive(Debug, Clone)]
+pub struct RepoDispatchArtifacts {
+    pub repo: String,
+    pub stage: RepoStage,
+    pub context_md: Option<String>,
+    pub plan_md: Option<String>,
+    pub file_count: Option<usize>,
+    pub step_count: Option<usize>,
+}
 
 /// Pending confirmation action.
 #[derive(Debug, Clone)]
 pub enum PendingAction {
     CloseWorker(String), // worktree_id
+}
+
+/// Status of an active dispatch workflow.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DispatchStatus {
+    Refining,
+    Running,
+    Ready,
+}
+
+/// A collapsible section in the dispatch review.
+#[derive(Debug, Clone)]
+pub struct ReviewSection {
+    pub collapsed: bool,
+}
+
+/// An active dispatch being reviewed in the sidebar/right panel.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ActiveDispatch {
+    pub task: String,
+    pub repos: Vec<String>,
+    pub status: DispatchStatus,
+    pub task_md: String,
+    pub title: String,
+    pub per_repo: Vec<RepoDispatchArtifacts>,
+    /// Scroll offset (lines from top). Auto-set on section nav, manual via arrows.
+    pub scroll: u16,
+    /// Collapsible sections: index 0 = Task, 1..=N = per_repo[i-1].
+    pub sections: Vec<ReviewSection>,
+    /// Which section has the cursor for `[/]` navigation.
+    pub focused_section: usize,
 }
 
 /// A transient flash message shown in the status bar.
@@ -32,7 +84,28 @@ pub enum Panel {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SidebarItem {
     Chat,
+    Dispatch,
     Worker(usize), // index into flat_workers()
+}
+
+/// Which step of the dispatch flow we're in.
+#[derive(Debug, Clone)]
+pub enum DispatchPhase {
+    /// Selecting repos (checkboxes).
+    SelectRepos,
+    /// Typing the task prompt.
+    EnterPrompt,
+}
+
+/// State for the dispatch overlay.
+#[derive(Debug, Clone)]
+pub struct DispatchState {
+    pub phase: DispatchPhase,
+    pub repos: Vec<String>,
+    pub selected: Vec<bool>,
+    pub cursor: usize,
+    pub prompt: String,
+    pub prompt_cursor: usize,
 }
 
 /// A line in the chat history.
@@ -83,6 +156,21 @@ pub struct App {
     pub pending_action: Option<PendingAction>,
     pub flash_message: Option<FlashMessage>,
 
+    // Daemon connection state
+    pub daemon_connected: bool,
+
+    // Dispatch overlay
+    pub dispatch: Option<DispatchState>,
+
+    // Active dispatch review (sidebar item + right panel)
+    pub active_dispatch: Option<ActiveDispatch>,
+
+    // Spinner animation tick (incremented each 100ms poll cycle)
+    pub spinner_tick: usize,
+
+    // Zoom: hide sidebar and show content panel full-width.
+    pub zoomed: bool,
+
     // Periodic refresh
     last_worker_refresh: Instant,
 }
@@ -125,6 +213,11 @@ impl App {
             sidebar_scroll: Cell::new(0),
             pending_action: None,
             flash_message: None,
+            daemon_connected: false,
+            dispatch: None,
+            active_dispatch: None,
+            spinner_tick: 0,
+            zoomed: false,
             last_worker_refresh: Instant::now(),
         }
     }
@@ -151,24 +244,31 @@ impl App {
     }
 
     /// Refresh the worker list from swarm state.
+    ///
+    /// Reads `.swarm/state.json` directly from the active workspace root
+    /// (no tmux dependency — swarm now uses a daemon).
     pub fn refresh_workers(&mut self) {
-        if let Ok(result) = discovery::discover_all() {
-            // Filter to sessions matching the active workspace.
-            if let Some(root) = self.active_workspace_root() {
-                self.sessions = result
-                    .sessions
-                    .into_iter()
-                    .filter(|s| s.project_dir == root)
-                    .collect();
+        if let Some(root) = self.active_workspace_root() {
+            if let Some(session) = discovery::discover_from_state_file(root) {
+                self.sessions = vec![session];
             } else {
+                self.sessions.clear();
+            }
+        } else {
+            // No active workspace — fall back to tmux-based discovery.
+            if let Ok(result) = discovery::discover_all() {
                 self.sessions = result.sessions;
             }
-            self.clamp_sidebar_selection();
         }
+        self.clamp_sidebar_selection();
         self.last_worker_refresh = Instant::now();
     }
 
-    /// Refresh pane capture for the currently selected worker.
+    /// Refresh content for the currently selected worker.
+    ///
+    /// In daemon mode (no tmux pane), shows recent agent events from
+    /// `.swarm/agents/<id>/events.jsonl`. Falls back to tmux pane capture
+    /// if a pane_id is available.
     pub fn refresh_pane_content(&mut self) {
         let SidebarItem::Worker(idx) = self.sidebar_selection else {
             self.pane_content.clear();
@@ -181,29 +281,84 @@ impl App {
             return;
         };
 
-        let Some(ref pane_id) = wt.agent_pane_id else {
-            self.pane_content = "No agent pane".to_string();
-            return;
-        };
+        // Try tmux pane capture first (legacy path).
+        if let Some(ref pane_id) = wt.agent_pane_id {
+            match std::process::Command::new("tmux")
+                .args(["capture-pane", "-t", pane_id, "-p", "-S", "-500", "-e"])
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    self.pane_content = String::from_utf8_lossy(&output.stdout).to_string();
+                    return;
+                }
+                _ => {}
+            }
+        }
 
-        // Capture last 500 lines from the tmux pane.
-        // -e preserves ANSI escape sequences (colors).
-        match std::process::Command::new("tmux")
-            .args(["capture-pane", "-t", pane_id, "-p", "-S", "-500", "-e"])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                self.pane_content = String::from_utf8_lossy(&output.stdout).to_string();
+        // Daemon mode: show agent events.
+        let session = self.sessions.first();
+        let worktree_id = wt.id.clone();
+        if let Some(session) = session {
+            let events = discovery::read_agent_events(session, &worktree_id, 100);
+            if events.is_empty() {
+                let phase = wt.phase.as_deref().unwrap_or("unknown");
+                self.pane_content = format!("Worker {worktree_id} ({phase}) — no events yet");
+            } else {
+                let mut lines = Vec::new();
+                for e in &events {
+                    match e.r#type.as_str() {
+                        "assistant_text" => {
+                            if let Some(ref text) = e.text {
+                                lines.push(text.clone());
+                            }
+                        }
+                        "tool_use" => {
+                            let tool = e.tool.as_deref().unwrap_or("?");
+                            lines.push(format!("── {tool} ──"));
+                            if let Some(ref input) = e.input {
+                                // Show first line of input only.
+                                let first = input.lines().next().unwrap_or("");
+                                if first.len() > 120 {
+                                    lines.push(format!("  {}...", &first[..120]));
+                                } else {
+                                    lines.push(format!("  {first}"));
+                                }
+                            }
+                        }
+                        "tool_result" => {
+                            if e.is_error {
+                                let msg = e.output.as_deref().unwrap_or("error");
+                                lines.push(format!("  ✗ {}", msg.lines().next().unwrap_or("")));
+                            }
+                        }
+                        "error" => {
+                            if let Some(ref msg) = e.message {
+                                lines.push(format!("ERROR: {msg}"));
+                            }
+                        }
+                        "complete" => {
+                            let turns = e.turns.unwrap_or(0);
+                            let cost = e.cost_usd.map(|c| format!(" ${c:.2}")).unwrap_or_default();
+                            lines.push(format!("── Complete ({turns} turns{cost}) ──"));
+                        }
+                        _ => {}
+                    }
+                }
+                self.pane_content = lines.join("\n");
             }
-            _ => {
-                self.pane_content = "Pane not available".to_string();
-            }
+        } else {
+            self.pane_content = "No workspace session".to_string();
         }
     }
 
-    /// Total sidebar item count (Chat + workers).
+    /// Whether a dispatch item is showing in the sidebar.
+    fn has_dispatch(&self) -> bool {
+        self.active_dispatch.is_some()
+    }
+
+    /// Total sidebar item count (Chat + optional Dispatch + workers).
     fn sidebar_count(&self) -> usize {
-        1 + self.total_workers() // "Chat" + workers
+        1 + usize::from(self.has_dispatch()) + self.total_workers()
     }
 
     /// Total flat worker count across all sessions.
@@ -211,21 +366,27 @@ impl App {
         self.sessions.iter().map(|s| s.worktrees.len()).sum()
     }
 
-    /// Current sidebar selection as a numeric index (0 = Chat, 1+ = workers).
+    /// Current sidebar selection as a numeric index.
+    /// Chat=0, Dispatch=1 (when present), Workers=1+has_dispatch+i.
     fn sidebar_index(&self) -> usize {
+        let d = usize::from(self.has_dispatch());
         match self.sidebar_selection {
             SidebarItem::Chat => 0,
-            SidebarItem::Worker(i) => i + 1,
+            SidebarItem::Dispatch => 1,
+            SidebarItem::Worker(i) => 1 + d + i,
         }
     }
 
     /// Convert a numeric index back to a SidebarItem.
     fn sidebar_item_at(&self, index: usize) -> SidebarItem {
         if index == 0 {
-            SidebarItem::Chat
-        } else {
-            SidebarItem::Worker(index - 1)
+            return SidebarItem::Chat;
         }
+        if self.has_dispatch() && index == 1 {
+            return SidebarItem::Dispatch;
+        }
+        let worker_offset = 1 + usize::from(self.has_dispatch());
+        SidebarItem::Worker(index - worker_offset)
     }
 
     /// Select next sidebar item.
@@ -260,6 +421,11 @@ impl App {
     /// Whether chat is the active sidebar item.
     pub fn is_chat_selected(&self) -> bool {
         self.sidebar_selection == SidebarItem::Chat
+    }
+
+    /// Whether dispatch review is the active sidebar item.
+    pub fn is_dispatch_selected(&self) -> bool {
+        self.sidebar_selection == SidebarItem::Dispatch
     }
 
     /// Switch to a workspace tab by index (0-based).
@@ -341,10 +507,15 @@ impl App {
         self.chat_scroll = self.chat_scroll.saturating_sub(3);
     }
 
-    fn clamp_sidebar_selection(&mut self) {
+    pub fn clamp_sidebar_selection(&mut self) {
         let total = self.total_workers();
         match self.sidebar_selection {
             SidebarItem::Chat => {} // always valid
+            SidebarItem::Dispatch => {
+                if !self.has_dispatch() {
+                    self.sidebar_selection = SidebarItem::Chat;
+                }
+            }
             SidebarItem::Worker(i) => {
                 if total == 0 {
                     self.sidebar_selection = SidebarItem::Chat;
@@ -410,6 +581,165 @@ impl App {
         });
     }
 
+    /// Enter the dispatch overlay (repo selection + prompt).
+    pub fn enter_dispatch(&mut self) {
+        let repos = discover_repos(&self.workspace_root);
+        if repos.is_empty() {
+            self.flash("No repos found in workspace");
+            return;
+        }
+        let count = repos.len();
+        self.dispatch = Some(DispatchState {
+            phase: DispatchPhase::SelectRepos,
+            repos,
+            selected: vec![false; count],
+            cursor: 0,
+            prompt: String::new(),
+            prompt_cursor: 0,
+        });
+    }
+
+    /// Cancel the dispatch overlay and return to normal mode.
+    pub fn dispatch_cancel(&mut self) {
+        let back = if let Some(ref d) = self.dispatch {
+            matches!(d.phase, DispatchPhase::EnterPrompt)
+        } else {
+            false
+        };
+        if back {
+            // Go back to repo selection.
+            if let Some(ref mut d) = self.dispatch {
+                d.phase = DispatchPhase::SelectRepos;
+            }
+        } else {
+            self.dispatch = None;
+        }
+    }
+
+    /// Toggle the repo at the cursor in the dispatch overlay.
+    pub fn dispatch_toggle_repo(&mut self) {
+        if let Some(ref mut d) = self.dispatch
+            && d.cursor < d.selected.len()
+        {
+            d.selected[d.cursor] = !d.selected[d.cursor];
+        }
+    }
+
+    /// Move cursor down in repo list.
+    pub fn dispatch_next(&mut self) {
+        if let Some(ref mut d) = self.dispatch
+            && d.cursor + 1 < d.repos.len()
+        {
+            d.cursor += 1;
+        }
+    }
+
+    /// Move cursor up in repo list.
+    pub fn dispatch_prev(&mut self) {
+        if let Some(ref mut d) = self.dispatch {
+            d.cursor = d.cursor.saturating_sub(1);
+        }
+    }
+
+    /// Advance from repo selection to prompt entry (if at least one repo selected).
+    pub fn dispatch_advance_phase(&mut self) {
+        if let Some(ref mut d) = self.dispatch
+            && d.selected.iter().any(|&s| s)
+        {
+            d.phase = DispatchPhase::EnterPrompt;
+        }
+    }
+
+    /// Insert a character into the dispatch prompt.
+    pub fn dispatch_insert_char(&mut self, c: char) {
+        if let Some(ref mut d) = self.dispatch {
+            d.prompt.insert(d.prompt.len().min(d.prompt_cursor), c);
+            d.prompt_cursor += c.len_utf8();
+        }
+    }
+
+    /// Delete the character before the cursor in the dispatch prompt.
+    pub fn dispatch_backspace(&mut self) {
+        if let Some(ref mut d) = self.dispatch
+            && d.prompt_cursor > 0
+        {
+            let prev = d.prompt[..d.prompt_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            d.prompt.drain(prev..d.prompt_cursor);
+            d.prompt_cursor = prev;
+        }
+    }
+
+    /// Returns the names of selected repos in the dispatch overlay.
+    pub fn dispatch_selected_repos(&self) -> Vec<String> {
+        self.dispatch
+            .as_ref()
+            .map(|d| {
+                d.repos
+                    .iter()
+                    .zip(d.selected.iter())
+                    .filter(|&(_, sel)| *sel)
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Scroll dispatch review up (half-page).
+    pub fn scroll_dispatch_up(&mut self, viewport: u16) {
+        if let Some(ref mut d) = self.active_dispatch {
+            let half = (viewport / 2).max(1);
+            d.scroll = d.scroll.saturating_sub(half);
+        }
+    }
+
+    /// Scroll dispatch review down (half-page).
+    pub fn scroll_dispatch_down(&mut self, viewport: u16) {
+        if let Some(ref mut d) = self.active_dispatch {
+            let half = (viewport / 2).max(1);
+            d.scroll = d.scroll.saturating_add(half);
+        }
+    }
+
+    /// Toggle collapse/expand of the focused section in dispatch review.
+    pub fn dispatch_toggle_section(&mut self) {
+        if let Some(ref mut d) = self.active_dispatch
+            && let Some(section) = d.sections.get_mut(d.focused_section)
+        {
+            section.collapsed = !section.collapsed;
+        }
+    }
+
+    /// Toggle all sections collapsed/expanded in dispatch review.
+    pub fn dispatch_toggle_all_sections(&mut self) {
+        if let Some(ref mut d) = self.active_dispatch {
+            // If any section is expanded, collapse all. Otherwise expand all.
+            let any_expanded = d.sections.iter().any(|s| !s.collapsed);
+            for s in &mut d.sections {
+                s.collapsed = any_expanded;
+            }
+        }
+    }
+
+    /// Move to the next section in dispatch review.
+    pub fn dispatch_next_section(&mut self) {
+        if let Some(ref mut d) = self.active_dispatch
+            && d.focused_section + 1 < d.sections.len()
+        {
+            d.focused_section += 1;
+        }
+    }
+
+    /// Move to the previous section in dispatch review.
+    pub fn dispatch_prev_section(&mut self) {
+        if let Some(ref mut d) = self.active_dispatch {
+            d.focused_section = d.focused_section.saturating_sub(1);
+        }
+    }
+
     /// Get the currently selected worker (id, info), if any.
     pub fn selected_worker(&self) -> Option<(&str, &WorktreeInfo)> {
         let SidebarItem::Worker(idx) = self.sidebar_selection else {
@@ -418,4 +748,20 @@ impl App {
         let workers = self.flat_workers();
         workers.get(idx).map(|(_, wt)| (wt.id.as_str(), *wt))
     }
+}
+
+/// Discover repos by scanning workspace root for subdirectories containing `.git/`.
+fn discover_repos(workspace_root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(workspace_root) else {
+        return Vec::new();
+    };
+    let mut repos: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().map(|ft| ft.is_dir()).unwrap_or(false) && e.path().join(".git").exists()
+        })
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    repos.sort();
+    repos
 }

@@ -4,11 +4,17 @@
 //! and executes via the Worker subprocess interface.
 
 /// Build the agent prompt that tells it to read `.task/` artifacts.
-pub fn build_dispatch_prompt(task_title: &str) -> String {
+///
+/// When `repo` is provided, the prompt clarifies which repo the agent is working in.
+pub fn build_dispatch_prompt(task_title: &str, repo: Option<&str>) -> String {
+    let repo_line = match repo {
+        Some(r) => format!("\nTarget repo: {r}\n"),
+        None => String::new(),
+    };
     format!(
         "\
 Task: {task_title}
-
+{repo_line}
 A `.task/` directory has been seeded in this worktree with structured artifacts:
 - `.task/TASK.md` — Task definition with scope and acceptance criteria
 - `.task/CONTEXT.md` — Relevant codebase files and patterns
@@ -36,13 +42,25 @@ mod tests {
 
     #[test]
     fn build_dispatch_prompt_includes_title() {
-        let prompt = build_dispatch_prompt("Add rate limiting");
+        let prompt = build_dispatch_prompt("Add rate limiting", None);
         assert!(prompt.contains("Task: Add rate limiting"));
     }
 
     #[test]
+    fn build_dispatch_prompt_includes_repo() {
+        let prompt = build_dispatch_prompt("Add rate limiting", Some("hive"));
+        assert!(prompt.contains("Target repo: hive"));
+    }
+
+    #[test]
+    fn build_dispatch_prompt_no_repo_line_when_none() {
+        let prompt = build_dispatch_prompt("Add rate limiting", None);
+        assert!(!prompt.contains("Target repo:"));
+    }
+
+    #[test]
     fn build_dispatch_prompt_references_artifacts() {
-        let prompt = build_dispatch_prompt("test");
+        let prompt = build_dispatch_prompt("test", None);
         assert!(prompt.contains("TASK.md"));
         assert!(prompt.contains("CONTEXT.md"));
         assert!(prompt.contains("PLAN.md"));
@@ -51,7 +69,7 @@ mod tests {
 
     #[test]
     fn build_dispatch_prompt_includes_instructions() {
-        let prompt = build_dispatch_prompt("test");
+        let prompt = build_dispatch_prompt("test", None);
         assert!(prompt.contains("Read ALL `.task/` files"));
         assert!(prompt.contains("Follow the steps in PLAN.md exactly"));
         assert!(prompt.contains("Anti-Goals"));

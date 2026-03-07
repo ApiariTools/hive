@@ -589,3 +589,59 @@ fn list_session_pane_ids(session_name: &str) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .collect()
 }
+
+/// Discover workers from `.swarm/state.json` directly (no tmux).
+///
+/// This is the primary discovery path now that swarm uses a daemon instead of tmux.
+/// The workspace root is known from the workspace registry, so we just read the
+/// state file and convert worktrees into `WorktreeInfo`.
+pub fn discover_from_state_file(workspace_root: &std::path::Path) -> Option<SwarmSession> {
+    let state_path = workspace_root.join(".swarm").join("state.json");
+    let data = std::fs::read_to_string(&state_path).ok()?;
+    let state: SwarmStateFile = serde_json::from_str(&data).ok()?;
+
+    let worktrees = state
+        .worktrees
+        .into_iter()
+        .map(|wt| {
+            // Determine agent liveness from phase field (no tmux panes).
+            let phase_str = wt.phase.as_deref().unwrap_or("unknown");
+            let agent_alive = matches!(phase_str, "running" | "waiting" | "creating" | "starting");
+
+            let pr = wt.pr.and_then(|wtp| {
+                let url = wtp.url?;
+                if url.is_empty() {
+                    return None;
+                }
+                Some(PrInfo {
+                    number: wtp.number.unwrap_or(0),
+                    title: wtp.title.unwrap_or_default(),
+                    state: wtp.state.unwrap_or_else(|| "OPEN".into()),
+                    url,
+                })
+            });
+
+            WorktreeInfo {
+                id: wt.id,
+                branch: wt.branch,
+                prompt: wt.prompt,
+                agent_kind: wt.agent_kind.to_string(),
+                worktree_path: wt.worktree_path,
+                agent_pane_id: None, // No tmux panes in daemon mode
+                agent_alive,
+                terminal_count: 0,
+                summary: wt.summary,
+                created_at: wt.created_at,
+                pr,
+                phase: wt.phase,
+                agent_session_status: wt.agent_session_status,
+            }
+        })
+        .collect();
+
+    Some(SwarmSession {
+        session_name: state.session_name,
+        project_dir: workspace_root.to_path_buf(),
+        worktrees,
+    })
+}

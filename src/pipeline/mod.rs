@@ -14,6 +14,17 @@ pub mod verify;
 use crate::worker::Worker;
 use color_eyre::eyre::Result;
 use std::path::Path;
+use tokio::sync::mpsc;
+
+/// Progress events emitted at each pipeline stage boundary.
+#[derive(Debug, Clone)]
+pub enum PipelineEvent {
+    RefineComplete { title: String },
+    RepoContextStarted { repo: String },
+    RepoContextComplete { repo: String, file_count: usize },
+    RepoPlanStarted { repo: String },
+    RepoPlanComplete { repo: String, step_count: usize },
+}
 
 /// Pipeline stage identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,102 +68,220 @@ impl std::fmt::Display for PipelineStage {
     }
 }
 
-/// Options for running the full pipeline.
-pub struct PipelineOptions<'a> {
+/// Options for the multi-repo pipeline.
+pub struct MultiPipelineOptions<'a> {
     pub raw_prompt: &'a str,
     pub workspace_root: &'a Path,
     pub conventions: Option<&'a str>,
-    pub repo: Option<&'a str>,
+    pub repos: Vec<&'a str>,
     pub profile: &'a str,
     pub until: Option<PipelineStage>,
     pub dry_run: bool,
+    /// Optional channel for emitting progress events at each stage boundary.
+    pub on_progress: Option<mpsc::UnboundedSender<PipelineEvent>>,
 }
 
-/// Result of a pipeline run.
-pub struct PipelineResult {
+/// Result of a multi-repo pipeline run.
+#[derive(Debug, Clone)]
+pub struct MultiPipelineResult {
     pub task_md: String,
-    pub context_md: Option<String>,
-    pub plan_md: Option<String>,
-    pub worktree_id: Option<String>,
+    pub title: String,
+    pub per_repo: Vec<PerRepoPipelineResult>,
     pub stage_reached: PipelineStage,
 }
 
-/// Run the pipeline: refine → context → plan → dispatch.
-///
-/// Stops early if `until` is set or `dry_run` is true.
-pub async fn run_pipeline(opts: PipelineOptions<'_>) -> Result<PipelineResult> {
-    // Stage 1: Refine
-    eprintln!("[pipeline] Stage 1/4: Refine");
+/// Per-repo pipeline result.
+#[derive(Debug, Clone)]
+pub struct PerRepoPipelineResult {
+    pub repo: String,
+    pub context_md: Option<String>,
+    pub plan_md: Option<String>,
+    pub worktree_id: Option<String>,
+}
+
+/// Emit a progress event if a channel is configured.
+fn emit(tx: &Option<mpsc::UnboundedSender<PipelineEvent>>, event: PipelineEvent) {
+    if let Some(tx) = tx {
+        let _ = tx.send(event);
+    }
+}
+
+/// Run the pipeline for multiple repos: refine (once) → context/plan/dispatch (per repo).
+pub async fn run_pipeline_multi(opts: MultiPipelineOptions<'_>) -> Result<MultiPipelineResult> {
+    let progress = opts.on_progress;
+
+    // Stage 1: Refine (shared across all repos)
+    eprintln!("[pipeline] Stage 1: Refine");
     let refined = refine::refine(opts.raw_prompt, opts.conventions).await?;
     eprintln!("[pipeline] Refined: \"{}\"", refined.title);
+    emit(
+        &progress,
+        PipelineEvent::RefineComplete {
+            title: refined.title.clone(),
+        },
+    );
 
     if opts.until == Some(PipelineStage::Refined) {
-        return Ok(PipelineResult {
+        return Ok(MultiPipelineResult {
             task_md: refined.task_md,
-            context_md: None,
-            plan_md: None,
-            worktree_id: None,
+            title: refined.title,
+            per_repo: Vec::new(),
             stage_reached: PipelineStage::Refined,
         });
     }
 
-    // Stage 2: Context
-    eprintln!("[pipeline] Stage 2/4: Context");
-    let ctx = context::identify_context(&refined.task_md, Some(opts.workspace_root)).await?;
-    eprintln!(
-        "[pipeline] Context: {} relevant files",
-        ctx.relevant_files.len()
-    );
+    // Build targets: if repos specified, one per repo; otherwise whole workspace.
+    struct Target {
+        name: String,
+        repo_flag: Option<String>,
+        search_path: std::path::PathBuf,
+    }
 
-    if opts.until == Some(PipelineStage::Contextualized) {
-        return Ok(PipelineResult {
-            task_md: refined.task_md,
-            context_md: Some(ctx.context_md),
-            plan_md: None,
-            worktree_id: None,
-            stage_reached: PipelineStage::Contextualized,
+    let targets: Vec<Target> = if opts.repos.is_empty() {
+        vec![Target {
+            name: "workspace".to_string(),
+            repo_flag: None,
+            search_path: opts.workspace_root.to_path_buf(),
+        }]
+    } else {
+        opts.repos
+            .iter()
+            .map(|r| Target {
+                name: r.to_string(),
+                repo_flag: Some(r.to_string()),
+                search_path: opts.workspace_root.join(r),
+            })
+            .collect()
+    };
+
+    let until_context = opts.until == Some(PipelineStage::Contextualized);
+    let until_plan = opts.until == Some(PipelineStage::Planned) || opts.dry_run;
+    let workspace_root = opts.workspace_root.to_path_buf();
+    let profile = opts.profile.to_string();
+    let task_md_ref = refined.task_md.clone();
+    let title_ref = refined.title.clone();
+
+    // Run context + plan for all repos concurrently.
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for target in targets {
+        let progress = progress.clone();
+        let task_md = task_md_ref.clone();
+        let title = title_ref.clone();
+        let ws_root = workspace_root.clone();
+        let profile = profile.clone();
+
+        join_set.spawn(async move {
+            let label = &target.name;
+
+            // Stage 2: Context
+            eprintln!("[pipeline] Context for {label}...");
+            emit(
+                &progress,
+                PipelineEvent::RepoContextStarted {
+                    repo: label.clone(),
+                },
+            );
+            let ctx = context::identify_context(&task_md, Some(&target.search_path)).await?;
+            let file_count = ctx.relevant_files.len();
+            eprintln!("[pipeline] Context for {label}: {file_count} relevant files");
+            emit(
+                &progress,
+                PipelineEvent::RepoContextComplete {
+                    repo: label.clone(),
+                    file_count,
+                },
+            );
+
+            if until_context {
+                return Ok(PerRepoPipelineResult {
+                    repo: label.clone(),
+                    context_md: Some(ctx.context_md),
+                    plan_md: None,
+                    worktree_id: None,
+                });
+            }
+
+            // Stage 3: Plan
+            eprintln!("[pipeline] Plan for {label}...");
+            emit(
+                &progress,
+                PipelineEvent::RepoPlanStarted {
+                    repo: label.clone(),
+                },
+            );
+            let planned = plan::create_plan(&task_md, &ctx.context_md).await?;
+            let step_count = planned.steps.len();
+            eprintln!("[pipeline] Plan for {label}: {step_count} steps");
+            emit(
+                &progress,
+                PipelineEvent::RepoPlanComplete {
+                    repo: label.clone(),
+                    step_count,
+                },
+            );
+
+            if until_plan {
+                return Ok(PerRepoPipelineResult {
+                    repo: label.clone(),
+                    context_md: Some(ctx.context_md),
+                    plan_md: Some(planned.plan_md),
+                    worktree_id: None,
+                });
+            }
+
+            // Stage 4: Dispatch
+            eprintln!("[pipeline] Dispatch for {label}...");
+            let prompt = dispatch::build_dispatch_prompt(&title, target.repo_flag.as_deref());
+            let worker = Worker::new();
+            let worktree_id = worker
+                .dispatch_pipeline_task(
+                    &ws_root,
+                    &prompt,
+                    target.repo_flag.as_deref(),
+                    &profile,
+                    &task_md,
+                    Some(&ctx.context_md),
+                    Some(&planned.plan_md),
+                )
+                .await?;
+            eprintln!("[pipeline] Dispatched {label}: {worktree_id}");
+
+            Ok(PerRepoPipelineResult {
+                repo: label.clone(),
+                context_md: Some(ctx.context_md),
+                plan_md: Some(planned.plan_md),
+                worktree_id: Some(worktree_id),
+            })
         });
     }
 
-    // Stage 3: Plan
-    eprintln!("[pipeline] Stage 3/4: Plan");
-    let planned = plan::create_plan(&refined.task_md, &ctx.context_md).await?;
-    eprintln!("[pipeline] Plan: {} steps", planned.steps.len());
+    // Collect results as they complete.
+    let mut per_repo = Vec::new();
+    let mut final_stage = PipelineStage::Planned;
 
-    if opts.until == Some(PipelineStage::Planned) || opts.dry_run {
-        return Ok(PipelineResult {
-            task_md: refined.task_md,
-            context_md: Some(ctx.context_md),
-            plan_md: Some(planned.plan_md),
-            worktree_id: None,
-            stage_reached: PipelineStage::Planned,
-        });
+    while let Some(result) = join_set.join_next().await {
+        let repo_result: color_eyre::Result<PerRepoPipelineResult> =
+            result.map_err(|e| color_eyre::eyre::eyre!("pipeline task panicked: {e}"))?;
+        let repo_result = repo_result?;
+        if repo_result.worktree_id.is_some() {
+            final_stage = PipelineStage::Dispatched;
+        }
+        per_repo.push(repo_result);
     }
 
-    // Stage 4: Dispatch
-    eprintln!("[pipeline] Stage 4/4: Dispatch");
-    let prompt = dispatch::build_dispatch_prompt(&refined.title);
-    let worker = Worker::new();
-    let worktree_id = worker
-        .dispatch_pipeline_task(
-            opts.workspace_root,
-            &prompt,
-            opts.repo,
-            opts.profile,
-            &refined.task_md,
-            Some(&ctx.context_md),
-            Some(&planned.plan_md),
-        )
-        .await?;
+    if until_context {
+        final_stage = PipelineStage::Contextualized;
+    }
 
-    eprintln!("[pipeline] Dispatched: {worktree_id}");
+    // Sort by repo name for deterministic ordering.
+    per_repo.sort_by(|a, b| a.repo.cmp(&b.repo));
 
-    Ok(PipelineResult {
+    Ok(MultiPipelineResult {
         task_md: refined.task_md,
-        context_md: Some(ctx.context_md),
-        plan_md: Some(planned.plan_md),
-        worktree_id: Some(worktree_id),
-        stage_reached: PipelineStage::Dispatched,
+        title: refined.title,
+        per_repo,
+        stage_reached: final_stage,
     })
 }
 

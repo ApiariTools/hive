@@ -11,6 +11,7 @@ pub mod markdown;
 pub mod origin_map;
 pub mod session_store;
 pub mod swarm_watcher;
+pub mod tui_socket;
 
 use crate::buzz::config::BuzzConfig;
 use crate::buzz::output::{self, OutputMode};
@@ -37,6 +38,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tui_socket::{TuiClientRequest, TuiResponse, TuiSocketServer};
 
 // ---------------------------------------------------------------------------
 // Global config directory + PID file helpers
@@ -431,10 +433,10 @@ fn extract_buttons(text: &str) -> (String, Vec<Vec<crate::channel::InlineButton>
 }
 
 /// A dispatch request parsed from a coordinator response.
-struct DispatchRequest {
-    repo: String,
-    agent: Option<String>,
-    prompt: String,
+pub(crate) struct DispatchRequest {
+    pub(crate) repo: String,
+    pub(crate) agent: Option<String>,
+    pub(crate) prompt: String,
 }
 
 /// Result from a spawned message handler, sent back to the main loop for state mutations.
@@ -454,13 +456,17 @@ enum MessageOutcome {
     },
     /// Coordinator session failed. Error message already sent to Telegram.
     Error { had_resume: bool },
+    /// Pipeline completed (TUI dispatch flow).
+    PipelineComplete(crate::pipeline::MultiPipelineResult),
+    /// Incremental pipeline progress event.
+    PipelineProgress(crate::pipeline::PipelineEvent),
 }
 
 /// Extract `` ```dispatch:repo[:agent] `` fenced code blocks from text.
 ///
 /// Returns the cleaned text (blocks stripped) and parsed dispatch requests.
 /// Multiple blocks = multiple dispatches. Invalid blocks are left in the text.
-fn extract_dispatch_blocks(text: &str) -> (String, Vec<DispatchRequest>) {
+pub(crate) fn extract_dispatch_blocks(text: &str) -> (String, Vec<DispatchRequest>) {
     let mut dispatches = Vec::new();
     let mut cleaned = String::with_capacity(text.len());
     let mut rest = text;
@@ -547,6 +553,126 @@ fn which_swarm() -> Option<PathBuf> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch state persistence
+// ---------------------------------------------------------------------------
+
+const DISPATCH_STATE_FILE: &str = ".hive/dispatch_state.json";
+
+/// Persist completed dispatch state to disk.
+fn save_dispatch_state(workspace_root: &Path, d: &ActiveTuiDispatch) {
+    let path = workspace_root.join(DISPATCH_STATE_FILE);
+    let response = DaemonRunner::build_dispatch_update_response(d);
+    match serde_json::to_string_pretty(&response) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                eprintln!("[daemon] Failed to save dispatch state: {e}");
+            } else {
+                eprintln!("[daemon] Dispatch state saved to {}", path.display());
+            }
+        }
+        Err(e) => eprintln!("[daemon] Failed to serialize dispatch state: {e}"),
+    }
+}
+
+/// Load persisted dispatch state from disk (only "ready" status).
+fn load_dispatch_state(workspace_root: &Path) -> Option<ActiveTuiDispatch> {
+    let path = workspace_root.join(DISPATCH_STATE_FILE);
+    let json = std::fs::read_to_string(&path).ok()?;
+    let response: TuiResponse = serde_json::from_str(&json).ok()?;
+    match response {
+        TuiResponse::DispatchUpdate {
+            task,
+            repos,
+            status,
+            task_md,
+            title,
+            per_repo,
+            ..
+        } if status == "ready" => {
+            let repo_stages = per_repo
+                .into_iter()
+                .map(|r| RepoStageTracker {
+                    repo: r.repo,
+                    stage: RepoPipelineStage::Done,
+                    context_md: r.context_md,
+                    plan_md: r.plan_md,
+                    file_count: r.file_count,
+                    step_count: r.step_count,
+                })
+                .collect();
+            Some(ActiveTuiDispatch {
+                task,
+                repos,
+                status: TuiDispatchStatus::Ready,
+                title,
+                task_md,
+                repo_stages,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Delete the persisted dispatch state file.
+fn clear_dispatch_state(workspace_root: &Path) {
+    let path = workspace_root.join(DISPATCH_STATE_FILE);
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+        eprintln!("[daemon] Dispatch state cleared");
+    }
+}
+
+/// Per-repo stage tracking during pipeline execution.
+#[derive(Debug, Clone)]
+struct RepoStageTracker {
+    repo: String,
+    stage: RepoPipelineStage,
+    context_md: Option<String>,
+    plan_md: Option<String>,
+    file_count: Option<usize>,
+    step_count: Option<usize>,
+}
+
+/// Pipeline stage for a single repo.
+#[derive(Debug, Clone, PartialEq)]
+enum RepoPipelineStage {
+    Pending,
+    Context,
+    Planning,
+    Done,
+}
+
+impl RepoPipelineStage {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Context => "context",
+            Self::Planning => "planning",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// Dispatch lifecycle state owned by the daemon (survives TUI restart).
+#[derive(Debug, Clone)]
+struct ActiveTuiDispatch {
+    task: String,
+    repos: Vec<String>,
+    status: TuiDispatchStatus,
+    title: String,
+    task_md: String,
+    repo_stages: Vec<RepoStageTracker>,
+}
+
+/// Status of a daemon-owned dispatch.
+#[derive(Debug, Clone, PartialEq)]
+enum TuiDispatchStatus {
+    Refining,
+    Running,
+    Ready,
+}
+
 /// Main daemon event loop — manages multiple workspaces and bot instances.
 struct DaemonRunner {
     workspaces: Vec<WorkspaceSlot>,
@@ -568,6 +694,12 @@ struct DaemonRunner {
     restart_requested: Arc<AtomicBool>,
     /// Channel for spawned message handlers to send results back to the main loop.
     msg_done_tx: Option<mpsc::UnboundedSender<MessageResult>>,
+    /// TUI socket server (one per home workspace).
+    tui_socket: Option<TuiSocketServer>,
+    /// Receiver for TUI client requests (from socket server).
+    tui_rx: Option<mpsc::UnboundedReceiver<TuiClientRequest>>,
+    /// Active TUI dispatch state (survives TUI reconnect).
+    active_tui_dispatch: Option<ActiveTuiDispatch>,
 }
 
 /// Build a coordinator system prompt for a workspace, with daemon-mode addendum.
@@ -578,23 +710,31 @@ fn build_coordinator_prompt(workspace_root: &Path, bot_username: Option<&str>) -
     let mut prompt = coord.build_system_prompt()?;
     prompt.push_str("\n## Daemon Mode Constraints\n");
     prompt.push_str(
-        "You are running as a Telegram bot in daemon mode (not an interactive terminal).\n",
+        "You are running in daemon mode, receiving messages from Telegram and the hive TUI.\n",
     );
     if let Some(username) = bot_username {
         prompt.push_str(&format!(
             "Your Telegram bot username is @{username}. When users @mention you in a group chat, that IS a message to you — respond normally.\n"
         ));
     }
-    prompt.push_str("Keep responses conversational and concise.\n");
+    prompt.push_str("Keep responses conversational and concise.\n\n");
+    prompt.push_str("### CRITICAL: You Are an Orchestrator, NOT a Coder\n\n");
+    prompt.push_str(
+        "You are a manager/orchestrator. You do NOT write code, implement features, or fix bugs yourself.\n",
+    );
+    prompt.push_str(
+        "When the user asks you to build, implement, fix, add, refactor, or change code:\n",
+    );
+    prompt.push_str("1. Briefly acknowledge what they want\n");
+    prompt.push_str("2. Dispatch it to a swarm worker using a ```dispatch:repo``` block\n");
+    prompt.push_str("3. Do NOT research the codebase, read source files, or plan the implementation yourself\n\n");
     prompt.push_str(
         "Do NOT modify files directly — no Write, Edit, or file-writing shell commands.\n",
     );
-    prompt.push_str("Dispatch coding work to swarm agents via dispatch blocks (see below).\n");
+    prompt.push_str("Do NOT read source code to understand how to implement something — that's the worker's job.\n");
     prompt.push_str("CRITICAL: You do NOT have a Task tool. Never use Task() to delegate work.\n");
-    prompt.push_str("The ONLY way to create workers is via ```dispatch:repo``` code blocks in your response text.\n");
-    prompt.push_str(
-        "Only use Bash for: swarm status/send/close, git status/log, cargo check, and other read-only operations.\n",
-    );
+    prompt.push_str("The ONLY way to create workers is via ```dispatch:repo``` code blocks in your response text.\n\n");
+    prompt.push_str("You MAY use Bash/Read/Grep ONLY for: checking worker status (`swarm status`), checking git status, viewing PRs (`gh pr list`), or answering questions about project state. NEVER use these tools to research how to implement a task — dispatch it instead.\n");
     prompt.push_str("\n## Interactive Buttons\n\n");
     prompt.push_str("You can attach inline keyboard buttons to any response by ending your message with a buttons block:\n\n");
     prompt.push_str(
@@ -780,6 +920,27 @@ impl DaemonRunner {
             eprintln!("[daemon] Swarm binary not found — dispatch blocks will fail");
         }
 
+        // Start TUI socket server on the first workspace (home workspace).
+        let (tui_socket, tui_rx) = if let Some(ws) = workspaces.first() {
+            match TuiSocketServer::start(&ws.workspace_root) {
+                Ok((rx, server)) => (Some(server), Some(rx)),
+                Err(e) => {
+                    eprintln!("[daemon] Failed to start TUI socket: {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        // Load persisted dispatch state from the home workspace (if any).
+        let active_tui_dispatch = workspaces
+            .first()
+            .and_then(|ws| load_dispatch_state(&ws.workspace_root));
+        if active_tui_dispatch.is_some() {
+            eprintln!("[daemon] Restored dispatch state from disk");
+        }
+
         Ok(Self {
             workspaces,
             bots,
@@ -791,6 +952,9 @@ impl DaemonRunner {
             cancel: None,
             restart_requested: Arc::new(AtomicBool::new(false)),
             msg_done_tx: None,
+            tui_socket,
+            tui_rx,
+            active_tui_dispatch,
         })
     }
 
@@ -921,6 +1085,10 @@ impl DaemonRunner {
             .sweep_instant()
             .map(|i| Box::pin(tokio::time::sleep_until(i)));
 
+        // Take the TUI socket receiver out of self so it can be used in select!.
+        let mut tui_rx = self.tui_rx.take();
+        let has_tui = tui_rx.is_some();
+
         eprintln!("[daemon] Ready. Listening for Telegram messages and buzz signals.");
 
         loop {
@@ -946,6 +1114,10 @@ impl DaemonRunner {
 
                 Some(result) = msg_done_rx.recv() => {
                     self.handle_message_result(result).await;
+                }
+
+                Some(tui_req) = async { tui_rx.as_mut()?.recv().await }, if has_tui => {
+                    self.handle_tui_request(tui_req).await;
                 }
 
                 _ = buzz_timer.tick() => {
@@ -1681,6 +1853,15 @@ impl DaemonRunner {
                 }
             }
             MessageOutcome::Error { had_resume } => {
+                // If this was a TUI dispatch, mark it Ready with error.
+                if chat_id == Self::TUI_CHAT_ID
+                    && let Some(ref mut d) = self.active_tui_dispatch
+                    && d.status != TuiDispatchStatus::Ready
+                {
+                    d.status = TuiDispatchStatus::Ready;
+                    self.broadcast_dispatch_update();
+                }
+
                 // If session died, remove it so next message auto-reconnects.
                 if had_resume {
                     self.workspaces[ws_idx].sessions.remove_active(chat_id);
@@ -1689,6 +1870,544 @@ impl DaemonRunner {
                     }
                 }
             }
+            MessageOutcome::PipelineProgress(event) => {
+                use crate::pipeline::PipelineEvent;
+                if let Some(ref mut d) = self.active_tui_dispatch {
+                    match event {
+                        PipelineEvent::RefineComplete { title } => {
+                            d.title = title;
+                            d.status = TuiDispatchStatus::Running;
+                        }
+                        PipelineEvent::RepoContextStarted { repo } => {
+                            if let Some(rs) = d.repo_stages.iter_mut().find(|r| r.repo == repo) {
+                                rs.stage = RepoPipelineStage::Context;
+                            }
+                        }
+                        PipelineEvent::RepoContextComplete { repo, file_count } => {
+                            if let Some(rs) = d.repo_stages.iter_mut().find(|r| r.repo == repo) {
+                                rs.file_count = Some(file_count);
+                            }
+                        }
+                        PipelineEvent::RepoPlanStarted { repo } => {
+                            if let Some(rs) = d.repo_stages.iter_mut().find(|r| r.repo == repo) {
+                                rs.stage = RepoPipelineStage::Planning;
+                            }
+                        }
+                        PipelineEvent::RepoPlanComplete { repo, step_count } => {
+                            if let Some(rs) = d.repo_stages.iter_mut().find(|r| r.repo == repo) {
+                                rs.stage = RepoPipelineStage::Done;
+                                rs.step_count = Some(step_count);
+                            }
+                        }
+                    }
+                    self.broadcast_dispatch_update();
+                }
+            }
+            MessageOutcome::PipelineComplete(pipeline_result) => {
+                // Populate remaining fields from the final result and mark Ready.
+                if let Some(ref mut d) = self.active_tui_dispatch {
+                    d.task_md = pipeline_result.task_md.clone();
+                    if d.title.is_empty() {
+                        d.title = pipeline_result.title.clone();
+                    }
+                    // Fill context_md/plan_md and ensure all repos are Done.
+                    for pr in &pipeline_result.per_repo {
+                        if let Some(rs) = d.repo_stages.iter_mut().find(|r| r.repo == pr.repo) {
+                            rs.context_md = pr.context_md.clone();
+                            rs.plan_md = pr.plan_md.clone();
+                            rs.stage = RepoPipelineStage::Done;
+                        }
+                    }
+                    d.status = TuiDispatchStatus::Ready;
+                }
+                // Broadcast + persist outside the mutable borrow.
+                self.broadcast_dispatch_update();
+                if let Some(ref d) = self.active_tui_dispatch
+                    && let Some(ws) = self.workspaces.first()
+                {
+                    save_dispatch_state(&ws.workspace_root, d);
+                }
+            }
+        }
+    }
+
+    // -- TUI socket handling --
+
+    /// Sentinel chat_id used for TUI socket messages (not a real Telegram chat).
+    const TUI_CHAT_ID: i64 = i64::MAX;
+
+    /// Handle a request from a connected TUI client.
+    async fn handle_tui_request(&mut self, req: TuiClientRequest) {
+        let TuiClientRequest { request, responder } = req;
+
+        match request {
+            tui_socket::TuiRequest::Message { text } => {
+                self.handle_tui_message(&text, responder).await;
+            }
+            tui_socket::TuiRequest::Dispatch { repo, description } => {
+                self.handle_tui_dispatch(&repo, &description, responder)
+                    .await;
+            }
+            tui_socket::TuiRequest::SubmitDispatch { repos, task } => {
+                self.handle_tui_submit_dispatch(repos, task, responder)
+                    .await;
+            }
+            tui_socket::TuiRequest::ConfirmDispatch => {
+                self.handle_tui_confirm_dispatch(responder).await;
+            }
+            tui_socket::TuiRequest::CancelDispatch => {
+                self.handle_tui_cancel_dispatch();
+            }
+            tui_socket::TuiRequest::GetDispatchState => {
+                self.handle_tui_get_dispatch_state(responder);
+            }
+        }
+    }
+
+    /// Handle a TUI message by routing it through the same coordinator pipeline.
+    async fn handle_tui_message(&mut self, text: &str, responder: tui_socket::ResponseSender) {
+        // Route to the home workspace (index 0).
+        let ws_idx = 0;
+        if ws_idx >= self.workspaces.len() {
+            let _ = responder.send(TuiResponse::Error {
+                text: "no workspace available".into(),
+            });
+            return;
+        }
+
+        self.active_workspace = Some(ws_idx);
+        let chat_id = Self::TUI_CHAT_ID;
+
+        eprintln!("[daemon] TUI message: {}", truncate(text, 80));
+
+        // Check if we have an active session to resume.
+        let resume_id = self.workspaces[ws_idx]
+            .sessions
+            .get_active(chat_id)
+            .map(|s| s.session_id.clone());
+
+        // Clone everything for the spawned task.
+        let coordinator_prompt = self.workspaces[ws_idx].coordinator_prompt.clone();
+        let model = self.workspaces[ws_idx].config.model.clone();
+        let max_turns = self.workspaces[ws_idx].config.max_turns;
+        let workspace_root = self.workspaces[ws_idx].workspace_root.clone();
+        let msg_done_tx = self
+            .msg_done_tx
+            .as_ref()
+            .expect("msg_done_tx not initialized")
+            .clone();
+        let text = text.to_owned();
+
+        // Spawn the coordinator work in the background.
+        tokio::spawn(async move {
+            // Build a callback that streams tokens to the TUI via socket.
+            let send_responder = responder.clone();
+            let send_fn = move |text: String| {
+                let resp = send_responder.clone();
+                async move {
+                    let _ = resp.send(TuiResponse::Token { text });
+                    Ok(())
+                }
+            };
+
+            // Run the coordinator turn.
+            let result = run_coordinator_turn_standalone(
+                &coordinator_prompt,
+                &model,
+                max_turns,
+                &workspace_root,
+                &text,
+                resume_id.as_deref(),
+                send_fn,
+            )
+            .await;
+
+            let outcome = match result {
+                Ok((final_text, session_id, _dispatches)) => {
+                    // Send the final text as a token.
+                    if !final_text.is_empty() {
+                        let _ = responder.send(TuiResponse::Token { text: final_text });
+                    }
+                    let _ = responder.send(TuiResponse::Done);
+
+                    MessageOutcome::Success {
+                        session_id,
+                        resume_id,
+                        buttons: vec![],
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[daemon] TUI coordinator error: {e}");
+                    let _ = responder.send(TuiResponse::Error {
+                        text: format!("{e}"),
+                    });
+                    MessageOutcome::Error {
+                        had_resume: resume_id.is_some(),
+                    }
+                }
+            };
+
+            // Send result back to the main loop for state mutations.
+            let _ = msg_done_tx.send(MessageResult {
+                ws_idx,
+                chat_id: Self::TUI_CHAT_ID,
+                outcome,
+            });
+        });
+
+        self.active_workspace = None;
+    }
+
+    /// Handle a TUI dispatch request by running `swarm create`.
+    async fn handle_tui_dispatch(
+        &self,
+        repo: &str,
+        description: &str,
+        responder: tui_socket::ResponseSender,
+    ) {
+        let ws_idx = 0;
+        if ws_idx >= self.workspaces.len() {
+            let _ = responder.send(TuiResponse::Error {
+                text: "no workspace available".into(),
+            });
+            return;
+        }
+
+        let Some(swarm_bin) = self.swarm_bin.clone() else {
+            let _ = responder.send(TuiResponse::Error {
+                text: "swarm binary not found".into(),
+            });
+            return;
+        };
+
+        let workspace_root = self.workspaces[ws_idx].workspace_root.clone();
+        let repo = repo.to_owned();
+        let description = description.to_owned();
+
+        tokio::spawn(async move {
+            let prompt_file =
+                std::env::temp_dir().join(format!("dispatch-{}.txt", uuid::Uuid::new_v4()));
+            if let Err(e) = std::fs::write(&prompt_file, &description) {
+                let _ = responder.send(TuiResponse::Error {
+                    text: format!("failed to write prompt file: {e}"),
+                });
+                return;
+            }
+
+            let _ = responder.send(TuiResponse::Token {
+                text: format!("Dispatching task to `{repo}`..."),
+            });
+
+            let ws_str = workspace_root.to_string_lossy().to_string();
+            let pf_str = prompt_file.to_string_lossy().to_string();
+            match tokio::process::Command::new(&swarm_bin)
+                .args([
+                    "--dir",
+                    &ws_str,
+                    "create",
+                    "--repo",
+                    &repo,
+                    "--prompt-file",
+                    &pf_str,
+                ])
+                .output()
+                .await
+            {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let _ = responder.send(TuiResponse::Token {
+                        text: format!("Worker created for `{repo}`: {}", stdout.trim()),
+                    });
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let _ = responder.send(TuiResponse::Error {
+                        text: format!("dispatch failed: {}", stderr.trim()),
+                    });
+                }
+                Err(e) => {
+                    let _ = responder.send(TuiResponse::Error {
+                        text: format!("failed to run swarm: {e}"),
+                    });
+                }
+            }
+
+            let _ = responder.send(TuiResponse::Done);
+            let _ = std::fs::remove_file(&prompt_file);
+        });
+    }
+
+    /// Handle a TUI submit-dispatch request: run the pipeline (refine → context → plan).
+    async fn handle_tui_submit_dispatch(
+        &mut self,
+        repos: Vec<String>,
+        task: String,
+        _responder: tui_socket::ResponseSender,
+    ) {
+        let ws_idx = 0;
+        if ws_idx >= self.workspaces.len() {
+            let _ = _responder.send(TuiResponse::Error {
+                text: "no workspace available".into(),
+            });
+            return;
+        }
+
+        // Set daemon-owned dispatch state with per-repo trackers.
+        let repo_stages: Vec<RepoStageTracker> = repos
+            .iter()
+            .map(|r| RepoStageTracker {
+                repo: r.clone(),
+                stage: RepoPipelineStage::Pending,
+                context_md: None,
+                plan_md: None,
+                file_count: None,
+                step_count: None,
+            })
+            .collect();
+
+        self.active_tui_dispatch = Some(ActiveTuiDispatch {
+            task: task.clone(),
+            repos: repos.clone(),
+            status: TuiDispatchStatus::Refining,
+            title: String::new(),
+            task_md: String::new(),
+            repo_stages,
+        });
+        self.broadcast_dispatch_update();
+
+        let workspace_root = self.workspaces[ws_idx].workspace_root.clone();
+        let conventions = load_workspace(&workspace_root)
+            .ok()
+            .and_then(|w| w.conventions);
+        let msg_done_tx = self
+            .msg_done_tx
+            .as_ref()
+            .expect("msg_done_tx not initialized")
+            .clone();
+
+        // Create progress channel for incremental updates.
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::pipeline::PipelineEvent>();
+
+        // Spawn forwarding task: reads progress events and sends them as MessageResult.
+        let fwd_tx = msg_done_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = progress_rx.recv().await {
+                let _ = fwd_tx.send(MessageResult {
+                    ws_idx,
+                    chat_id: DaemonRunner::TUI_CHAT_ID,
+                    outcome: MessageOutcome::PipelineProgress(event),
+                });
+            }
+        });
+
+        tokio::spawn(async move {
+            let repo_refs: Vec<&str> = repos.iter().map(|s| s.as_str()).collect();
+            let result =
+                crate::pipeline::run_pipeline_multi(crate::pipeline::MultiPipelineOptions {
+                    raw_prompt: &task,
+                    workspace_root: &workspace_root,
+                    conventions: conventions.as_deref(),
+                    repos: repo_refs,
+                    profile: "default",
+                    until: None,
+                    dry_run: true,
+                    on_progress: Some(progress_tx),
+                })
+                .await;
+
+            let outcome = match result {
+                Ok(pipeline_result) => {
+                    eprintln!(
+                        "[daemon] Pipeline complete: {} repo(s)",
+                        pipeline_result.per_repo.len()
+                    );
+                    MessageOutcome::PipelineComplete(pipeline_result)
+                }
+                Err(e) => {
+                    eprintln!("[daemon] Pipeline error: {e}");
+                    let _ = _responder.send(TuiResponse::Error {
+                        text: format!("{e}"),
+                    });
+                    MessageOutcome::Error { had_resume: false }
+                }
+            };
+
+            let _ = msg_done_tx.send(MessageResult {
+                ws_idx,
+                chat_id: DaemonRunner::TUI_CHAT_ID,
+                outcome,
+            });
+        });
+
+        self.active_workspace = None;
+    }
+
+    /// Handle TUI confirm-dispatch: dispatch each repo using Worker with pipeline artifacts.
+    async fn handle_tui_confirm_dispatch(&mut self, responder: tui_socket::ResponseSender) {
+        let dispatch = match self.active_tui_dispatch.take() {
+            Some(d) if d.status == TuiDispatchStatus::Ready => d,
+            Some(d) => {
+                let msg = if d.status != TuiDispatchStatus::Ready {
+                    "dispatch still in progress"
+                } else {
+                    "no pipeline result to confirm"
+                };
+                self.active_tui_dispatch = Some(d);
+                let _ = responder.send(TuiResponse::Error { text: msg.into() });
+                return;
+            }
+            None => {
+                let _ = responder.send(TuiResponse::Error {
+                    text: "no active dispatch".into(),
+                });
+                return;
+            }
+        };
+
+        // Check that we have at least one repo with context/plan data.
+        let has_results = dispatch
+            .repo_stages
+            .iter()
+            .any(|rs| rs.context_md.is_some() || rs.plan_md.is_some());
+        if !has_results {
+            let _ = responder.send(TuiResponse::Error {
+                text: "no pipeline results to confirm".into(),
+            });
+            self.active_tui_dispatch = Some(dispatch);
+            return;
+        }
+
+        let ws_idx = 0;
+        let workspace_root = self.workspaces[ws_idx].workspace_root.clone();
+        let count = dispatch.repo_stages.len();
+
+        // Clear persisted dispatch state.
+        clear_dispatch_state(&workspace_root);
+
+        // Broadcast cleared state.
+        self.broadcast_dispatch_cleared();
+
+        let _ = responder.send(TuiResponse::Token {
+            text: format!("Dispatching {count} worker(s)..."),
+        });
+
+        let title = dispatch.title.clone();
+        let task_md = dispatch.task_md.clone();
+
+        // Spawn each dispatch as a Worker::dispatch_pipeline_task.
+        for rs in dispatch.repo_stages {
+            let root = workspace_root.clone();
+            let resp = responder.clone();
+            let title = title.clone();
+            let task_md = task_md.clone();
+
+            tokio::spawn(async move {
+                let prompt =
+                    crate::pipeline::dispatch::build_dispatch_prompt(&title, Some(&rs.repo));
+                let worker = crate::worker::Worker::new();
+                match worker
+                    .dispatch_pipeline_task(
+                        &root,
+                        &prompt,
+                        Some(&rs.repo),
+                        "default",
+                        &task_md,
+                        rs.context_md.as_deref(),
+                        rs.plan_md.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(worktree_id) => {
+                        let _ = resp.send(TuiResponse::Token {
+                            text: format!("Worker created for `{}`: {worktree_id}", rs.repo),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = resp.send(TuiResponse::Error {
+                            text: format!("dispatch `{}` failed: {e}", rs.repo),
+                        });
+                    }
+                }
+            });
+        }
+    }
+
+    /// Handle TUI cancel-dispatch: clear the active dispatch.
+    fn handle_tui_cancel_dispatch(&mut self) {
+        self.active_tui_dispatch = None;
+        if let Some(ws) = self.workspaces.first() {
+            clear_dispatch_state(&ws.workspace_root);
+        }
+        self.broadcast_dispatch_cleared();
+    }
+
+    /// Build a DispatchUpdate response from the current active_tui_dispatch.
+    fn build_dispatch_update_response(d: &ActiveTuiDispatch) -> TuiResponse {
+        let per_repo: Vec<tui_socket::RepoDispatchInfo> = d
+            .repo_stages
+            .iter()
+            .map(|rs| tui_socket::RepoDispatchInfo {
+                repo: rs.repo.clone(),
+                stage: rs.stage.as_str().to_string(),
+                context_md: rs.context_md.clone(),
+                plan_md: rs.plan_md.clone(),
+                file_count: rs.file_count,
+                step_count: rs.step_count,
+            })
+            .collect();
+        TuiResponse::DispatchUpdate {
+            task: d.task.clone(),
+            repos: d.repos.clone(),
+            status: match d.status {
+                TuiDispatchStatus::Refining => "refining".into(),
+                TuiDispatchStatus::Running => "running".into(),
+                TuiDispatchStatus::Ready => "ready".into(),
+            },
+            streaming_text: String::new(),
+            task_md: d.task_md.clone(),
+            title: d.title.clone(),
+            per_repo,
+        }
+    }
+
+    /// Handle TUI get-dispatch-state: reply with current dispatch state.
+    fn handle_tui_get_dispatch_state(&self, responder: tui_socket::ResponseSender) {
+        if let Some(ref d) = self.active_tui_dispatch {
+            let _ = responder.send(Self::build_dispatch_update_response(d));
+        } else {
+            let _ = responder.send(TuiResponse::DispatchCleared);
+        }
+    }
+
+    /// Broadcast the current dispatch state to all TUI clients via the notify channel.
+    fn broadcast_dispatch_update(&self) {
+        if let Some(ref d) = self.active_tui_dispatch {
+            self.tui_push_response(Self::build_dispatch_update_response(d));
+        }
+    }
+
+    /// Broadcast dispatch-cleared to all TUI clients.
+    fn broadcast_dispatch_cleared(&self) {
+        self.tui_push_response(TuiResponse::DispatchCleared);
+    }
+
+    /// Push a response to all connected TUI clients via the broadcast channel.
+    fn tui_push_response(&self, response: TuiResponse) {
+        if let Some(ref socket) = self.tui_socket {
+            socket.push_response(response);
+        }
+    }
+
+    /// Check if TUI socket has connected clients.
+    fn tui_has_clients(&self) -> bool {
+        self.tui_socket.as_ref().is_some_and(|s| s.has_clients())
+    }
+
+    /// Push a notification to TUI socket clients.
+    fn tui_push_notification(&self, event: crate::ui::inbox::UiEvent) {
+        if let Some(ref socket) = self.tui_socket {
+            socket.push_notification(event);
         }
     }
 
@@ -2247,10 +2966,16 @@ impl DaemonRunner {
                             | crate::routing::RoutingDecision::Both
                     ) && let Some(ui_event) = notification_to_ui_event(n)
                     {
-                        let _ = crate::ui::inbox::push_event(
-                            &self.workspaces[idx].workspace_root,
-                            &ui_event,
-                        );
+                        // Push via socket if TUI clients are connected,
+                        // otherwise fall back to file-based inbox.
+                        if self.tui_has_clients() {
+                            self.tui_push_notification(ui_event);
+                        } else {
+                            let _ = crate::ui::inbox::push_event(
+                                &self.workspaces[idx].workspace_root,
+                                &ui_event,
+                            );
+                        }
                     }
 
                     if matches!(
