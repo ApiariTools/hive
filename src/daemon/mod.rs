@@ -3473,7 +3473,7 @@ where
             }
             Some(Event::RateLimit(rl)) => {
                 if let Some(info) = &rl.rate_limit_info {
-                    tracing::warn!(info, "Rate limit status");
+                    tracing::warn!(info = %info, "Rate limit status");
                 }
             }
             Some(Event::System(sys)) => {
@@ -3681,7 +3681,7 @@ async fn run_ephemeral_session(
             }
             Some(Event::RateLimit(rl)) => {
                 if let Some(info) = &rl.rate_limit_info {
-                    tracing::warn!(info, "Ephemeral session rate limit");
+                    tracing::warn!(info = %info, "Ephemeral session rate limit");
                 }
             }
             Some(Event::System(sys)) => {
