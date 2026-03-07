@@ -209,12 +209,7 @@ impl DaemonConfig {
         let config: DaemonConfig = toml::from_str(&content)
             .map_err(|e| color_eyre::eyre::eyre!("failed to parse {}: {e}", path.display()))?;
         if !config.workspaces.is_empty() {
-            eprintln!(
-                "[daemon] WARNING: [[workspaces]] in {} is deprecated and ignored.\n\
-                 Each workspace should have its own .hive/daemon.toml.\n\
-                 The global daemon discovers workspaces from ~/.config/hive/workspaces.toml.",
-                path.display()
-            );
+            tracing::warn!(path = %path.display(), "[[workspaces]] in daemon.toml is deprecated and ignored");
         }
         Ok(config)
     }

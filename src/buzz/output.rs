@@ -58,10 +58,7 @@ pub fn emit(signals: &[Signal], mode: &OutputMode) -> Result<()> {
         }
         OutputMode::Webhook(url) => {
             // Stub: in a real implementation this would POST to the URL.
-            eprintln!(
-                "webhook output to {url} not yet implemented, {n} signals dropped",
-                n = signals.len()
-            );
+            tracing::warn!(url = %url, dropped = signals.len(), "webhook output not yet implemented");
         }
     }
 

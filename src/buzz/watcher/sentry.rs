@@ -113,10 +113,12 @@ impl SentryWatcher {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unreadable>".to_string());
-            eprintln!(
-                "[sentry] API returned {status} for {org}/{project}: {body}",
-                org = self.config.org,
-                project = self.config.project,
+            tracing::error!(
+                status = %status,
+                org = self.config.org.as_str(),
+                project = self.config.project.as_str(),
+                body = body.as_str(),
+                "API returned error"
             );
             return Ok(Vec::new());
         }
@@ -153,10 +155,12 @@ impl SentryWatcher {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unreadable>".to_string());
-            eprintln!(
-                "[sentry] sweep API returned {status} for {org}/{project}: {body}",
-                org = self.config.org,
-                project = self.config.project,
+            tracing::error!(
+                status = %status,
+                org = self.config.org.as_str(),
+                project = self.config.project.as_str(),
+                body = body.as_str(),
+                "sweep API returned error"
             );
             return Ok(Vec::new());
         }
@@ -267,10 +271,11 @@ impl Watcher for SentryWatcher {
         let issues = match self.fetch_issues().await {
             Ok(issues) => issues,
             Err(e) => {
-                eprintln!(
-                    "[sentry] failed to fetch issues for {org}/{project}: {e}",
-                    org = self.config.org,
-                    project = self.config.project,
+                tracing::error!(
+                    org = self.config.org.as_str(),
+                    project = self.config.project.as_str(),
+                    error = %e,
+                    "failed to fetch issues"
                 );
                 return Ok(Vec::new());
             }
@@ -341,10 +346,11 @@ impl Watcher for SentryWatcher {
         let issues = match self.fetch_all_issues(sweep_config.max_issues).await {
             Ok(issues) => issues,
             Err(e) => {
-                eprintln!(
-                    "[sentry] sweep failed for {org}/{project}: {e}",
-                    org = self.config.org,
-                    project = self.config.project,
+                tracing::error!(
+                    org = self.config.org.as_str(),
+                    project = self.config.project.as_str(),
+                    error = %e,
+                    "sweep failed"
                 );
                 return Ok(Vec::new());
             }
@@ -396,10 +402,10 @@ impl Watcher for SentryWatcher {
             self.record_seen(id, level, event_count);
         }
 
-        eprintln!(
-            "[sentry] sweep found {} issue(s) to re-triage out of {} total",
-            signals.len(),
-            issues.len()
+        tracing::info!(
+            retriaged = signals.len(),
+            total = issues.len(),
+            "sweep found issue(s) to re-triage"
         );
 
         Ok(signals)

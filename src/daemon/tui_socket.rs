@@ -115,7 +115,7 @@ impl TuiSocketServer {
         }
 
         let listener = UnixListener::bind(&socket_path)?;
-        eprintln!("[daemon] TUI socket listening on {}", socket_path.display());
+        tracing::info!(path = %socket_path.display(), "TUI socket listening");
 
         let (req_tx, req_rx) = mpsc::unbounded_channel();
         let (notify_tx, _) = broadcast::channel::<TuiResponse>(64);
@@ -153,7 +153,7 @@ impl TuiSocketServer {
 impl Drop for TuiSocketServer {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.socket_path);
-        eprintln!("[daemon] TUI socket cleaned up");
+        tracing::debug!("TUI socket cleaned up");
     }
 }
 
@@ -166,13 +166,13 @@ async fn accept_loop(
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                eprintln!("[daemon] TUI client connected");
+                tracing::debug!("TUI client connected");
                 let req_tx = req_tx.clone();
                 let notify_rx = notify_tx.subscribe();
                 tokio::spawn(handle_client(stream, req_tx, notify_rx));
             }
             Err(e) => {
-                eprintln!("[daemon] TUI socket accept error: {e}");
+                tracing::error!(error = %e, "TUI socket accept error");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
@@ -203,7 +203,7 @@ async fn handle_client(
             result = reader.read_line(&mut line) => {
                 match result {
                     Ok(0) => {
-                        eprintln!("[daemon] TUI client disconnected");
+                        tracing::debug!("TUI client disconnected");
                         break;
                     }
                     Ok(_) => {
@@ -215,7 +215,7 @@ async fn handle_client(
                                         request,
                                         responder: resp_tx.clone(),
                                     }).is_err() {
-                                        eprintln!("[daemon] TUI request channel closed");
+                                        tracing::warn!("TUI request channel closed");
                                         break;
                                     }
                                 }
@@ -232,7 +232,7 @@ async fn handle_client(
                         line.clear();
                     }
                     Err(e) => {
-                        eprintln!("[daemon] TUI read error: {e}");
+                        tracing::error!(error = %e, "TUI read error");
                         break;
                     }
                 }

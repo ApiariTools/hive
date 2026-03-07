@@ -101,17 +101,17 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
     let state: WatcherState = match load_state(&state_path) {
         Ok(state) => state,
         Err(e) => {
-            eprintln!("[buzz] failed to load watcher state: {e}");
+            tracing::error!(error = %e, "failed to load watcher state");
             WatcherState::default()
         }
     };
 
     for watcher in watchers.iter_mut() {
         if let Some(cursor) = state.cursors.get(watcher.name()) {
-            eprintln!(
-                "[buzz] restored cursor for '{}': {}",
-                watcher.name(),
-                cursor
+            tracing::debug!(
+                name = watcher.name(),
+                cursor = cursor.as_str(),
+                "restored cursor"
             );
             watcher.set_cursor(cursor.clone());
         }
@@ -121,9 +121,9 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
     if !state.seen_issues.is_empty()
         && let Some(sentry_watcher) = find_sentry_watcher_mut(watchers)
     {
-        eprintln!(
-            "[buzz] restored {} seen issue(s) for sweep",
-            state.seen_issues.len()
+        tracing::debug!(
+            count = state.seen_issues.len(),
+            "restored seen issue(s) for sweep"
         );
         sentry_watcher.restore_seen_issues(state.seen_issues);
     }
@@ -132,9 +132,9 @@ fn load_cursors(watchers: &mut [Box<dyn Watcher>], base: &Path) {
     if !state.seen_github.is_empty()
         && let Some(github_watcher) = find_github_watcher_mut(watchers)
     {
-        eprintln!(
-            "[buzz] restored {} seen github signal(s)",
-            state.seen_github.len()
+        tracing::debug!(
+            count = state.seen_github.len(),
+            "restored seen github signal(s)"
         );
         github_watcher.restore_seen(state.seen_github);
     }
@@ -162,7 +162,7 @@ pub fn save_cursors(watchers: &[Box<dyn Watcher>], base: &Path) {
 
     let state_path = base.join(STATE_REL);
     if let Err(e) = save_state(&state_path, &state) {
-        eprintln!("[buzz] failed to save watcher state: {e}");
+        tracing::error!(error = %e, "failed to save watcher state");
     }
 }
 

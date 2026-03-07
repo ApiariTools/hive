@@ -162,7 +162,7 @@ impl TelegramChannel {
             .await;
 
         if let Err(e) = resp {
-            eprintln!("[telegram] setMessageReaction failed: {e}");
+            tracing::warn!(error = %e, "setMessageReaction failed");
         }
     }
 
@@ -183,7 +183,7 @@ impl TelegramChannel {
             .await;
 
         if let Err(e) = resp {
-            eprintln!("[telegram] sendChatAction failed: {e}");
+            tracing::warn!(error = %e, "sendChatAction failed");
         }
     }
 
@@ -259,7 +259,7 @@ impl TelegramChannel {
                 let body: TgResponse<serde_json::Value> = resp.json().await?;
                 if !body.ok {
                     let desc = body.description.unwrap_or_default();
-                    eprintln!("[telegram] sendMessage failed: {desc}");
+                    tracing::warn!(error = desc, "sendMessage failed");
                 }
             }
         }
@@ -278,7 +278,7 @@ impl TelegramChannel {
             .await;
 
         if let Err(e) = resp {
-            eprintln!("[telegram] answerCallbackQuery failed: {e}");
+            tracing::warn!(error = %e, "answerCallbackQuery failed");
         }
     }
 }
@@ -303,7 +303,7 @@ impl Channel for TelegramChannel {
                     match result {
                         Ok(updates) => updates,
                         Err(e) => {
-                            eprintln!("[telegram] Poll error: {e}");
+                            tracing::error!(error = %e, "Telegram poll error");
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                             continue;
                         }

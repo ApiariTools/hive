@@ -237,11 +237,11 @@ impl QuestStore {
                     Ok(data) => match serde_json::from_str::<Quest>(&data) {
                         Ok(quest) => quests.push(quest),
                         Err(e) => {
-                            eprintln!("warning: failed to parse {}: {e}", path.display());
+                            tracing::warn!(path = %path.display(), error = %e, "failed to parse quest file");
                         }
                     },
                     Err(e) => {
-                        eprintln!("warning: failed to read {}: {e}", path.display());
+                        tracing::warn!(path = %path.display(), error = %e, "failed to read quest file");
                     }
                 }
             }

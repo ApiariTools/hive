@@ -11,6 +11,7 @@ mod doctor;
 #[allow(dead_code)]
 mod github;
 mod keeper;
+mod logging;
 mod pipeline;
 mod presence;
 mod quest;
@@ -203,6 +204,14 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
 
     let cli = Cli::parse();
+
+    // Daemon initializes its own file logger inside daemon::start().
+    // All other subcommands get stderr logging here.
+    match &cli.command {
+        Command::Daemon { .. } => {}
+        _ => logging::init_stderr(),
+    }
+
     let cwd = match &cli.dir {
         Some(d) => d.clone(),
         None => std::env::current_dir().wrap_err("failed to get current directory")?,
@@ -419,7 +428,13 @@ fn cmd_remind(cwd: &Path, duration: Option<&str>, cron: Option<&str>, message: &
     store.add(r);
     store.save()?;
 
-    eprintln!("[reminder] Created {kind} reminder {short_id}: \"{message}\" fires at {fire_str}");
+    tracing::info!(
+        kind,
+        id = short_id,
+        message,
+        fire_at = fire_str,
+        "Reminder created"
+    );
     println!("Reminder set (ID: {short_id})");
     println!("Next fire: {fire_str}");
     println!("Message: {message}");
@@ -433,7 +448,7 @@ fn cmd_list_reminders(cwd: &Path) -> Result<()> {
     let store = reminder::ReminderStore::load(&workspace.root);
 
     let active = store.active();
-    eprintln!("[reminder] Listed {} active reminder(s)", active.len());
+    tracing::debug!(count = active.len(), "Listed active reminders");
     println!("{}", reminder::format_reminder_list(&active));
 
     Ok(())
@@ -443,11 +458,7 @@ fn cmd_list_reminders(cwd: &Path) -> Result<()> {
 async fn cmd_verify(cwd: &Path, worktree_id: &str) -> Result<()> {
     let worktree_path = pipeline::verify::resolve_worktree_path(cwd, worktree_id)?;
 
-    eprintln!(
-        "[verify] Verifying worktree {} at {}",
-        worktree_id,
-        worktree_path.display()
-    );
+    tracing::info!(worktree_id, path = %worktree_path.display(), "Verifying worktree");
 
     let result = pipeline::verify::verify(&worktree_path).await?;
 
@@ -512,10 +523,7 @@ async fn cmd_dispatch(
     })
     .await?;
 
-    eprintln!(
-        "[dispatch] Pipeline completed at stage: {}",
-        result.stage_reached
-    );
+    tracing::info!(stage = %result.stage_reached, "Pipeline completed");
 
     // Print artifacts if dry-run or stopped early
     let any_dispatched = result.per_repo.iter().any(|r| r.worktree_id.is_some());
@@ -556,17 +564,14 @@ async fn cmd_context(cwd: &Path, input: &str, output: Option<&Path>) -> Result<(
     let workspace = load_workspace(cwd).ok();
     let repo_path = workspace.as_ref().map(|w| w.root.as_path());
 
-    eprintln!("[context] Identifying context...");
+    tracing::info!("Identifying context");
     let result = pipeline::context::identify_context(&task_md, repo_path).await?;
-    eprintln!(
-        "[context] Found {} relevant files",
-        result.relevant_files.len()
-    );
+    tracing::info!(count = result.relevant_files.len(), "Found relevant files");
 
     match output {
         Some(path) => {
             std::fs::write(path, &result.context_md)?;
-            eprintln!("[context] Written to {}", path.display());
+            tracing::info!(path = %path.display(), "Context written");
         }
         None => {
             println!("{}", result.context_md);
@@ -581,18 +586,18 @@ async fn cmd_refine(cwd: &Path, description: &str, output: Option<&Path>) -> Res
     let workspace = load_workspace(cwd).ok();
     let conventions = workspace.as_ref().and_then(|w| w.conventions.as_deref());
 
-    eprintln!("[refine] Refining: {description:?}");
+    tracing::info!(description, "Refining task");
     let result = pipeline::refine::refine(description, conventions).await?;
-    eprintln!("[refine] Title: {}", result.title);
-    eprintln!(
-        "[refine] Acceptance criteria: {}",
-        result.acceptance_criteria.len()
+    tracing::info!(title = %result.title, "Refined task");
+    tracing::info!(
+        count = result.acceptance_criteria.len(),
+        "Acceptance criteria"
     );
 
     match output {
         Some(path) => {
             std::fs::write(path, &result.task_md)?;
-            eprintln!("[refine] Written to {}", path.display());
+            tracing::info!(path = %path.display(), "Refined task written");
         }
         None => {
             println!("{}", result.task_md);
@@ -611,7 +616,7 @@ fn cmd_cancel_reminder(cwd: &Path, id_prefix: &str) -> Result<()> {
         Ok(id) => {
             store.save()?;
             let short = &id[..8.min(id.len())];
-            eprintln!("[reminder] Cancelled reminder {short}");
+            tracing::info!(id = short, "Cancelled reminder");
             println!("Cancelled reminder {short}.");
         }
         Err(reminder::CancelError::NotFound) => {
