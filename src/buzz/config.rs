@@ -258,7 +258,9 @@ impl BuzzConfig {
         }
 
         if self.output.mode == "file" && self.output.path.is_none() {
-            tracing::info!("output.mode is 'file' but output.path is not set, will use .buzz/signals.jsonl");
+            tracing::info!(
+                "output.mode is 'file' but output.path is not set, will use .buzz/signals.jsonl"
+            );
         }
 
         if self.poll_interval_secs == 0 {

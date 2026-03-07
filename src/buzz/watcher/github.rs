@@ -133,7 +133,11 @@ impl GithubWatcher {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!(endpoint = endpoint, error = stderr.trim(), "`gh api` failed");
+            tracing::error!(
+                endpoint = endpoint,
+                error = stderr.trim(),
+                "`gh api` failed"
+            );
             return None;
         }
 

@@ -428,7 +428,13 @@ fn cmd_remind(cwd: &Path, duration: Option<&str>, cron: Option<&str>, message: &
     store.add(r);
     store.save()?;
 
-    tracing::info!(kind, id = short_id, message, fire_at = fire_str, "Reminder created");
+    tracing::info!(
+        kind,
+        id = short_id,
+        message,
+        fire_at = fire_str,
+        "Reminder created"
+    );
     println!("Reminder set (ID: {short_id})");
     println!("Next fire: {fire_str}");
     println!("Message: {message}");
@@ -583,7 +589,10 @@ async fn cmd_refine(cwd: &Path, description: &str, output: Option<&Path>) -> Res
     tracing::info!(description, "Refining task");
     let result = pipeline::refine::refine(description, conventions).await?;
     tracing::info!(title = %result.title, "Refined task");
-    tracing::info!(count = result.acceptance_criteria.len(), "Acceptance criteria");
+    tracing::info!(
+        count = result.acceptance_criteria.len(),
+        "Acceptance criteria"
+    );
 
     match output {
         Some(path) => {
