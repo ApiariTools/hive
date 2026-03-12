@@ -11,7 +11,7 @@ Hive is the coordination layer of the [Apiari](https://github.com/ApiariTools) t
 - **Rust 1.93+** (edition 2024)
 - **`claude` CLI** — required for coordinator features (chat, plan, auto-triage). Hive falls back gracefully to offline mode if unavailable.
 - **`gh` CLI** — required for GitHub buzz watcher and PR queries. Install and authenticate with `gh auth login`.
-- **tmux** — required for the dashboard TUI (discovers swarm sessions via tmux).
+- **swarm** — for managing parallel agents in git worktrees.
 
 ## Install
 

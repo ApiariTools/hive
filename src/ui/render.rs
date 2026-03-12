@@ -1,8 +1,10 @@
 //! Rendering logic for the unified hive TUI.
 
 use super::app::{
-    App, ChatLine, DispatchPhase, DispatchState, DispatchStatus, Panel, RepoStage, SidebarItem,
+    App, ChatLine, DispatchPhase, DispatchState, DispatchStatus, Panel, PrDetailInfo, RepoStage,
+    SidebarItem,
 };
+use super::markdown;
 use crate::keeper::discovery::WorktreeInfo;
 use crate::keeper::tui::theme;
 use chrono::Local;
@@ -11,7 +13,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 /// Braille spinner animation frames.
@@ -38,6 +40,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_tab_bar(frame, outer[0], app);
     draw_body(frame, outer[1], app);
+
+    // Floating overlays (rendered on top of body).
+    if let Some(ref pr) = app.pr_detail {
+        draw_pr_detail_overlay(frame, area, pr);
+    }
+    if app.show_help {
+        draw_help_overlay(frame, area);
+    }
 }
 
 // ── Tab Bar ──────────────────────────────────────────────
@@ -621,7 +631,9 @@ fn draw_sidebar_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("y", theme::key_hint()),
             Span::styled("/", theme::key_desc()),
             Span::styled("n", theme::key_hint()),
-            Span::styled(" confirm/cancel", theme::key_desc()),
+            Span::styled(" confirm  ", theme::key_desc()),
+            Span::styled("?", theme::key_hint()),
+            Span::styled(" help", theme::key_desc()),
         ])
     } else if app.is_chat_selected() {
         Line::from(vec![
@@ -632,7 +644,9 @@ fn draw_sidebar_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("l", theme::key_hint()),
             Span::styled(" focus  ", theme::key_desc()),
             Span::styled("q", theme::key_hint()),
-            Span::styled(" quit", theme::key_desc()),
+            Span::styled(" quit  ", theme::key_desc()),
+            Span::styled("?", theme::key_hint()),
+            Span::styled(" help", theme::key_desc()),
         ])
     } else {
         Line::from(vec![
@@ -643,7 +657,9 @@ fn draw_sidebar_status_bar(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("p", theme::key_hint()),
             Span::styled(" PR  ", theme::key_desc()),
             Span::styled("d", theme::key_hint()),
-            Span::styled(" dispatch", theme::key_desc()),
+            Span::styled(" dispatch  ", theme::key_desc()),
+            Span::styled("?", theme::key_hint()),
+            Span::styled(" help", theme::key_desc()),
         ])
     };
     frame.render_widget(Paragraph::new(hints), area);
@@ -1305,6 +1321,16 @@ fn draw_dispatch_review(frame: &mut Frame, area: Rect, app: &App) {
 
 // ── Chat Panel ───────────────────────────────────────────
 
+/// Deduplicate timestamps: return empty string if same as previous.
+fn dedup_timestamp<'a>(ts: &'a str, prev: &mut Option<&'a str>) -> &'a str {
+    if prev.as_ref() == Some(&ts) {
+        ""
+    } else {
+        *prev = Some(ts);
+        ts
+    }
+}
+
 fn draw_chat_panel(frame: &mut Frame, area: Rect, app: &App) {
     let border_style = if app.focus == Panel::Chat {
         theme::border_active()
@@ -1312,10 +1338,108 @@ fn draw_chat_panel(frame: &mut Frame, area: Rect, app: &App) {
         theme::border()
     };
 
-    let title = if app.streaming {
-        " Coordinator (streaming...) "
+    // Build lines first to calculate scroll indicator.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut prev_ts: Option<&str> = None;
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let divider_line = "\u{2500}".repeat(inner_width.saturating_sub(4));
+
+    for (i, entry) in app.chat_history.iter().enumerate() {
+        match entry {
+            ChatLine::User(text, ts) => {
+                // Divider between messages (skip before first)
+                if i > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {divider_line}"),
+                        Style::default().fg(theme::STEEL),
+                    )));
+                }
+                let display_ts = dedup_timestamp(ts, &mut prev_ts);
+                let mut label_spans = vec![Span::styled(
+                    "  You:",
+                    Style::default()
+                        .fg(theme::HONEY)
+                        .bg(theme::FOCUS_BG)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if !display_ts.is_empty() {
+                    label_spans.push(Span::styled(
+                        format!("  {display_ts}"),
+                        Style::default().fg(theme::SMOKE),
+                    ));
+                }
+                lines.push(Line::from(label_spans));
+                for line in text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {line}"),
+                        Style::default().fg(theme::HONEY).bg(theme::FOCUS_BG),
+                    )));
+                }
+                lines.push(Line::from(""));
+            }
+            ChatLine::Assistant(text, ts) => {
+                if i > 0
+                    && !matches!(
+                        app.chat_history.get(i.wrapping_sub(1)),
+                        Some(ChatLine::User(..))
+                    )
+                {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {divider_line}"),
+                        Style::default().fg(theme::STEEL),
+                    )));
+                }
+                let display_ts = dedup_timestamp(ts, &mut prev_ts);
+                let mut label_spans = vec![Span::styled(
+                    "  Coordinator:",
+                    Style::default()
+                        .fg(theme::FROST)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if !display_ts.is_empty() {
+                    label_spans.push(Span::styled(
+                        format!("  {display_ts}"),
+                        Style::default().fg(theme::SMOKE),
+                    ));
+                }
+                lines.push(Line::from(label_spans));
+                // Render assistant text as markdown.
+                let md_lines = markdown::render_markdown(text);
+                lines.extend(md_lines);
+                // Streaming cursor.
+                if app.streaming && i == app.chat_history.len() - 1 {
+                    lines.push(Line::from(Span::styled(
+                        "  \u{258c}",
+                        Style::default().fg(theme::HONEY),
+                    )));
+                }
+            }
+            ChatLine::System(text) => {
+                lines.push(Line::from(Span::styled(
+                    format!("  {text}"),
+                    theme::subtitle(),
+                )));
+                lines.push(Line::from(""));
+            }
+        }
+    }
+
+    // Calculate scroll indicator for title.
+    let inner_height = area.height.saturating_sub(2) as usize; // borders top+bottom
+    let total = lines.len();
+    let title = if app.chat_scroll > 0 && total > inner_height {
+        let max_scroll = total.saturating_sub(inner_height);
+        let scroll_clamped = (app.chat_scroll as usize).min(max_scroll);
+        let pct = ((max_scroll - scroll_clamped) * 100) / max_scroll.max(1);
+        if pct == 0 {
+            " Coordinator  Top ".to_string()
+        } else {
+            format!(" Coordinator  {pct}% ")
+        }
+    } else if app.streaming {
+        " Coordinator (streaming...) ".to_string()
     } else {
-        " Coordinator "
+        " Coordinator ".to_string()
     };
 
     let block = Block::default()
@@ -1330,35 +1454,8 @@ fn draw_chat_panel(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // Build lines from chat history.
-    let mut lines: Vec<Line> = Vec::new();
-    for entry in &app.chat_history {
-        match entry {
-            ChatLine::User(text) => {
-                lines.push(Line::from(vec![
-                    Span::styled("You: ", theme::accent()),
-                    Span::styled(text.as_str(), theme::text()),
-                ]));
-            }
-            ChatLine::Assistant(text) => {
-                lines.push(Line::from(Span::styled(
-                    "Coordinator:",
-                    theme::agent_color(),
-                )));
-                for line in text.lines() {
-                    lines.push(Line::from(Span::styled(format!("  {line}"), theme::text())));
-                }
-            }
-            ChatLine::System(text) => {
-                lines.push(Line::from(Span::styled(text.as_str(), theme::subtitle())));
-            }
-        }
-        lines.push(Line::from("")); // blank separator
-    }
-
     // Apply scroll from bottom.
     let visible_height = inner.height as usize;
-    let total = lines.len();
     let skip = if total > visible_height {
         total
             .saturating_sub(visible_height)
@@ -1422,7 +1519,7 @@ fn draw_input_bar(frame: &mut Frame, area: Rect, app: &App, prompt: &str) {
     }
 }
 
-// ── Worker Output (tmux pane capture) ─────────────────────
+// ── Worker Output ─────────────────────────────────────────
 
 fn draw_worker_output(frame: &mut Frame, area: Rect, app: &App) {
     let border_style = if app.focus == Panel::Chat {
@@ -1636,6 +1733,142 @@ fn parse_ansi_line(input: &str) -> Line<'static> {
     } else {
         Line::from(spans)
     }
+}
+
+// ── Centered Rect Helper ─────────────────────────────────
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+// ── Help Overlay ─────────────────────────────────────────
+
+fn draw_help_overlay(frame: &mut Frame, area: Rect) {
+    let popup = centered_rect(54, 32, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(" help ", theme::title()))
+        .borders(Borders::ALL)
+        .border_style(theme::border_active())
+        .style(Style::default().bg(theme::COMB));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let section = |title: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            format!(" ── {title} ──"),
+            Style::default()
+                .fg(theme::HONEY)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+
+    let key_line = |key: &str, desc: &str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("  {key:<14}"), theme::key_hint()),
+            Span::styled(desc.to_string(), theme::key_desc()),
+        ])
+    };
+
+    let lines: Vec<Line> = vec![
+        section("Sidebar"),
+        key_line("j / k", "Navigate workers"),
+        key_line("Tab / l / ↵", "Focus content"),
+        key_line("d", "Dispatch"),
+        key_line("x", "Close worker"),
+        key_line("p", "PR detail overlay"),
+        key_line("c", "Copy PR URL"),
+        key_line("o", "Jump to agent"),
+        key_line("g / G", "First / last worker"),
+        key_line("z", "Toggle zoom"),
+        key_line("?", "Help"),
+        key_line("q", "Quit"),
+        Line::from(""),
+        section("Chat"),
+        key_line("↵", "Send message"),
+        key_line("j / k", "Scroll 1 line"),
+        key_line("u / d", "Half-page up/down"),
+        key_line("PgUp / PgDn", "Full page"),
+        key_line("Home", "Scroll to top"),
+        key_line("G / End", "Scroll to bottom"),
+        key_line("h / Tab", "Return to sidebar"),
+        key_line("z", "Toggle zoom"),
+        Line::from(""),
+        section("Dispatch Review"),
+        key_line("j / k", "Navigate sections"),
+        key_line("↵", "Toggle section"),
+        key_line("c", "Collapse all"),
+        key_line("u / d", "Scroll"),
+        key_line("y / n", "Confirm / cancel"),
+        Line::from(""),
+        section("Tabs"),
+        key_line("^b n / p", "Next / prev tab"),
+        key_line("^b 1-9", "Direct tab"),
+    ];
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
+// ── PR Detail Overlay ────────────────────────────────────
+
+fn draw_pr_detail_overlay(frame: &mut Frame, area: Rect, pr: &PrDetailInfo) {
+    let popup = centered_rect(58, 11, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(format!(" PR #{} ", pr.number), theme::title()))
+        .borders(Borders::ALL)
+        .border_style(theme::border_active())
+        .style(Style::default().bg(theme::COMB));
+
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let state_style = match pr.state.as_str() {
+        "OPEN" => Style::default().fg(theme::MINT),
+        "MERGED" => Style::default().fg(theme::ROYAL),
+        "CLOSED" => Style::default().fg(theme::EMBER),
+        _ => theme::muted(),
+    };
+
+    let lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Title:  ", theme::muted()),
+            Span::styled(pr.title.clone(), theme::text()),
+        ]),
+        Line::from(vec![
+            Span::styled("  State:  ", theme::muted()),
+            Span::styled(pr.state.clone(), state_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  URL:    ", theme::muted()),
+            Span::styled(pr.url.clone(), Style::default().fg(theme::FROST)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  o", theme::key_hint()),
+            Span::styled("/", theme::key_desc()),
+            Span::styled("↵", theme::key_hint()),
+            Span::styled(" open  ", theme::key_desc()),
+            Span::styled("c", theme::key_hint()),
+            Span::styled(" copy  ", theme::key_desc()),
+            Span::styled("esc", theme::key_hint()),
+            Span::styled("/", theme::key_desc()),
+            Span::styled("p", theme::key_hint()),
+            Span::styled("/", theme::key_desc()),
+            Span::styled("q", theme::key_hint()),
+            Span::styled(" dismiss", theme::key_desc()),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
 }
 
 // ── Helpers ──────────────────────────────────────────────

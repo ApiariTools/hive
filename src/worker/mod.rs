@@ -63,7 +63,7 @@ impl Worker {
     ///
     /// This launches a new swarm worktree with the task description as the
     /// prompt. The swarm CLI handles worktree creation, agent launch, and
-    /// tmux pane management.
+    /// agent process management.
     pub async fn spawn_worker(&self, task: &Task) -> Result<String> {
         let prompt = format!("Task: {}\nQuest: {}", task.title, task.quest_id);
 

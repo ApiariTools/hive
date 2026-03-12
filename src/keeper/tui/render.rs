@@ -510,7 +510,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
         ("j/k", "navigate up/down"),
         ("\u{2191}/\u{2193}", "navigate up/down"),
         ("Tab", "switch panels"),
-        ("\u{21b5}", "jump to tmux pane"),
+        ("\u{21b5}", "jump to agent"),
         ("e", "agent event detail"),
         ("r", "force refresh"),
         ("?", "toggle this help"),

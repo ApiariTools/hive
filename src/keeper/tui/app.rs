@@ -240,7 +240,7 @@ impl App {
         self.overlay != Overlay::None
     }
 
-    /// Jump to the selected session/worktree in tmux.
+    /// Jump to the selected session/worktree (legacy tmux path).
     pub fn jump_to_selected(&mut self) {
         let Some(session) = self.sessions.get(self.selected_session) else {
             return;

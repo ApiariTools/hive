@@ -1,9 +1,10 @@
-//! Tmux session and pane discovery.
+//! Swarm session and worker discovery.
 //!
-//! Finds all running swarm tmux sessions (matching `swarm-*`), reads their
-//! `.swarm/state.json`, and checks pane liveness via tmux queries.
+//! Reads `.swarm/state.json` to discover running swarm workers.
 //! Optionally reads buzz signals from `.buzz/signals.jsonl`.
 //! This module is strictly read-only -- it never modifies swarm state.
+//!
+//! Legacy: also contains tmux-based discovery functions for backwards compat.
 
 use chrono::{DateTime, Local, Utc};
 use color_eyre::Result;
@@ -286,7 +287,7 @@ pub struct DiscoveryResult {
 
 // ── Discovery ─────────────────────────────────────────────
 
-/// Discover all running swarm tmux sessions, their state, and optional buzz signals.
+/// Discover all running swarm sessions, their state, and optional buzz signals.
 pub fn discover_all() -> Result<DiscoveryResult> {
     let sessions = discover_sessions()?;
 
@@ -296,7 +297,7 @@ pub fn discover_all() -> Result<DiscoveryResult> {
     Ok(DiscoveryResult { sessions, buzz })
 }
 
-/// Discover all running swarm tmux sessions and their state.
+/// Discover all running swarm sessions and their state.
 pub fn discover_sessions() -> Result<Vec<SwarmSession>> {
     let session_names = list_swarm_sessions()?;
     let mut sessions = Vec::new();
@@ -418,7 +419,7 @@ pub fn refresh_pr_info(session: &mut SwarmSession) {
     }
 }
 
-/// List tmux sessions whose names start with `swarm-`.
+/// List tmux sessions whose names start with `swarm-` (legacy discovery path).
 fn list_swarm_sessions() -> Result<Vec<String>> {
     let output = Command::new("tmux")
         .args(["list-sessions", "-F", "#{session_name}"])
@@ -541,8 +542,7 @@ fn read_session(session_name: &str) -> Option<SwarmSession> {
     })
 }
 
-/// Get the project directory for a tmux session by reading the first
-/// pane's current path.
+/// Get the project directory for a tmux session (legacy discovery path).
 fn session_project_dir(session_name: &str) -> Option<PathBuf> {
     let output = Command::new("tmux")
         .args([
@@ -569,7 +569,7 @@ fn session_project_dir(session_name: &str) -> Option<PathBuf> {
     Some(PathBuf::from(first_path))
 }
 
-/// List all pane IDs (e.g. `%0`, `%3`) in a tmux session.
+/// List all pane IDs in a tmux session (legacy discovery path).
 fn list_session_pane_ids(session_name: &str) -> Vec<String> {
     let output = Command::new("tmux")
         .args(["list-panes", "-s", "-t", session_name, "-F", "#{pane_id}"])
@@ -590,11 +590,11 @@ fn list_session_pane_ids(session_name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Discover workers from `.swarm/state.json` directly (no tmux).
+/// Discover workers from `.swarm/state.json` directly.
 ///
-/// This is the primary discovery path now that swarm uses a daemon instead of tmux.
-/// The workspace root is known from the workspace registry, so we just read the
-/// state file and convert worktrees into `WorktreeInfo`.
+/// This is the primary discovery path. The workspace root is known from the
+/// workspace registry, so we just read the state file and convert worktrees
+/// into `WorktreeInfo`.
 pub fn discover_from_state_file(workspace_root: &std::path::Path) -> Option<SwarmSession> {
     let state_path = workspace_root.join(".swarm").join("state.json");
     let data = std::fs::read_to_string(&state_path).ok()?;
@@ -604,7 +604,7 @@ pub fn discover_from_state_file(workspace_root: &std::path::Path) -> Option<Swar
         .worktrees
         .into_iter()
         .map(|wt| {
-            // Determine agent liveness from phase field (no tmux panes).
+            // Determine agent liveness from phase field.
             let phase_str = wt.phase.as_deref().unwrap_or("unknown");
             let agent_alive = matches!(phase_str, "running" | "waiting" | "creating" | "starting");
 
@@ -627,7 +627,7 @@ pub fn discover_from_state_file(workspace_root: &std::path::Path) -> Option<Swar
                 prompt: wt.prompt,
                 agent_kind: wt.agent_kind.to_string(),
                 worktree_path: wt.worktree_path,
-                agent_pane_id: None, // No tmux panes in daemon mode
+                agent_pane_id: None,
                 agent_alive,
                 terminal_count: 0,
                 summary: wt.summary,

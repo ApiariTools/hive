@@ -108,11 +108,20 @@ pub struct DispatchState {
     pub prompt_cursor: usize,
 }
 
+/// PR detail info for the overlay.
+#[derive(Debug, Clone)]
+pub struct PrDetailInfo {
+    pub number: String,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+}
+
 /// A line in the chat history.
 #[derive(Clone, Debug)]
 pub enum ChatLine {
-    User(String),
-    Assistant(String),
+    User(String, String),      // (text, timestamp)
+    Assistant(String, String), // (text, timestamp)
     System(String),
 }
 
@@ -171,6 +180,12 @@ pub struct App {
     // Zoom: hide sidebar and show content panel full-width.
     pub zoomed: bool,
 
+    // Help overlay.
+    pub show_help: bool,
+
+    // PR detail overlay.
+    pub pr_detail: Option<PrDetailInfo>,
+
     // Periodic refresh
     last_worker_refresh: Instant,
 }
@@ -183,9 +198,14 @@ impl App {
             "Welcome to hive ui. Type a message to chat with the coordinator.".into(),
         )];
         for msg in &saved {
+            let ts = msg
+                .ts
+                .with_timezone(&chrono::Local)
+                .format("%-I:%M %p")
+                .to_string();
             match msg.role.as_str() {
-                "user" => chat_history.push(ChatLine::User(msg.content.clone())),
-                "assistant" => chat_history.push(ChatLine::Assistant(msg.content.clone())),
+                "user" => chat_history.push(ChatLine::User(msg.content.clone(), ts)),
+                "assistant" => chat_history.push(ChatLine::Assistant(msg.content.clone(), ts)),
                 _ => {}
             }
         }
@@ -218,6 +238,8 @@ impl App {
             active_dispatch: None,
             spinner_tick: 0,
             zoomed: false,
+            show_help: false,
+            pr_detail: None,
             last_worker_refresh: Instant::now(),
         }
     }
@@ -245,8 +267,7 @@ impl App {
 
     /// Refresh the worker list from swarm state.
     ///
-    /// Reads `.swarm/state.json` directly from the active workspace root
-    /// (no tmux dependency — swarm now uses a daemon).
+    /// Reads `.swarm/state.json` directly from the active workspace root.
     pub fn refresh_workers(&mut self) {
         if let Some(root) = self.active_workspace_root() {
             if let Some(session) = discovery::discover_from_state_file(root) {
@@ -255,7 +276,7 @@ impl App {
                 self.sessions.clear();
             }
         } else {
-            // No active workspace — fall back to tmux-based discovery.
+            // No active workspace — fall back to legacy discovery.
             if let Ok(result) = discovery::discover_all() {
                 self.sessions = result.sessions;
             }
@@ -266,9 +287,8 @@ impl App {
 
     /// Refresh content for the currently selected worker.
     ///
-    /// In daemon mode (no tmux pane), shows recent agent events from
-    /// `.swarm/agents/<id>/events.jsonl`. Falls back to tmux pane capture
-    /// if a pane_id is available.
+    /// Shows recent agent events from `.swarm/agents/<id>/events.jsonl`.
+    /// Falls back to legacy pane capture if a pane_id is available.
     pub fn refresh_pane_content(&mut self) {
         let SidebarItem::Worker(idx) = self.sidebar_selection else {
             self.pane_content.clear();
@@ -281,7 +301,7 @@ impl App {
             return;
         };
 
-        // Try tmux pane capture first (legacy path).
+        // Try legacy pane capture if pane_id available.
         if let Some(ref pane_id) = wt.agent_pane_id {
             match std::process::Command::new("tmux")
                 .args(["capture-pane", "-t", pane_id, "-p", "-S", "-500", "-e"])
@@ -447,11 +467,18 @@ impl App {
                     entry.name
                 ))];
                 for msg in &saved {
+                    let ts = msg
+                        .ts
+                        .with_timezone(&chrono::Local)
+                        .format("%-I:%M %p")
+                        .to_string();
                     match msg.role.as_str() {
-                        "user" => self.chat_history.push(ChatLine::User(msg.content.clone())),
+                        "user" => self
+                            .chat_history
+                            .push(ChatLine::User(msg.content.clone(), ts)),
                         "assistant" => self
                             .chat_history
-                            .push(ChatLine::Assistant(msg.content.clone())),
+                            .push(ChatLine::Assistant(msg.content.clone(), ts)),
                         _ => {}
                     }
                 }
@@ -497,14 +524,23 @@ impl App {
         text
     }
 
-    /// Scroll chat up.
-    pub fn scroll_chat_up(&mut self) {
-        self.chat_scroll = self.chat_scroll.saturating_add(3);
+    /// Scroll chat by N lines.
+    pub fn scroll_chat_lines(&mut self, n: u16, up: bool) {
+        if up {
+            self.chat_scroll = self.chat_scroll.saturating_add(n);
+        } else {
+            self.chat_scroll = self.chat_scroll.saturating_sub(n);
+        }
     }
 
-    /// Scroll chat down.
-    pub fn scroll_chat_down(&mut self) {
-        self.chat_scroll = self.chat_scroll.saturating_sub(3);
+    /// Scroll chat to bottom.
+    pub fn scroll_chat_to_bottom(&mut self) {
+        self.chat_scroll = 0;
+    }
+
+    /// Scroll chat to top (requires total lines and viewport height).
+    pub fn scroll_chat_to_top(&mut self, total_lines: u16, viewport: u16) {
+        self.chat_scroll = total_lines.saturating_sub(viewport);
     }
 
     pub fn clamp_sidebar_selection(&mut self) {
@@ -748,6 +784,11 @@ impl App {
         let workers = self.flat_workers();
         workers.get(idx).map(|(_, wt)| (wt.id.as_str(), *wt))
     }
+}
+
+/// Current local timestamp formatted for display.
+pub fn now_ts() -> String {
+    chrono::Local::now().format("%-I:%M %p").to_string()
 }
 
 /// Discover repos by scanning workspace root for subdirectories containing `.git/`.

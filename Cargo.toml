@@ -8,6 +8,7 @@ description = "Plan and coordinate the work. Quests, coordinator, context."
 [dependencies]
 apiari-common.workspace = true
 apiari-claude-sdk.workspace = true
+apiari-tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -31,6 +32,7 @@ tempfile = "3"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"
+pulldown-cmark = "0.13"
 
 [dev-dependencies]
 mockall = "0.12"

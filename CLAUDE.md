@@ -75,7 +75,7 @@ src/
       webhook.rs        # Webhook receiver (stub)
   keeper/
     mod.rs              # Dashboard entry point (run logic)
-    discovery.rs        # Tmux session discovery, buzz signal reading, PR queries
+    discovery.rs        # Swarm session discovery, buzz signal reading, PR queries
     tui/
       mod.rs            # TUI event loop (crossterm key handling)
       app.rs            # App state (sessions, selection, panels, overlays)
@@ -92,7 +92,7 @@ src/
 - **QuestStore**: CRUD over `.hive/quests/` directory using `apiari_common::state` for atomic writes.
 - **Signal**: Event from external sources (Sentry, GitHub, reminders). Defined in `signal.rs`, produced by buzz watchers, consumed by daemon for triage.
 - **Watcher**: Pluggable source that polls for new signals. Trait in `buzz::watcher`.
-- **Keeper**: Read-only TUI dashboard that discovers swarm tmux sessions and displays their status.
+- **Keeper**: Read-only TUI dashboard that discovers swarm sessions and displays their status.
 
 ### Inline Buzz Watchers (daemon mode)
 
@@ -190,7 +190,7 @@ hive start <id>
 swarm create "task prompt"    # One per task
   |
   v
-.swarm/inbox.jsonl -> swarm TUI -> agent in tmux pane
+.swarm/inbox.jsonl -> swarm TUI -> agent daemon
 
 hive buzz --daemon
   |
@@ -203,7 +203,7 @@ hive buzz --daemon
 hive dashboard
   |
   v (reads)
-.swarm/state.json + tmux queries + .buzz/signals.jsonl
+.swarm/state.json + .buzz/signals.jsonl
 ```
 
 - **Uses**: `apiari-common` (IPC, state persistence), `apiari-claude-sdk` (coordinator/planning/chat)

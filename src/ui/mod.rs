@@ -4,9 +4,12 @@ pub mod app;
 pub mod daemon_client;
 pub mod history;
 pub mod inbox;
+pub mod markdown;
 pub mod render;
 
-use app::{ActiveDispatch, App, ChatLine, DispatchStatus, Panel, PendingAction, SidebarItem};
+use app::{
+    ActiveDispatch, App, ChatLine, DispatchStatus, Panel, PendingAction, PrDetailInfo, SidebarItem,
+};
 use color_eyre::Result;
 use crossterm::{
     ExecutableCommand,
@@ -308,15 +311,16 @@ async fn event_loop(
         while let Ok(msg) = coord_rx.try_recv() {
             match msg {
                 CoordResponse::Token(text) => {
-                    if let Some(ChatLine::Assistant(s)) = app.chat_history.last_mut() {
+                    if let Some(ChatLine::Assistant(s, _)) = app.chat_history.last_mut() {
                         s.push_str(&text);
                     } else {
-                        app.chat_history.push(ChatLine::Assistant(text));
+                        app.chat_history
+                            .push(ChatLine::Assistant(text, app::now_ts()));
                     }
                     app.chat_scroll = 0;
                 }
                 CoordResponse::Done => {
-                    if let Some(ChatLine::Assistant(s)) = app.chat_history.last() {
+                    if let Some(ChatLine::Assistant(s, _)) = app.chat_history.last() {
                         let _ = history::save_message(
                             &app.workspace_root,
                             &history::ChatMessage {
@@ -553,8 +557,47 @@ async fn event_loop(
                 continue;
             }
 
+            // ── Help overlay ──
+            if app.show_help {
+                app.show_help = false;
+                continue;
+            }
+
+            // ── PR detail overlay ──
+            if app.pr_detail.is_some() {
+                match key.code {
+                    KeyCode::Char('o') | KeyCode::Enter => {
+                        if let Some(ref pr) = app.pr_detail {
+                            let _ = std::process::Command::new("open").arg(&pr.url).spawn();
+                            app.flash("Opened PR in browser");
+                        }
+                        app.pr_detail = None;
+                    }
+                    KeyCode::Char('c') => {
+                        if let Some(ref pr) = app.pr_detail {
+                            copy_to_clipboard(&pr.url);
+                            app.flash("PR URL copied");
+                        }
+                        app.pr_detail = None;
+                    }
+                    KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q') => {
+                        app.pr_detail = None;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             // ── Global keybindings ──
             let handled = match key.code {
+                // ? opens help from any panel (except when typing in chat input).
+                KeyCode::Char('?')
+                    if app.focus == Panel::Workers
+                        || (app.focus == Panel::Chat && !app.is_chat_selected()) =>
+                {
+                    app.show_help = true;
+                    true
+                }
                 KeyCode::Char(c @ '1'..='9')
                     if key.modifiers.contains(KeyModifiers::ALT) || app.focus == Panel::Workers =>
                 {
@@ -672,7 +715,12 @@ async fn event_loop(
                                     KeyCode::Char('z') => {
                                         app.zoomed = !app.zoomed;
                                     }
-                                    KeyCode::BackTab | KeyCode::Left => app.focus = Panel::Workers,
+                                    KeyCode::Char('?') => {
+                                        app.show_help = true;
+                                    }
+                                    KeyCode::Char('h') | KeyCode::BackTab | KeyCode::Left => {
+                                        app.focus = Panel::Workers
+                                    }
                                     KeyCode::Tab => app.focus = Panel::Workers,
                                     KeyCode::Esc => {
                                         if app.zoomed {
@@ -692,10 +740,9 @@ async fn event_loop(
                                                     ts: chrono::Utc::now(),
                                                 },
                                             );
-                                            app.chat_history.push(ChatLine::User(text.clone()));
+                                            app.chat_history
+                                                .push(ChatLine::User(text.clone(), app::now_ts()));
                                             app.streaming = true;
-                                            // When connected to daemon, send raw text.
-                                            // When using local coordinator, send with history.
                                             let send_text = if app.daemon_connected {
                                                 text
                                             } else {
@@ -708,16 +755,34 @@ async fn event_loop(
                                         }
                                     }
                                     KeyCode::Backspace => app.backspace(),
-                                    KeyCode::Up => app.scroll_chat_up(),
-                                    KeyCode::Down => app.scroll_chat_down(),
+                                    // Vim-style scroll
+                                    KeyCode::Char('j') | KeyCode::Down => {
+                                        app.scroll_chat_lines(1, false)
+                                    }
+                                    KeyCode::Char('k') | KeyCode::Up => {
+                                        app.scroll_chat_lines(1, true)
+                                    }
+                                    KeyCode::Char('u') => app.scroll_chat_half_up(viewport_height),
+                                    KeyCode::Char('d') => {
+                                        app.scroll_chat_half_down(viewport_height)
+                                    }
+                                    KeyCode::Char('G') | KeyCode::End => {
+                                        app.scroll_chat_to_bottom()
+                                    }
+                                    KeyCode::Home => {
+                                        // We use a large value; render will clamp.
+                                        app.scroll_chat_to_top(u16::MAX, viewport_height)
+                                    }
+                                    KeyCode::PageUp => app.scroll_chat_page_up(viewport_height),
+                                    KeyCode::PageDown => app.scroll_chat_page_down(viewport_height),
                                     KeyCode::Char(c) => app.insert_char(c),
                                     _ => {}
                                 }
                             }
                         } else {
-                            // ── Content: Worker pane (forward keys to tmux) ──
+                            // ── Content: Worker pane (forward keys to agent) ──
                             // Esc / Tab / BackTab return focus to sidebar.
-                            // Everything else is forwarded to the tmux pane.
+                            // Everything else is forwarded to the agent pane.
                             match key.code {
                                 KeyCode::Char('z') => {
                                     app.zoomed = !app.zoomed;
@@ -799,7 +864,7 @@ async fn event_loop(
                                 app.focus = Panel::Chat;
                             }
                             KeyCode::Char('o') => {
-                                // Jump directly to tmux pane for selected worker.
+                                // Jump directly to agent pane for selected worker.
                                 if let Some((_, wt)) = app.selected_worker()
                                     && let Some(ref pane_id) = wt.agent_pane_id
                                 {
@@ -814,12 +879,15 @@ async fn event_loop(
                                 }
                             }
                             KeyCode::Char('p') => {
-                                // Open PR in browser.
+                                // Show PR detail overlay.
                                 if let Some((_, wt)) = app.selected_worker() {
                                     if let Some(ref pr) = wt.pr {
-                                        let _ =
-                                            std::process::Command::new("open").arg(&pr.url).spawn();
-                                        app.flash("Opened PR in browser");
+                                        app.pr_detail = Some(PrDetailInfo {
+                                            number: pr.number.to_string(),
+                                            title: pr.title.clone(),
+                                            state: pr.state.clone(),
+                                            url: pr.url.clone(),
+                                        });
                                     } else {
                                         app.flash("No PR for this worker");
                                     }
@@ -944,7 +1012,7 @@ fn spawn_close_worker(workspace_root: PathBuf, id: String, tx: mpsc::Sender<Acti
     });
 }
 
-/// Forward a key event to a tmux pane via `tmux send-keys`.
+/// Forward a key event to an agent pane (legacy tmux send-keys).
 fn send_key_to_pane(pane_id: &str, code: KeyCode, modifiers: KeyModifiers) {
     let key_str = if modifiers.contains(KeyModifiers::CONTROL) {
         // Ctrl+<key> → "C-<key>"
@@ -987,7 +1055,7 @@ fn send_key_to_pane(pane_id: &str, code: KeyCode, modifiers: KeyModifiers) {
         .output();
 }
 
-/// Jump to a worker's tmux agent pane using `tmux select-pane`.
+/// Jump to a worker's agent pane (legacy tmux select-pane).
 fn jump_to_worker_pane(pane_id: &str) -> std::io::Result<()> {
     std::process::Command::new("tmux")
         .args(["select-pane", "-t", pane_id])
