@@ -1,5 +1,29 @@
 # hive
 
+> **⚠️ This repository has been archived.**
+>
+> `hive` has been merged into the [apiari](https://github.com/ApiariTools/apiari) CLI monorepo. All functionality — the daemon, coordinator, TUI, buzz, and quest dispatch — now lives there.
+>
+> **Command mapping:**
+> | Old | New |
+> |-----|-----|
+> | `hive init` | `apiari init` |
+> | `hive chat` | `apiari chat` |
+> | `hive plan` | `apiari plan` |
+> | `hive start` | `apiari start` |
+> | `hive status` | `apiari status` |
+> | `hive daemon` | `apiari daemon` |
+> | `hive buzz` | `apiari buzz` |
+> | `hive dashboard` | `apiari dashboard` |
+>
+> Install the new CLI: `cargo install apiari` or see [ApiariTools/apiari](https://github.com/ApiariTools/apiari) for details.
+
+---
+
+*The original README is preserved below for historical reference.*
+
+---
+
 Orchestration brain for Apiari — plans quests, dispatches work to swarm agents, monitors signals, and runs a Telegram bot daemon.
 
 ## What is hive?
