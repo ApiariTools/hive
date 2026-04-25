@@ -837,44 +837,54 @@ async fn run_bot_gemini(
 
 // ── Transcription ──
 
-async fn transcribe_audio(mut multipart: Multipart) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Extract audio data from multipart
-    let mut audio_data: Option<Vec<u8>> = None;
+fn transcribe_err(msg: impl Into<String>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "error": msg.into() }))
+}
+
+async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_json::Value>) {
+    // Stream audio field directly to a temp file to avoid buffering in memory
+    let tmp_dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err("failed to create temp dir"),
+            );
+        }
+    };
+    let audio_path = tmp_dir.path().join("audio.webm");
+
+    let mut found_audio = false;
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("audio") {
-            audio_data = Some(
-                field
-                    .bytes()
-                    .await
-                    .map_err(|_| StatusCode::BAD_REQUEST)?
-                    .to_vec(),
-            );
+            found_audio = true;
+            let bytes = match field.bytes().await {
+                Ok(b) => b,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        transcribe_err("failed to read audio field"),
+                    );
+                }
+            };
+            if tokio::fs::write(&audio_path, &bytes).await.is_err() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    transcribe_err("failed to write audio file"),
+                );
+            }
             break;
         }
     }
-
-    let audio_data = audio_data.ok_or(StatusCode::BAD_REQUEST)?;
-
-    // Check if whisper CLI is available
-    let which = tokio::process::Command::new("which")
-        .arg("whisper")
-        .output()
-        .await;
-
-    let whisper_available = which.map(|o| o.status.success()).unwrap_or(false);
-    if !whisper_available {
-        return Ok(Json(serde_json::json!({
-            "error": "whisper.cpp not found. Install it with: brew install whisper-cpp"
-        })));
+    if !found_audio {
+        return (
+            StatusCode::BAD_REQUEST,
+            transcribe_err("missing 'audio' field in multipart body"),
+        );
     }
 
-    // Write audio to temp file
-    let tmp_dir = tempfile::tempdir().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let audio_path = tmp_dir.path().join("audio.webm");
-    std::fs::write(&audio_path, &audio_data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Run whisper
-    let output = tokio::process::Command::new("whisper")
+    // Try to run whisper directly — detect NotFound to give a helpful install message
+    let output = match tokio::process::Command::new("whisper")
         .arg("--model")
         .arg("base")
         .arg("--output-txt")
@@ -884,23 +894,48 @@ async fn transcribe_audio(mut multipart: Multipart) -> Result<Json<serde_json::V
         .arg(&audio_path)
         .output()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::OK,
+                transcribe_err("whisper.cpp not found. Install it with: brew install whisper-cpp"),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err(format!("failed to run whisper: {e}")),
+            );
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(Json(serde_json::json!({
-            "error": format!("whisper failed: {stderr}")
-        })));
+        return (
+            StatusCode::OK,
+            transcribe_err(format!("whisper failed: {stderr}")),
+        );
     }
 
     // Read the output text file
     let txt_path = tmp_dir.path().join("audio.txt");
-    let text = std::fs::read_to_string(&txt_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    Ok(Json(serde_json::json!({ "text": text })))
+    match tokio::fs::read_to_string(&txt_path).await {
+        Ok(text) => {
+            let trimmed = text.trim().to_string();
+            (StatusCode::OK, Json(serde_json::json!({ "text": trimmed })))
+        }
+        Err(_) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err(format!(
+                    "whisper produced no output file. stdout: {stdout}, stderr: {stderr}"
+                )),
+            )
+        }
+    }
 }
 
 // ── Workers ──

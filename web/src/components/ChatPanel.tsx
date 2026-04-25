@@ -27,15 +27,22 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [recording, setRecording] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
+  const [micState, setMicState] = useState<"idle" | "recording" | "stopping" | "transcribing">("idle");
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, loading, loadingStatus]);
+
+  useEffect(() => {
+    return () => {
+      mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    };
+  }, []);
 
   function send() {
     const el = textareaRef.current;
@@ -80,10 +87,16 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   }
 
+  function stopStreamTracks() {
+    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+  }
+
   async function startRecording() {
     setTranscribeError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
@@ -93,30 +106,39 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
       };
 
       mediaRecorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
+        stopStreamTracks();
         const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
         await transcribeAudio(blob);
       };
 
       mediaRecorder.start();
-      setRecording(true);
+      setMicState("recording");
     } catch {
+      stopStreamTracks();
       setTranscribeError("Microphone access denied");
     }
   }
 
   function stopRecording() {
-    mediaRecorderRef.current?.stop();
-    setRecording(false);
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    setMicState("stopping");
+    recorder.stop();
   }
 
   async function transcribeAudio(blob: Blob) {
-    setTranscribing(true);
+    setMicState("transcribing");
     setTranscribeError(null);
     try {
       const form = new FormData();
       form.append("audio", blob, "audio.webm");
       const res = await fetch("/api/transcribe", { method: "POST", body: form });
+      if (!res.ok) {
+        let msg = `Server error (${res.status})`;
+        try { const data = await res.json(); if (data.error) msg = data.error; } catch {}
+        setTranscribeError(msg);
+        return;
+      }
       const data = await res.json();
       if (data.error) {
         setTranscribeError(data.error);
@@ -131,14 +153,14 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     } catch {
       setTranscribeError("Transcription failed");
     } finally {
-      setTranscribing(false);
+      setMicState("idle");
     }
   }
 
   function handleMicClick() {
-    if (recording) {
+    if (micState === "recording") {
       stopRecording();
-    } else {
+    } else if (micState === "idle") {
       startRecording();
     }
   }
@@ -269,12 +291,12 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
           </button>
           <button
             type="button"
-            className={`${styles.micBtn} ${recording ? styles.micRecording : ""}`}
+            className={`${styles.micBtn} ${micState === "recording" ? styles.micRecording : ""}`}
             onClick={handleMicClick}
-            disabled={loading || transcribing}
-            title={recording ? "Stop recording" : "Record audio"}
+            disabled={loading || micState === "stopping" || micState === "transcribing"}
+            title={micState === "recording" ? "Stop recording" : "Record audio"}
           >
-            {transcribing ? "..." : recording ? "\u25A0" : "\uD83C\uDFA4"}
+            {micState === "transcribing" || micState === "stopping" ? "..." : micState === "recording" ? "\u25A0" : "\uD83C\uDFA4"}
           </button>
           <textarea
             ref={textareaRef}
@@ -295,7 +317,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
             &uarr;
           </button>
         </div>
-        {transcribing && <div className={styles.transcribeStatus}>Transcribing...</div>}
+        {micState === "transcribing" && <div className={styles.transcribeStatus}>Transcribing...</div>}
         {transcribeError && <div className={styles.transcribeError}>{transcribeError}</div>}
       </div>
     </div>
