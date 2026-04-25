@@ -64,6 +64,8 @@
   max-width: 720px;
   min-width: 0;
   overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .meta {
@@ -414,4 +416,6 @@
   color: var(--text-faint);
   border: 1px solid var(--border);
   border-radius: 6px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
