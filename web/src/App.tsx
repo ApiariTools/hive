@@ -209,32 +209,25 @@ export default function App() {
             onBack={handleBackFromWorker}
           />
         ) : (
-          <>
-            <ChatPanel
-              bot={bot}
-              messages={messages}
-              loading={loading}
-              loadingStatus={loadingStatus}
-              onSend={handleSend}
-              workerCount={workers.length}
-              onWorkersToggle={() => setWorkersOpen((v) => !v)}
-            />
-            {workersOpen && (
-              <div
-                className="drawer-backdrop"
-                onClick={() => setWorkersOpen(false)}
-              />
-            )}
-            <WorkersPanel
-              workers={workers}
-              onSelectWorker={(id) => {
-                setWorkersOpen(false);
-                handleSelectWorker(id);
-              }}
-              mobileOpen={workersOpen}
-            />
-          </>
+          <ChatPanel
+            bot={bot}
+            messages={messages}
+            loading={loading}
+            loadingStatus={loadingStatus}
+            onSend={handleSend}
+            workerCount={workers.length}
+            onWorkersToggle={() => setWorkersOpen((v) => !v)}
+          />
         )}
+        <WorkersPanel
+          workers={workers}
+          onSelectWorker={(id) => {
+            setWorkersOpen(false);
+            handleSelectWorker(id);
+          }}
+          mobileOpen={workersOpen}
+          onClose={() => setWorkersOpen(false)}
+        />
       </div>
     </>
   );

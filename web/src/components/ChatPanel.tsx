@@ -102,9 +102,9 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend, worke
     <div className={styles.panel}>
       <div className={styles.header}>
         <div className={styles.headerName}>{bot}</div>
-        {workerCount != null && workerCount > 0 && onWorkersToggle && (
+        {onWorkersToggle && (
           <button className={styles.workersBtn} onClick={onWorkersToggle}>
-            {workerCount} worker{workerCount !== 1 ? "s" : ""}
+            {workerCount ? `${workerCount} worker${workerCount !== 1 ? "s" : ""}` : "No workers"}
           </button>
         )}
       </div>

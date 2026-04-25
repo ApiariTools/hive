@@ -5,6 +5,7 @@ interface Props {
   workers: Worker[];
   onSelectWorker: (id: string) => void;
   mobileOpen?: boolean;
+  onClose?: () => void;
 }
 
 function formatElapsed(secs: number | null): string {
@@ -21,11 +22,13 @@ function branchName(branch: string): string {
   return branch.replace(/^swarm\//, "");
 }
 
-export function WorkersPanel({ workers, onSelectWorker, mobileOpen }: Props) {
-  if (workers.length === 0) return null;
-
+export function WorkersPanel({ workers, onSelectWorker, mobileOpen, onClose }: Props) {
   return (
-    <div className={`${styles.panel} ${mobileOpen ? styles.mobileOpen : ""}`}>
+    <>
+      {mobileOpen && (
+        <div className={styles.backdrop} onClick={onClose} />
+      )}
+      <div className={`${styles.panel} ${mobileOpen ? styles.mobileOpen : ""}`}>
       <div className={styles.title}>Workers</div>
       {workers.map((w) => (
         <div
@@ -76,5 +79,6 @@ export function WorkersPanel({ workers, onSelectWorker, mobileOpen }: Props) {
         </div>
       ))}
     </div>
+    </>
   );
 }

@@ -180,9 +180,25 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
          Be concise and helpful. You have access to the workspace's codebase.\n"
     );
 
-    // Add workspace root context
     if let Some(ref root) = ws.root {
         prompt.push_str(&format!("Working directory: {root}\n"));
+
+        // Add swarm instructions if swarm is available
+        prompt.push_str(&format!(
+            "\n## Dispatching Workers\n\
+             You can dispatch AI workers to do tasks in parallel using swarm.\n\
+             To create a worker, write the task to a temp file and run:\n\
+             ```\n\
+             swarm --dir {root} create --repo <repo-name> --prompt-file /tmp/task.txt\n\
+             ```\n\
+             To check worker status: `swarm --dir {root} list`\n\
+             To send a message to a worker: `swarm --dir {root} send <worker-id> \"message\"`\n\
+             To close a worker: `swarm --dir {root} close <worker-id>`\n\
+             \n\
+             Workers run in git worktrees on separate branches. They can write code, \n\
+             run tests, and open PRs. Use workers for tasks that would take you many \n\
+             tool calls — dispatch the work and let the worker handle it.\n"
+        ));
     }
 
     prompt
