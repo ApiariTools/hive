@@ -36,6 +36,9 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animFrameRef = useRef<number>(0);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -96,6 +99,42 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
   function stopStreamTracks() {
     mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
     mediaStreamRef.current = null;
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    analyserRef.current = null;
+  }
+
+  function drawWaveform() {
+    const canvas = canvasRef.current;
+    const analyser = analyserRef.current;
+    if (!canvas || !analyser) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteTimeDomainData(data);
+
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.strokeStyle = "#e85555";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+
+    const sliceWidth = w / data.length;
+    let x = 0;
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i] / 128.0;
+      const y = (v * h) / 2;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+      x += sliceWidth;
+    }
+    ctx.lineTo(w, h / 2);
+    ctx.stroke();
+
+    animFrameRef.current = requestAnimationFrame(drawWaveform);
   }
 
   async function startRecording() {
@@ -103,6 +142,16 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
+
+      // Set up audio analyser for waveform
+      const audioCtx = new AudioContext();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+      animFrameRef.current = requestAnimationFrame(drawWaveform);
+
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
@@ -275,6 +324,9 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
       </div>
 
       <div className={styles.inputArea}>
+        {micState === "recording" && (
+          <canvas ref={canvasRef} className={styles.waveform} width={300} height={32} />
+        )}
         {attachments.length > 0 && (
           <div className={styles.attachmentPreview}>
             {attachments.map((a, i) => (
