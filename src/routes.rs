@@ -182,22 +182,43 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
 
     if let Some(ref root) = ws.root {
         prompt.push_str(&format!("Working directory: {root}\n"));
+        let root_path = std::path::Path::new(root);
 
-        // Add swarm instructions if swarm is available
+        // Load .apiari/context.md if it exists
+        let context_path = root_path.join(".apiari/context.md");
+        if let Ok(context) = std::fs::read_to_string(&context_path) {
+            prompt.push_str("\n## Project Context\n");
+            prompt.push_str(&context);
+            if !context.ends_with('\n') { prompt.push('\n'); }
+        }
+
+        // Load .apiari/soul.md if it exists
+        let soul_path = root_path.join(".apiari/soul.md");
+        if let Ok(soul) = std::fs::read_to_string(&soul_path) {
+            prompt.push_str("\n## Communication Style\n");
+            prompt.push_str(&soul);
+            if !soul.ends_with('\n') { prompt.push('\n'); }
+        }
+
+        // Swarm worker dispatch instructions
         prompt.push_str(&format!(
-            "\n## Dispatching Workers\n\
-             You can dispatch AI workers to do tasks in parallel using swarm.\n\
-             To create a worker, write the task to a temp file and run:\n\
-             ```\n\
-             swarm --dir {root} create --repo <repo-name> --prompt-file /tmp/task.txt\n\
-             ```\n\
-             To check worker status: `swarm --dir {root} list`\n\
-             To send a message to a worker: `swarm --dir {root} send <worker-id> \"message\"`\n\
-             To close a worker: `swarm --dir {root} close <worker-id>`\n\
-             \n\
-             Workers run in git worktrees on separate branches. They can write code, \n\
-             run tests, and open PRs. Use workers for tasks that would take you many \n\
-             tool calls — dispatch the work and let the worker handle it.\n"
+            "\n## Swarm Workers\n\
+             You dispatch coding tasks to swarm workers. Workers run in their own git worktrees \
+             with an LLM agent that writes code, commits, and opens PRs.\n\n\
+             IMPORTANT: When the user asks you to implement, fix, build, or code anything, \
+             use `swarm create` to dispatch it. Do NOT write code yourself — \
+             not via Edit/Write tools, and not via Bash (no echo, sed, curl -o, etc.).\n\n\
+             Commands (always use `--dir {root}`):\n\
+             - List workers: `swarm --dir {root} status`\n\
+             - Spawn worker: `swarm --dir {root} create --repo {{repo}} --prompt-file /tmp/task.txt`\n\
+               (Write the task prompt to a file first, then pass --prompt-file. Never inline long prompts.)\n\
+             - Send message: `swarm --dir {root} send {{worktree_id}} \"message\"`\n\
+             - Close worker: `swarm --dir {root} close {{worktree_id}}`\n\n\
+             When dispatching, always include in the task prompt:\n\
+             'Plan and implement this completely in one session — do not pause mid-task \
+             for confirmation. Commit and open a PR when done.'\n\n\
+             When a task spans multiple repos, dispatch separate workers for each.\n\
+             Each worker prompt must be self-contained — workers cannot see other repos.\n"
         ));
     }
 
