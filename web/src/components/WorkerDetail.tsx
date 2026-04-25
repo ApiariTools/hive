@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Worker, WorkerDetail as WorkerDetailData } from "../types";
@@ -16,19 +16,14 @@ function branchName(branch: string): string {
   return branch.replace(/^swarm\//, "");
 }
 
-function formatElapsed(secs: number | null): string {
-  if (secs == null) return "—";
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins} min`;
-  const hrs = Math.floor(mins / 60);
-  const rem = mins % 60;
-  return rem > 0 ? `${hrs}h ${rem}m` : `${hrs}h`;
-}
-
 export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [detail?.conversation.length]);
 
   async function handleSend() {
     const text = input.trim();
@@ -41,7 +36,7 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
 
   return (
     <div className={styles.layout}>
-      {/* Left: worker info */}
+      {/* Left: task info */}
       <div className={styles.info}>
         <button className={styles.back} onClick={onBack}>
           &larr; Back
@@ -69,18 +64,6 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
             </div>
           </div>
           <div className={styles.stat}>
-            <div className={styles.statLabel}>Duration</div>
-            <div className={styles.statValue}>
-              {formatElapsed(worker.elapsed_secs)}
-            </div>
-          </div>
-          {worker.dispatched_by && (
-            <div className={styles.stat}>
-              <div className={styles.statLabel}>Dispatched by</div>
-              <div className={styles.statValue}>{worker.dispatched_by}</div>
-            </div>
-          )}
-          <div className={styles.stat}>
             <div className={styles.statLabel}>Agent</div>
             <div className={styles.statValue}>{worker.agent}</div>
           </div>
@@ -91,10 +74,9 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
             <div className={styles.sectionTitle}>Pull Request</div>
             <div className={styles.card}>
               <div className={styles.cardRow}>
-                <span className={styles.cardLabel}>PR</span>
                 <span className={styles.cardValue}>
                   <a href={worker.pr_url} target="_blank" rel="noopener noreferrer">
-                    {worker.pr_title || worker.pr_url}
+                    {worker.pr_title || "View PR"}
                   </a>
                 </span>
               </div>
@@ -111,15 +93,16 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
           </div>
         )}
 
-        {worker.description && (
+        {detail?.prompt && (
           <div className={styles.section}>
-            <div className={styles.sectionTitle}>Task</div>
-            <div className={styles.taskText}>{worker.description}</div>
+            <div className={styles.sectionTitle}>Task Prompt</div>
+            <div className={styles.taskText}>
+              <Markdown remarkPlugins={[remarkGfm]}>{detail.prompt}</Markdown>
+            </div>
           </div>
         )}
 
         <div className={styles.section}>
-          <div className={styles.sectionTitle}>Actions</div>
           <div className={styles.actions}>
             {worker.pr_url && (
               <a
@@ -138,36 +121,27 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
         </div>
       </div>
 
-      {/* Right: worker conversation */}
+      {/* Right: agent conversation */}
       <div className={styles.chat}>
         <div className={styles.chatHeader}>
-          <div className={styles.chatTitle}>Worker conversation</div>
-          <div className={styles.chatSub}>
-            {worker.id} · {branchName(worker.branch)}
-          </div>
+          <div className={styles.chatTitle}>Conversation</div>
         </div>
 
         <div className={styles.messages}>
           {(!detail || detail.conversation.length === 0) && (
-            <div className={styles.empty}>No messages yet</div>
+            <div className={styles.empty}>No conversation data available</div>
           )}
           {detail?.conversation.map((msg, i) => (
-            <div key={i} className={styles.msg}>
+            <div key={i} className={`${styles.msg} ${msg.role === "user" ? styles.userMsg : ""}`}>
               <div className={styles.msgMeta}>
-                <strong>
-                  {msg.role === "system"
-                    ? "Task"
-                    : msg.role === "user"
-                      ? "You"
-                      : worker.id}
-                </strong>
-                {msg.timestamp && ` · ${msg.timestamp}`}
+                <strong>{msg.role === "user" ? "You" : worker.id}</strong>
               </div>
               <div className={styles.msgText}>
                 <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
               </div>
             </div>
           ))}
+          <div ref={bottomRef} />
         </div>
 
         <div className={styles.inputArea}>

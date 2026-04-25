@@ -858,15 +858,15 @@ fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
 struct WorkerDetail {
     #[serde(flatten)]
     info: WorkerInfo,
+    prompt: Option<String>,
     output: Option<String>,
     conversation: Vec<WorkerMessage>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct WorkerMessage {
     role: String,
     content: String,
-    timestamp: Option<String>,
 }
 
 async fn get_worker_detail(
@@ -891,9 +891,9 @@ async fn get_worker_detail(
         .find(|w| w.id == worker_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Read worker output
+    // Read full worktree entry from state.json
     let state_path = root.join(".swarm/state.json");
-    let worktree_path = std::fs::read_to_string(&state_path)
+    let worktree_entry = std::fs::read_to_string(&state_path)
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .and_then(|s| {
@@ -901,56 +901,116 @@ async fn get_worker_detail(
                 .as_array()?
                 .iter()
                 .find(|w| w.get("id").and_then(|i| i.as_str()) == Some(&worker_id))?
-                .get("worktree_path")
-                .and_then(|p| p.as_str())
-                .map(PathBuf::from)
+                .clone()
+                .into()
         });
 
+    let worktree_path = worktree_entry
+        .as_ref()
+        .and_then(|w: &serde_json::Value| w.get("worktree_path")?.as_str().map(PathBuf::from));
+
+    // Prompt from state.json (the original task)
+    let prompt = worktree_entry
+        .as_ref()
+        .and_then(|w| w.get("prompt")?.as_str().map(String::from));
+
+    // Output from .swarm/output.md
     let output = worktree_path
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p.join(".swarm/output.md")).ok());
 
-    // Read conversation from agent activity log
-    let conversation = worktree_path
+    // Get session_id to export conversation from Claude
+    let session_id = worktree_entry
         .as_ref()
-        .map(|p| read_worker_conversation(p, &root, &worker_id))
-        .unwrap_or_default();
+        .and_then(|w| w.get("session_id")?.as_str().map(String::from));
+
+    let conversation = if let Some(sid) = session_id {
+        export_claude_conversation(&sid, worktree_path.as_deref()).await
+    } else {
+        // Fallback: read inbox messages
+        read_inbox_messages(&root, &worker_id)
+    };
 
     Ok(Json(WorkerDetail {
         info,
+        prompt,
         output,
         conversation,
     }))
 }
 
-fn read_worker_conversation(
-    worktree_path: &std::path::Path,
-    root: &std::path::Path,
-    worker_id: &str,
+async fn export_claude_conversation(
+    session_id: &str,
+    working_dir: Option<&std::path::Path>,
 ) -> Vec<WorkerMessage> {
+    // Use `claude export` to get the conversation
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.args(["export", "-s", session_id, "--format", "json"]);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+
+    let output = match cmd.output().await {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return vec![],
+    };
+
+    let conv: serde_json::Value = match serde_json::from_slice(&output) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    // Parse the exported conversation
     let mut messages = Vec::new();
+    if let Some(msgs) = conv.as_array() {
+        for msg in msgs {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role != "user" && role != "assistant" {
+                continue;
+            }
 
-    // Read the prompt that started this worker
-    let task_file = worktree_path.join(".task/TASK.md");
-    if let Ok(task) = std::fs::read_to_string(&task_file) {
-        messages.push(WorkerMessage {
-            role: "system".to_string(),
-            content: task,
-            timestamp: None,
-        });
+            // Content can be a string or array of blocks
+            let content = if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+                text.to_string()
+            } else if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                let mut parts = Vec::new();
+                for block in blocks {
+                    let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match btype {
+                        "text" => {
+                            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                parts.push(t.to_string());
+                            }
+                        }
+                        "tool_use" => {
+                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            parts.push(format!("*Using {name}...*"));
+                        }
+                        "tool_result" => {
+                            // Skip tool results — too verbose
+                        }
+                        _ => {}
+                    }
+                }
+                parts.join("\n\n")
+            } else {
+                continue;
+            };
+
+            if !content.is_empty() {
+                messages.push(WorkerMessage {
+                    role: role.to_string(),
+                    content,
+                });
+            }
+        }
     }
 
-    // Read agent output
-    let output_file = worktree_path.join(".swarm/output.md");
-    if let Ok(output) = std::fs::read_to_string(&output_file) {
-        messages.push(WorkerMessage {
-            role: "assistant".to_string(),
-            content: output,
-            timestamp: None,
-        });
-    }
+    messages
+}
 
-    // Read messages sent to this worker via swarm
+fn read_inbox_messages(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessage> {
+    let mut messages = Vec::new();
     let inbox_file = root.join(format!(".swarm/inbox/{worker_id}.jsonl"));
     if let Ok(content) = std::fs::read_to_string(&inbox_file) {
         for line in content.lines() {
@@ -964,16 +1024,11 @@ fn read_worker_conversation(
                     messages.push(WorkerMessage {
                         role: "user".to_string(),
                         content,
-                        timestamp: msg
-                            .get("timestamp")
-                            .and_then(|t| t.as_str())
-                            .map(String::from),
                     });
                 }
             }
         }
     }
-
     messages
 }
 

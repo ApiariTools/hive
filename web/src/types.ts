@@ -32,6 +32,7 @@ export interface Message {
 }
 
 export interface WorkerDetail extends Worker {
+  prompt: string | null;
   output: string | null;
   conversation: WorkerMessage[];
 }
@@ -39,5 +40,4 @@ export interface WorkerDetail extends Worker {
 export interface WorkerMessage {
   role: string;
   content: string;
-  timestamp: string | null;
 }
