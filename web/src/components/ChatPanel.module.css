@@ -277,8 +277,8 @@
 
 @media (max-width: 768px) {
   .waveform {
-    left: 12px;
-    right: 12px;
+    left: 20px;
+    right: 20px;
     width: auto;
   }
 }
