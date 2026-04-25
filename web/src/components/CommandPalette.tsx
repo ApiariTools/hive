@@ -30,7 +30,7 @@ export function CommandPalette({
   return (
     <div className={styles.palette}>
       <Command.Dialog open={open} onOpenChange={onOpenChange} label="Command palette">
-        <Command.Input placeholder="Type a command..." />
+        <Command.Input placeholder="Type a command..." aria-label="Search commands" />
         <Command.List>
           <Command.Empty>No results found.</Command.Empty>
           <Command.Group heading="Workspaces">

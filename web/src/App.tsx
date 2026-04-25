@@ -180,11 +180,13 @@ export default function App() {
   // Cmd+K: command palette, Cmd+J: focus chat
   useEffect(() => {
     function handleGlobalKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      if (e.repeat) return;
+      const key = e.key.toLowerCase();
+      if ((e.metaKey || e.ctrlKey) && key === "k") {
         e.preventDefault();
         setPaletteOpen((v) => !v);
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === "j") {
+      if ((e.metaKey || e.ctrlKey) && key === "j") {
         e.preventDefault();
         document.querySelector<HTMLTextAreaElement>('textarea[enterkeyhint="send"]')?.focus();
       }
