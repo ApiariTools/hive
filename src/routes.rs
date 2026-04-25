@@ -332,7 +332,26 @@ async fn send_message(
     }
 
     let system_prompt = if resume_id.is_none() {
-        Some(full_prompt)
+        // Fresh session — include recent chat history for context
+        let mut prompt = full_prompt;
+        let history = state
+            .db
+            .get_conversations(&workspace, &bot, 20)
+            .unwrap_or_default();
+        if !history.is_empty() {
+            prompt.push_str("\n## Recent Conversation History\n");
+            for msg in &history {
+                let role = if msg.role == "user" { "User" } else { &bot };
+                // Truncate long messages to keep prompt manageable
+                let content = if msg.content.len() > 500 {
+                    format!("{}...", &msg.content[..500])
+                } else {
+                    msg.content.clone()
+                };
+                prompt.push_str(&format!("{role}: {content}\n\n"));
+            }
+        }
+        Some(prompt)
     } else {
         None
     };
