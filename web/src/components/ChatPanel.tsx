@@ -136,9 +136,10 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     const freqData = new Uint8Array(analyser.frequencyBinCount);
     analyser.getByteFrequencyData(freqData);
 
-    // Reduce to ~24 bars
+    // Reduce to ~24 bars using log scale so voice fills all bars
     const barCount = 24;
-    const step = Math.floor(freqData.length / barCount);
+    // Only use the lower half of frequency bins (voice range)
+    const usableBins = Math.floor(freqData.length * 0.4);
 
     if (smoothedBars.current.length !== barCount) {
       smoothedBars.current = new Array(barCount).fill(0);
@@ -151,12 +152,16 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     const centerY = h / 2;
 
     for (let i = 0; i < barCount; i++) {
-      // Average a chunk of frequency bins
+      // Log scale: more resolution in low frequencies where voice lives
+      const startBin = Math.floor(Math.pow(i / barCount, 1.5) * usableBins);
+      const endBin = Math.floor(Math.pow((i + 1) / barCount, 1.5) * usableBins);
+      const binCount = Math.max(1, endBin - startBin);
+
       let sum = 0;
-      for (let j = 0; j < step; j++) {
-        sum += freqData[i * step + j];
+      for (let j = startBin; j < startBin + binCount; j++) {
+        sum += freqData[j];
       }
-      const raw = sum / step / 255;
+      const raw = sum / binCount / 255;
 
       // Exaggerate — boost quiet sounds, cap loud ones
       const boosted = Math.pow(raw, 0.6) * 1.5;
