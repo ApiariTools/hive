@@ -268,19 +268,11 @@
   bottom: 100%;
   left: 20px;
   right: 20px;
-  max-width: 300px;
   height: 40px;
   margin-bottom: 4px;
-  margin-left: auto;
   border-radius: 6px;
   background: var(--bg-card);
   z-index: 10;
-}
-
-@media (max-width: 768px) {
-  .waveform {
-    max-width: none;
-  }
 }
 
 @keyframes pulse-border {
