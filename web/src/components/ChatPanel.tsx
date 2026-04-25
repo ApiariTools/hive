@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from "react";
 import type { Message } from "../types";
-import { useKeyboardHeight } from "../useKeyboardHeight";
 import styles from "./ChatPanel.module.css";
 
 interface Props {
@@ -15,14 +14,12 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const kbHeight = useKeyboardHeight();
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, loading, loadingStatus]);
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  function handleSubmit() {
     const text = input.trim();
     if (!text || loading) return;
     setInput("");
@@ -40,7 +37,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSubmit(e);
+      handleSubmit();
     }
   }
 
@@ -94,43 +91,30 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
         <div ref={bottomRef} />
       </div>
 
-      <form
-        className={styles.inputArea}
-        onSubmit={handleSubmit}
-        style={kbHeight > 0 ? { paddingBottom: kbHeight + 16 } : undefined}
-      >
+      <div className={styles.inputArea}>
         <div className={styles.inputRow}>
-          <button type="button" className={styles.attachBtn}>
-            +
-          </button>
           <textarea
             ref={textareaRef}
             className={styles.inputField}
             placeholder={loading ? `${bot} is thinking...` : `Message ${bot}...`}
             value={input}
             rows={1}
-            disabled={loading}
+            enterKeyHint="send"
             onChange={(e) => {
               setInput(e.target.value);
               autoGrow(e.target);
             }}
             onKeyDown={handleKeyDown}
           />
-          {input.trim() && (
-            <button
-              type="submit"
-              className={styles.sendBtn}
-              onTouchEnd={(e) => {
-                // Prevent iOS from dismissing keyboard before registering the tap
-                e.preventDefault();
-                handleSubmit(e);
-              }}
-            >
-              &uarr;
-            </button>
-          )}
+          <button
+            type="button"
+            className={styles.sendBtn}
+            onClick={handleSubmit}
+          >
+            &uarr;
+          </button>
         </div>
-      </form>
+      </div>
     </div>
   );
 }

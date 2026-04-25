@@ -184,12 +184,19 @@ async fn send_message(
         .join(format!("{workspace}.toml"));
     let working_dir = load_workspace_root(&config_path);
 
+    // Check for existing session to resume
+    let resume_id = state.db.get_session_id(&workspace, &bot).unwrap_or(None);
+    if let Some(ref id) = resume_id {
+        info!("[chat] resuming session {id}");
+    }
+
     // Build session options
     let opts = SessionOptions {
         dangerously_skip_permissions: true,
         include_partial_messages: true,
         working_dir,
         max_turns: Some(1),
+        resume: resume_id,
         ..Default::default()
     };
 
@@ -264,12 +271,15 @@ async fn send_message(
                             }
                         }
                         Event::Result(result) => {
-                            // Store the full response
+                            // Store the full response and session ID
                             if !full_text.is_empty() {
                                 let _ = db.add_message(
                                     &ws_name, &bot_name, "assistant", &full_text, None
                                 );
                             }
+                            let _ = db.set_session_id(
+                                &ws_name, &bot_name, &result.session_id
+                            );
                             let data = serde_json::json!({
                                 "type": "done",
                                 "content": full_text,

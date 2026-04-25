@@ -40,14 +40,6 @@ function pushHash(r: Route) {
 // ── App ──
 
 export default function App() {
-  // Prevent iOS Safari from scrolling the document when keyboard opens.
-  // Our app has its own scrollable areas — window scroll is never wanted.
-  useEffect(() => {
-    const lock = () => window.scrollTo(0, 0);
-    window.addEventListener("scroll", lock, { passive: false });
-    return () => window.removeEventListener("scroll", lock);
-  }, []);
-
   const initial = parseHash();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState(initial.workspace);
@@ -151,7 +143,9 @@ export default function App() {
         await api.sendMessageStream(workspace, bot, text, {
           onText: (chunk) => {
             if (!messageCreated) {
-              // Create the assistant message on first text chunk
+              // Skip empty/whitespace-only leading chunks
+              const trimmed = chunk.trimStart();
+              if (!trimmed) return;
               messageCreated = true;
               setLoading(false);
               setLoadingStatus(undefined);
@@ -162,7 +156,7 @@ export default function App() {
                   workspace,
                   bot,
                   role: "assistant",
-                  content: chunk.trimStart(),
+                  content: trimmed,
                   attachments: null,
                   created_at: new Date().toISOString(),
                 },

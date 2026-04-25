@@ -6,6 +6,7 @@
   height: 48px;
   flex-shrink: 0;
   gap: 4px;
+  background: var(--bg);
 }
 
 .logo {

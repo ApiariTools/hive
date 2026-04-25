@@ -24,6 +24,14 @@ impl Db {
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS sessions (
+                workspace TEXT NOT NULL,
+                bot TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (workspace, bot)
+            );
+
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 workspace TEXT NOT NULL,
@@ -93,6 +101,31 @@ impl Db {
         let mut rows = rows;
         rows.reverse();
         Ok(rows)
+    }
+
+    pub fn set_session_id(&self, workspace: &str, bot: &str, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sessions (workspace, bot, session_id, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT(workspace, bot) DO UPDATE SET session_id = ?3, updated_at = datetime('now')",
+            params![workspace, bot, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_session_id(&self, workspace: &str, bot: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT session_id FROM sessions WHERE workspace = ?1 AND bot = ?2",
+            params![workspace, bot],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn get_all_conversations(
