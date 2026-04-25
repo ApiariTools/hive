@@ -116,6 +116,19 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
             }}
             onKeyDown={handleKeyDown}
           />
+          {input.trim() && (
+            <button
+              type="submit"
+              className={styles.sendBtn}
+              onTouchEnd={(e) => {
+                // Prevent iOS from dismissing keyboard before registering the tap
+                e.preventDefault();
+                handleSubmit(e);
+              }}
+            >
+              &uarr;
+            </button>
+          )}
         </div>
       </form>
     </div>

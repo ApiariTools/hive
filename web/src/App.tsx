@@ -142,35 +142,40 @@ export default function App() {
         created_at: new Date().toISOString(),
       };
       const streamId = Date.now() + 1;
+      let messageCreated = false;
       setMessages((prev) => [...prev, userMsg]);
       setLoading(true);
       setLoadingStatus("Thinking...");
 
-      // Add an empty assistant message that we'll stream into
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: streamId,
-          workspace,
-          bot,
-          role: "assistant",
-          content: "",
-          attachments: null,
-          created_at: new Date().toISOString(),
-        },
-      ]);
-
       try {
         await api.sendMessageStream(workspace, bot, text, {
           onText: (chunk) => {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === streamId
-                  ? { ...m, content: m.content + chunk }
-                  : m,
-              ),
-            );
-            setLoadingStatus(undefined);
+            if (!messageCreated) {
+              // Create the assistant message on first text chunk
+              messageCreated = true;
+              setLoading(false);
+              setLoadingStatus(undefined);
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: streamId,
+                  workspace,
+                  bot,
+                  role: "assistant",
+                  content: chunk.trimStart(),
+                  attachments: null,
+                  created_at: new Date().toISOString(),
+                },
+              ]);
+            } else {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === streamId
+                    ? { ...m, content: m.content + chunk }
+                    : m,
+                ),
+              );
+            }
           },
           onToolUse: (tool) => {
             setLoadingStatus(`Using ${tool}...`);
@@ -180,15 +185,20 @@ export default function App() {
             setLoadingStatus(undefined);
           },
           onError: (error) => {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === streamId
-                  ? { ...m, content: `Error: ${error}` }
-                  : m,
-              ),
-            );
             setLoading(false);
             setLoadingStatus(undefined);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: streamId,
+                workspace,
+                bot,
+                role: "assistant",
+                content: `Error: ${error}`,
+                attachments: null,
+                created_at: new Date().toISOString(),
+              },
+            ]);
           },
         });
       } catch {
