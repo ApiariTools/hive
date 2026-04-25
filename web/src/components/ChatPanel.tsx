@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useRef, useEffect } from "react";
 import type { Message } from "../types";
 import styles from "./ChatPanel.module.css";
 
@@ -11,7 +11,6 @@ interface Props {
 }
 
 export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Props) {
-  const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -19,17 +18,19 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, loading, loadingStatus]);
 
-  function handleSubmit() {
-    const text = input.trim();
-    if (!text || loading) return;
-    setInput("");
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
+  function send() {
+    const el = textareaRef.current;
+    if (!el || loading) return;
+    const text = el.value.trim();
+    if (!text) return;
+    el.value = "";
+    el.style.height = "auto";
     onSend(text);
   }
 
-  function autoGrow(el: HTMLTextAreaElement) {
+  function autoGrow() {
+    const el = textareaRef.current;
+    if (!el) return;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
   }
@@ -37,7 +38,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSubmit();
+      send();
     }
   }
 
@@ -97,19 +98,17 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
             ref={textareaRef}
             className={styles.inputField}
             placeholder={loading ? `${bot} is thinking...` : `Message ${bot}...`}
-            value={input}
             rows={1}
+            readOnly={loading}
             enterKeyHint="send"
-            onChange={(e) => {
-              setInput(e.target.value);
-              autoGrow(e.target);
-            }}
+            onInput={autoGrow}
             onKeyDown={handleKeyDown}
           />
           <button
             type="button"
             className={styles.sendBtn}
-            onClick={handleSubmit}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={send}
           >
             &uarr;
           </button>
