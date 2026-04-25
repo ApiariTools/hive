@@ -4,6 +4,7 @@ import styles from "./WorkersPanel.module.css";
 interface Props {
   workers: Worker[];
   onSelectWorker: (id: string) => void;
+  mobileOpen?: boolean;
 }
 
 function formatElapsed(secs: number | null): string {
@@ -20,11 +21,11 @@ function branchName(branch: string): string {
   return branch.replace(/^swarm\//, "");
 }
 
-export function WorkersPanel({ workers, onSelectWorker }: Props) {
+export function WorkersPanel({ workers, onSelectWorker, mobileOpen }: Props) {
   if (workers.length === 0) return null;
 
   return (
-    <div className={styles.panel}>
+    <div className={`${styles.panel} ${mobileOpen ? styles.mobileOpen : ""}`}>
       <div className={styles.title}>Workers</div>
       {workers.map((w) => (
         <div

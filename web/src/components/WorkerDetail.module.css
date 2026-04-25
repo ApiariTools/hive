@@ -264,6 +264,24 @@
   border-color: var(--text-faint);
 }
 
+@media (max-width: 768px) {
+  .layout {
+    flex-direction: column;
+  }
+
+  .info {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 16px;
+    flex: none;
+  }
+
+  .chat {
+    width: 100%;
+    flex: 1;
+  }
+}
+
 @keyframes pulse {
   0%,
   100% {

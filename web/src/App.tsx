@@ -51,6 +51,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [workerDetail, setWorkerDetail] = useState<WorkerDetailData | null>(null);
+  const [workersOpen, setWorkersOpen] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
 
   // Load workspaces on mount
@@ -215,10 +216,22 @@ export default function App() {
               loading={loading}
               loadingStatus={loadingStatus}
               onSend={handleSend}
+              workerCount={workers.length}
+              onWorkersToggle={() => setWorkersOpen((v) => !v)}
             />
+            {workersOpen && (
+              <div
+                className="drawer-backdrop"
+                onClick={() => setWorkersOpen(false)}
+              />
+            )}
             <WorkersPanel
               workers={workers}
-              onSelectWorker={handleSelectWorker}
+              onSelectWorker={(id) => {
+                setWorkersOpen(false);
+                handleSelectWorker(id);
+              }}
+              mobileOpen={workersOpen}
             />
           </>
         )}

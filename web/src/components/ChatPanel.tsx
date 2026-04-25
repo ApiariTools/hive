@@ -15,10 +15,12 @@ interface Props {
   messages: Message[];
   loading: boolean;
   loadingStatus?: string;
+  workerCount?: number;
+  onWorkersToggle?: () => void;
   onSend: (text: string, attachments?: Attachment[]) => void;
 }
 
-export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Props) {
+export function ChatPanel({ bot, messages, loading, loadingStatus, onSend, workerCount, onWorkersToggle }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -100,6 +102,11 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
     <div className={styles.panel}>
       <div className={styles.header}>
         <div className={styles.headerName}>{bot}</div>
+        {workerCount != null && workerCount > 0 && onWorkersToggle && (
+          <button className={styles.workersBtn} onClick={onWorkersToggle}>
+            {workerCount} worker{workerCount !== 1 ? "s" : ""}
+          </button>
+        )}
       </div>
 
       <div className={styles.messages}>
