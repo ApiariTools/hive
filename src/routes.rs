@@ -978,7 +978,40 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
         );
     }
 
-    // Try to run whisper-cli with the local model
+    // Convert webm/opus to wav (whisper needs wav)
+    let wav_path = tmp_dir.path().join("audio.wav");
+    let convert = tokio::process::Command::new("ffmpeg")
+        .args(["-i"])
+        .arg(&audio_path)
+        .args(["-ar", "16000", "-ac", "1", "-y"])
+        .arg(&wav_path)
+        .output()
+        .await;
+
+    match convert {
+        Ok(o) if !o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err(format!("ffmpeg conversion failed: {stderr}")),
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::OK,
+                transcribe_err("ffmpeg not found. Install it with: brew install ffmpeg"),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err(format!("ffmpeg error: {e}")),
+            );
+        }
+        _ => {}
+    }
+
+    // Run whisper-cli on the wav file
     let home = std::env::var("HOME").unwrap_or_default();
     let model_path = format!("{home}/.local/share/whisper/ggml-base.en.bin");
 
@@ -989,7 +1022,7 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
         .arg("--no-timestamps")
         .arg("--output-file")
         .arg(tmp_dir.path().join("audio"))
-        .arg(&audio_path)
+        .arg(&wav_path)
         .output()
         .await
     {
