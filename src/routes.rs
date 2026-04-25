@@ -75,6 +75,7 @@ pub fn router(db: Db, config_dir: &std::path::Path, events: EventHub) -> Router 
             post(send_worker_message),
         )
         .fallback(get(serve_frontend))
+        .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB for image attachments
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
