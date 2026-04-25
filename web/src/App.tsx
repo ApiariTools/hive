@@ -54,6 +54,7 @@ export default function App() {
   const [workerDetail, setWorkerDetail] = useState<WorkerDetailData | null>(null);
   const [workersOpen, setWorkersOpen] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
+  const [unread, setUnread] = useState<Record<string, number>>({});
 
   // Load workspaces on mount
   useEffect(() => {
@@ -65,11 +66,43 @@ export default function App() {
     });
   }, []);
 
+  // WebSocket for real-time updates
+  useEffect(() => {
+    const ws = api.connectWebSocket((event) => {
+      if (event.type === "bot_status") {
+        if (event.workspace === workspace && event.bot === bot) {
+          if (event.status === "idle") {
+            setLoading(false);
+            setLoadingStatus(undefined);
+            setStreamingContent("");
+            // Refresh conversations
+            api.getConversations(workspace, bot).then(setMessages);
+          } else {
+            setLoading(true);
+            setLoadingStatus(
+              event.tool_name ? `Using ${event.tool_name}...` : "Thinking...",
+            );
+          }
+        }
+      }
+      if (event.type === "message") {
+        // Refresh unread counts
+        if (workspace) api.getUnread(workspace).then(setUnread);
+        // If it's the current bot, refresh messages
+        if (event.workspace === workspace && event.bot === bot) {
+          api.getConversations(workspace, bot).then(setMessages);
+        }
+      }
+    });
+    return () => ws.close();
+  }, [workspace, bot]);
+
   // Load bots + workers when workspace changes
   useEffect(() => {
     if (!workspace) return;
     api.getBots(workspace).then(setBots);
     api.getWorkers(workspace).then(setWorkers);
+    api.getUnread(workspace).then(setUnread);
   }, [workspace]);
 
   // Load conversations when workspace or bot changes, poll for updates + bot status
@@ -79,6 +112,9 @@ export default function App() {
     setLoading(false);
     setLoadingStatus(undefined);
     api.getConversations(workspace, bot).then(setMessages);
+    api.markSeen(workspace, bot).then(() => {
+      api.getUnread(workspace).then(setUnread);
+    });
     api.getBotStatus(workspace, bot).then((s) => {
       if (s.status !== "idle") {
         setLoading(true);
@@ -213,6 +249,7 @@ export default function App() {
           onSelectBot={handleSelectBot}
           onSelectWorker={handleSelectWorker}
           mobileOpen={menuOpen}
+          unread={unread}
         />
         {workerId && selectedWorker ? (
           <WorkerDetail

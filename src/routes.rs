@@ -5,28 +5,32 @@ use apiari_codex_sdk;
 use apiari_gemini_sdk;
 use axum::{
     Router,
-    extract::{Multipart, Path, Query, State},
+    extract::{Multipart, Path, Query, State, WebSocketUpgrade, ws},
     http::StatusCode,
     response::Json,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::db::Db;
+use crate::events::{EventHub, HiveEvent};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
     pub config_dir: PathBuf,
+    pub events: EventHub,
 }
 
-pub fn router(db: Db, config_dir: &std::path::Path) -> Router {
+pub fn router(db: Db, config_dir: &std::path::Path, events: EventHub) -> Router {
     let state = AppState {
         db,
         config_dir: config_dir.to_path_buf(),
+        events,
     };
 
     Router::new()
@@ -54,6 +58,12 @@ pub fn router(db: Db, config_dir: &std::path::Path) -> Router {
             post(cancel_bot),
         )
         .route("/api/transcribe", post(transcribe_audio))
+        .route("/api/workspaces/{workspace}/unread", get(get_unread))
+        .route(
+            "/api/workspaces/{workspace}/seen/{bot}",
+            post(mark_seen),
+        )
+        .route("/ws", get(ws_handler))
         .route("/api/workspaces/{workspace}/workers", get(list_workers))
         .route(
             "/api/workspaces/{workspace}/workers/{worker_id}",
@@ -421,8 +431,14 @@ async fn send_message(
     let bot_name = bot.clone();
     let hash = prompt_hash.clone();
 
+    let events = state.events.clone();
+
     // Set bot status to thinking
     let _ = db.set_bot_status(&ws_name, &bot_name, "thinking", "", None);
+    events.send(HiveEvent::BotStatus {
+        workspace: ws_name.clone(), bot: bot_name.clone(),
+        status: "thinking".to_string(), tool_name: None,
+    });
 
     // Spawn background task — daemon owns the session
     tokio::spawn(async move {
@@ -480,6 +496,14 @@ async fn send_message(
         }
 
         let _ = db.set_bot_status(&ws_name, &bot_name, "idle", "", None);
+        events.send(HiveEvent::BotStatus {
+            workspace: ws_name.clone(), bot: bot_name.clone(),
+            status: "idle".to_string(), tool_name: None,
+        });
+        events.send(HiveEvent::Message {
+            workspace: ws_name, bot: bot_name,
+            role: "assistant".to_string(), content: "".to_string(),
+        });
     });
 
     Ok(Json(serde_json::json!({"ok": true})))
@@ -521,6 +545,66 @@ async fn cancel_bot(
         .db
         .add_message(&workspace, &bot, "system", "Response cancelled.", None);
     Json(serde_json::json!({"ok": true}))
+}
+
+// ── Unread tracking ──
+
+async fn get_unread(
+    State(state): State<AppState>,
+    Path(workspace): Path<String>,
+) -> Json<serde_json::Value> {
+    let counts = state.db.get_unread_counts(&workspace).unwrap_or_default();
+    let map: serde_json::Map<String, serde_json::Value> = counts
+        .into_iter()
+        .map(|(bot, count)| (bot, serde_json::Value::from(count)))
+        .collect();
+    Json(serde_json::Value::Object(map))
+}
+
+async fn mark_seen(
+    State(state): State<AppState>,
+    Path((workspace, bot)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let _ = state.db.mark_seen(&workspace, &bot);
+    Json(serde_json::json!({"ok": true}))
+}
+
+// ── WebSocket ──
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    ws.on_upgrade(|socket| handle_ws(socket, state))
+}
+
+async fn handle_ws(mut socket: ws::WebSocket, state: AppState) {
+    let mut rx = state.events.subscribe();
+
+    loop {
+        tokio::select! {
+            // Forward events to the client
+            event = rx.recv() => {
+                match event {
+                    Ok(e) => {
+                        let json = serde_json::to_string(&e).unwrap_or_default();
+                        if socket.send(ws::Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            // Handle client messages (ping/pong, close)
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(ws::Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 /// Simple hash of a string for change detection. Not cryptographic.

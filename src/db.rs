@@ -56,6 +56,13 @@ const SCHEMA: &str = "
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         UNIQUE(workspace, source, external_id)
     );
+
+    CREATE TABLE IF NOT EXISTS last_seen (
+        workspace TEXT NOT NULL,
+        bot TEXT NOT NULL,
+        message_id INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (workspace, bot)
+    );
 ";
 
 fn open_conn(path: &Path) -> Result<Connection> {
@@ -264,6 +271,37 @@ impl Db {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut rows = rows;
         rows.reverse();
+        Ok(rows)
+    }
+
+    pub fn mark_seen(&self, workspace: &str, bot: &str) -> Result<()> {
+        let conn = self.writer.lock().unwrap();
+        conn.execute(
+            "INSERT INTO last_seen (workspace, bot, message_id)
+             VALUES (?1, ?2, (SELECT COALESCE(MAX(id), 0) FROM conversations WHERE workspace = ?1 AND bot = ?2))
+             ON CONFLICT(workspace, bot) DO UPDATE SET
+               message_id = (SELECT COALESCE(MAX(id), 0) FROM conversations WHERE workspace = ?1 AND bot = ?2)",
+            params![workspace, bot],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_unread_counts(&self, workspace: &str) -> Result<Vec<(String, i64)>> {
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
+            "SELECT c.bot, COUNT(*) as unread
+             FROM conversations c
+             LEFT JOIN last_seen ls ON ls.workspace = c.workspace AND ls.bot = c.bot
+             WHERE c.workspace = ?1
+               AND c.id > COALESCE(ls.message_id, 0)
+               AND c.role = 'assistant'
+             GROUP BY c.bot",
+        )?;
+        let rows = stmt
+            .query_map(params![workspace], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 

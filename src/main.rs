@@ -6,6 +6,7 @@ use tracing::info;
 
 mod config_watcher;
 mod db;
+mod events;
 mod routes;
 mod watcher;
 
@@ -58,7 +59,8 @@ async fn main() -> Result<()> {
     let watched_workspaces = load_watched_workspaces(&config_dir);
     config_watcher::start_config_watcher(watched_workspaces, db.clone());
 
-    let app = routes::router(db, &config_dir);
+    let event_hub = events::EventHub::new();
+    let app = routes::router(db, &config_dir, event_hub);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
     info!("hive listening on http://{addr}");

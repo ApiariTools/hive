@@ -9,6 +9,7 @@ interface Props {
   onSelectBot: (name: string) => void;
   onSelectWorker: (id: string) => void;
   mobileOpen?: boolean;
+  unread?: Record<string, number>;
 }
 
 const BOT_COLORS: Record<string, string> = {
@@ -23,38 +24,35 @@ function botColor(bot: Bot): string {
   return bot.color || BOT_COLORS[bot.name] || "var(--text-faint)";
 }
 
-function statusColor(status: string): string {
-  if (status === "running" || status === "active") return "var(--green)";
-  if (status === "waiting") return "var(--accent)";
-  return "var(--text-faint)";
-}
-
 export function BotNav({
   bots,
-  workers,
   activeBot,
-  activeWorkerId,
   onSelectBot,
-  onSelectWorker,
   mobileOpen,
+  unread,
 }: Props) {
   return (
     <div className={`${styles.panel} ${mobileOpen ? styles.mobileOpen : ""}`}>
       <div className={styles.label}>Bots</div>
-      {bots.map((b) => (
-        <button
-          key={b.name}
-          className={`${styles.botBtn} ${activeBot === b.name ? styles.active : ""}`}
-          onClick={() => onSelectBot(b.name)}
-        >
-          <span
-            className={styles.dot}
-            style={{ background: botColor(b) }}
-          />
-          <span className={styles.name}>{b.name}</span>
-        </button>
-      ))}
-
+      {bots.map((b) => {
+        const count = unread?.[b.name] || 0;
+        return (
+          <button
+            key={b.name}
+            className={`${styles.botBtn} ${activeBot === b.name ? styles.active : ""}`}
+            onClick={() => onSelectBot(b.name)}
+          >
+            <span
+              className={styles.dot}
+              style={{ background: botColor(b) }}
+            />
+            <span className={styles.name}>{b.name}</span>
+            {count > 0 && activeBot !== b.name && (
+              <span className={styles.badge}>{count}</span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }

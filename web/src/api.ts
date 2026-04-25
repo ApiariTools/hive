@@ -73,6 +73,33 @@ export async function cancelBot(
   return res.json();
 }
 
+export function getUnread(workspace: string): Promise<Record<string, number>> {
+  return get(`/workspaces/${workspace}/unread`);
+}
+
+export async function markSeen(workspace: string, bot: string): Promise<void> {
+  await fetch(`${BASE}/workspaces/${workspace}/seen/${bot}`, { method: "POST" });
+}
+
+export function connectWebSocket(
+  onEvent: (event: { type: string; workspace: string; bot: string; [key: string]: unknown }) => void,
+): WebSocket {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${protocol}//${window.location.host}/ws`;
+  const ws = new WebSocket(wsUrl);
+  ws.onmessage = (e) => {
+    try {
+      const event = JSON.parse(e.data);
+      onEvent(event);
+    } catch {}
+  };
+  ws.onclose = () => {
+    // Reconnect after 3s
+    setTimeout(() => connectWebSocket(onEvent), 3000);
+  };
+  return ws;
+}
+
 export async function sendMessage(
   workspace: string,
   bot: string,
