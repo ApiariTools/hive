@@ -106,6 +106,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "apiari-codex-sdk"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79be628101e24b4c4931b307a249dde336201a82a7e28679584017c1d6ee1ecd"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "apiari-gemini-sdk"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63489ff45634612cbf5bfa1b2e5271257c49cdbec0427c18479fe9fa2a470987"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -561,11 +589,14 @@ name = "hive"
 version = "0.1.0"
 dependencies = [
  "apiari-claude-sdk",
+ "apiari-codex-sdk",
+ "apiari-gemini-sdk",
  "async-stream",
  "axum",
  "chrono",
  "clap",
  "color-eyre",
+ "futures-core",
  "rusqlite",
  "rust-embed",
  "serde",
