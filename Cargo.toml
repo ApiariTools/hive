@@ -14,7 +14,7 @@ futures-core = "0.3"
 rusqlite = { version = "0.34", features = ["bundled"] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
-apiari-claude-sdk = { path = "../claude-sdk" }
+apiari-claude-sdk = "0.2"
 apiari-codex-sdk = "0.1"
 apiari-gemini-sdk = "0.1"
 async-stream = "0.3"

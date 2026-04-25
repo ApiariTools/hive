@@ -93,7 +93,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "apiari-claude-sdk"
-version = "0.1.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d994c17738dc2c1f089e4bbb142787b8cd9d2572ff955483cc26030913289bb"
 dependencies = [
  "chrono",
  "libc",
