@@ -1,4 +1,4 @@
-import type { Workspace, Bot, Worker, Message } from "./types";
+import type { Workspace, Bot, Worker, WorkerDetail, Message } from "./types";
 
 const BASE = "/api";
 
@@ -25,6 +25,29 @@ export function getConversations(
   bot: string,
 ): Promise<Message[]> {
   return get(`/workspaces/${workspace}/conversations/${bot}`);
+}
+
+export function getWorkerDetail(
+  workspace: string,
+  workerId: string,
+): Promise<WorkerDetail> {
+  return get(`/workspaces/${workspace}/workers/${workerId}`);
+}
+
+export async function sendWorkerMessage(
+  workspace: string,
+  workerId: string,
+  message: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(
+    `${BASE}/workspaces/${workspace}/workers/${workerId}/send`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    },
+  );
+  return res.json();
 }
 
 export interface StreamCallbacks {

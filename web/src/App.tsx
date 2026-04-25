@@ -4,7 +4,7 @@ import { BotNav } from "./components/BotNav";
 import { ChatPanel } from "./components/ChatPanel";
 import { WorkersPanel } from "./components/WorkersPanel";
 import { WorkerDetail } from "./components/WorkerDetail";
-import type { Workspace, Bot, Worker, Message } from "./types";
+import type { Workspace, Bot, Worker, Message, WorkerDetail as WorkerDetailData } from "./types";
 import * as api from "./api";
 
 // ── Route parsing ──
@@ -50,6 +50,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [workerDetail, setWorkerDetail] = useState<WorkerDetailData | null>(null);
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
 
   // Load workspaces on mount
@@ -116,7 +117,10 @@ export default function App() {
   const handleSelectWorker = useCallback((id: string) => {
     setWorkerId(id);
     setMenuOpen(false);
-  }, []);
+    if (workspace) {
+      api.getWorkerDetail(workspace, id).then(setWorkerDetail).catch(() => setWorkerDetail(null));
+    }
+  }, [workspace]);
 
   const handleBackFromWorker = useCallback(() => {
     setWorkerId(null);
@@ -241,9 +245,9 @@ export default function App() {
         {workerId && selectedWorker ? (
           <WorkerDetail
             worker={selectedWorker}
-            messages={[]}
+            detail={workerDetail}
+            workspace={workspace}
             onBack={handleBackFromWorker}
-            onSend={() => {}}
           />
         ) : (
           <>

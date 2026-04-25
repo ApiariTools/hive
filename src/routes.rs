@@ -44,6 +44,14 @@ pub fn router(db: Db, config_dir: &std::path::Path) -> Router {
             post(send_message),
         )
         .route("/api/workspaces/{workspace}/workers", get(list_workers))
+        .route(
+            "/api/workspaces/{workspace}/workers/{worker_id}",
+            get(get_worker_detail),
+        )
+        .route(
+            "/api/workspaces/{workspace}/workers/{worker_id}/send",
+            post(send_worker_message),
+        )
         .fallback(get(serve_frontend))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -769,6 +777,175 @@ fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
             })
         })
         .collect()
+}
+
+// ── Worker detail + messaging ──
+
+#[derive(Serialize)]
+struct WorkerDetail {
+    #[serde(flatten)]
+    info: WorkerInfo,
+    output: Option<String>,
+    conversation: Vec<WorkerMessage>,
+}
+
+#[derive(Serialize)]
+struct WorkerMessage {
+    role: String,
+    content: String,
+    timestamp: Option<String>,
+}
+
+async fn get_worker_detail(
+    State(state): State<AppState>,
+    Path((workspace, worker_id)): Path<(String, String)>,
+) -> Result<Json<WorkerDetail>, StatusCode> {
+    let config_path = state
+        .config_dir
+        .join("workspaces")
+        .join(format!("{workspace}.toml"));
+    let ws_config = load_workspace_config(&config_path);
+    let root = ws_config
+        .workspace
+        .as_ref()
+        .and_then(|w| w.root.as_ref())
+        .map(PathBuf::from)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let workers = read_swarm_workers(&root);
+    let info = workers
+        .into_iter()
+        .find(|w| w.id == worker_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Read worker output
+    let state_path = root.join(".swarm/state.json");
+    let worktree_path = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|s| {
+            s.get("workers")?
+                .as_array()?
+                .iter()
+                .find(|w| w.get("id").and_then(|i| i.as_str()) == Some(&worker_id))?
+                .get("worktree_path")
+                .and_then(|p| p.as_str())
+                .map(PathBuf::from)
+        });
+
+    let output = worktree_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p.join(".swarm/output.md")).ok());
+
+    // Read conversation from agent activity log
+    let conversation = worktree_path
+        .as_ref()
+        .map(|p| read_worker_conversation(p, &root, &worker_id))
+        .unwrap_or_default();
+
+    Ok(Json(WorkerDetail {
+        info,
+        output,
+        conversation,
+    }))
+}
+
+fn read_worker_conversation(
+    worktree_path: &std::path::Path,
+    root: &std::path::Path,
+    worker_id: &str,
+) -> Vec<WorkerMessage> {
+    let mut messages = Vec::new();
+
+    // Read the prompt that started this worker
+    let task_file = worktree_path.join(".task/TASK.md");
+    if let Ok(task) = std::fs::read_to_string(&task_file) {
+        messages.push(WorkerMessage {
+            role: "system".to_string(),
+            content: task,
+            timestamp: None,
+        });
+    }
+
+    // Read agent output
+    let output_file = worktree_path.join(".swarm/output.md");
+    if let Ok(output) = std::fs::read_to_string(&output_file) {
+        messages.push(WorkerMessage {
+            role: "assistant".to_string(),
+            content: output,
+            timestamp: None,
+        });
+    }
+
+    // Read messages sent to this worker via swarm
+    let inbox_file = root.join(format!(".swarm/inbox/{worker_id}.jsonl"));
+    if let Ok(content) = std::fs::read_to_string(&inbox_file) {
+        for line in content.lines() {
+            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
+                let content = msg
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !content.is_empty() {
+                    messages.push(WorkerMessage {
+                        role: "user".to_string(),
+                        content,
+                        timestamp: msg
+                            .get("timestamp")
+                            .and_then(|t| t.as_str())
+                            .map(String::from),
+                    });
+                }
+            }
+        }
+    }
+
+    messages
+}
+
+#[derive(Deserialize)]
+struct WorkerMessageRequest {
+    message: String,
+}
+
+async fn send_worker_message(
+    State(state): State<AppState>,
+    Path((workspace, worker_id)): Path<(String, String)>,
+    Json(body): Json<WorkerMessageRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config_path = state
+        .config_dir
+        .join("workspaces")
+        .join(format!("{workspace}.toml"));
+    let ws_config = load_workspace_config(&config_path);
+    let root = ws_config
+        .workspace
+        .as_ref()
+        .and_then(|w| w.root.as_ref())
+        .map(PathBuf::from)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    info!("[worker] sending to {worker_id}: {}", body.message);
+
+    let output = tokio::process::Command::new("swarm")
+        .arg("--dir")
+        .arg(&root)
+        .arg("send")
+        .arg(&worker_id)
+        .arg(&body.message)
+        .output()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if output.status.success() {
+        Ok(Json(serde_json::json!({"ok": true})))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Ok(Json(
+            serde_json::json!({"ok": false, "error": stderr.to_string()}),
+        ))
+    }
 }
 
 // ── Frontend ──

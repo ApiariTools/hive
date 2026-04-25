@@ -1,12 +1,15 @@
 import { useState } from "react";
-import type { Worker, Message } from "../types";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import type { Worker, WorkerDetail as WorkerDetailData } from "../types";
+import * as api from "../api";
 import styles from "./WorkerDetail.module.css";
 
 interface Props {
   worker: Worker;
-  messages: Message[];
+  detail: WorkerDetailData | null;
+  workspace: string;
   onBack: () => void;
-  onSend: (text: string) => void;
 }
 
 function branchName(branch: string): string {
@@ -23,15 +26,17 @@ function formatElapsed(secs: number | null): string {
   return rem > 0 ? `${hrs}h ${rem}m` : `${hrs}h`;
 }
 
-export function WorkerDetail({ worker, messages, onBack, onSend }: Props) {
+export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
   const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSend() {
     const text = input.trim();
-    if (!text) return;
+    if (!text || sending) return;
+    setSending(true);
     setInput("");
-    onSend(text);
+    await api.sendWorkerMessage(workspace, worker.id, text);
+    setSending(false);
   }
 
   return (
@@ -97,6 +102,15 @@ export function WorkerDetail({ worker, messages, onBack, onSend }: Props) {
           </div>
         )}
 
+        {detail?.output && (
+          <div className={styles.section}>
+            <div className={styles.sectionTitle}>Output</div>
+            <div className={styles.outputText}>
+              <Markdown remarkPlugins={[remarkGfm]}>{detail.output}</Markdown>
+            </div>
+          </div>
+        )}
+
         {worker.description && (
           <div className={styles.section}>
             <div className={styles.sectionTitle}>Task</div>
@@ -108,11 +122,15 @@ export function WorkerDetail({ worker, messages, onBack, onSend }: Props) {
           <div className={styles.sectionTitle}>Actions</div>
           <div className={styles.actions}>
             {worker.pr_url && (
-              <button className={`${styles.btn} ${styles.btnPrimary}`}>
-                Merge PR
-              </button>
+              <a
+                href={worker.pr_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`${styles.btn} ${styles.btnPrimary}`}
+              >
+                View PR
+              </a>
             )}
-            <button className={styles.btn}>Message worker</button>
             <button className={`${styles.btn} ${styles.btnDanger}`}>
               Close worker
             </button>
@@ -130,37 +148,48 @@ export function WorkerDetail({ worker, messages, onBack, onSend }: Props) {
         </div>
 
         <div className={styles.messages}>
-          {messages.length === 0 && (
+          {(!detail || detail.conversation.length === 0) && (
             <div className={styles.empty}>No messages yet</div>
           )}
-          {messages.map((msg) => (
-            <div key={msg.id} className={styles.msg}>
+          {detail?.conversation.map((msg, i) => (
+            <div key={i} className={styles.msg}>
               <div className={styles.msgMeta}>
-                <strong>{msg.role === "user" ? "You" : msg.bot}</strong>
-                {" · "}
-                {new Date(msg.created_at).toLocaleTimeString([], {
-                  hour: "numeric",
-                  minute: "2-digit",
-                })}
+                <strong>
+                  {msg.role === "system"
+                    ? "Task"
+                    : msg.role === "user"
+                      ? "You"
+                      : worker.id}
+                </strong>
+                {msg.timestamp && ` · ${msg.timestamp}`}
               </div>
-              <div className={styles.msgText}>{msg.content}</div>
+              <div className={styles.msgText}>
+                <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+              </div>
             </div>
           ))}
         </div>
 
-        <form className={styles.inputArea} onSubmit={handleSubmit}>
+        <div className={styles.inputArea}>
           <div className={styles.inputRow}>
             <input
               className={styles.inputField}
               placeholder="Message worker..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSend();
+              }}
             />
-            <button type="submit" className={styles.sendBtn}>
+            <button
+              className={styles.sendBtn}
+              onClick={handleSend}
+              disabled={sending}
+            >
               &uarr;
             </button>
           </div>
-        </form>
+        </div>
       </div>
     </div>
   );

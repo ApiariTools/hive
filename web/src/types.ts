@@ -30,3 +30,14 @@ export interface Message {
   attachments: string | null;
   created_at: string;
 }
+
+export interface WorkerDetail extends Worker {
+  output: string | null;
+  conversation: WorkerMessage[];
+}
+
+export interface WorkerMessage {
+  role: string;
+  content: string;
+  timestamp: string | null;
+}
