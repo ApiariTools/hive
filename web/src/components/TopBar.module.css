@@ -1,0 +1,48 @@
+.bar {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 48px;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.logo {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-right: 28px;
+}
+
+.tab {
+  padding: 12px 18px;
+  font-size: 15px;
+  color: var(--text-faint);
+  cursor: pointer;
+  border: none;
+  background: none;
+  position: relative;
+  font-weight: 500;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.active {
+  color: var(--text-strong);
+}
+
+.active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 14px;
+  right: 14px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
