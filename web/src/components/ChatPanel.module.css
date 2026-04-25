@@ -222,13 +222,12 @@
   border-color: var(--text-faint);
 }
 
-.micBtn {
+.actionBtn {
   background: none;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text-faint);
   padding: 0;
-  font-size: 16px;
   width: 44px;
   align-self: stretch;
   flex-shrink: 0;
@@ -237,18 +236,29 @@
   justify-content: center;
 }
 
-.micBtn:hover:not(:disabled) {
+.actionBtn:hover:not(:disabled) {
   color: var(--text);
   border-color: var(--text-faint);
 }
 
-.micBtn:disabled {
+.actionBtn:disabled {
   opacity: 0.4;
 }
 
+.actionBtnSend {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+
+.actionBtnSend:hover:not(:disabled) {
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
 .micRecording {
-  border-color: #e53e3e;
-  color: #e53e3e;
+  border-color: var(--red);
+  color: var(--red);
   animation: pulse-border 1.5s ease-in-out infinite;
 }
 
@@ -298,20 +308,6 @@
   border-color: var(--accent);
 }
 
-.sendBtn {
-  width: 44px;
-  align-self: stretch;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--accent);
-  border: none;
-  border-radius: var(--radius);
-  color: var(--bg);
-  font-size: 18px;
-  font-weight: 700;
-}
 
 /* ── Attachments ── */
 

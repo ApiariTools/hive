@@ -29,6 +29,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [micState, setMicState] = useState<"idle" | "recording" | "stopping" | "transcribing">("idle");
+  const [hasText, setHasText] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -52,6 +53,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     if (!text && attachments.length === 0) return;
     el.value = "";
     el.style.height = "auto";
+    setHasText(false);
     onSend(text, attachments.length > 0 ? attachments : undefined);
     setAttachments([]);
   }
@@ -61,6 +63,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     if (!el) return;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 160) + "px";
+    setHasText(el.value.trim().length > 0);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -302,15 +305,6 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
           >
             <Paperclip size={16} />
           </button>
-          <button
-            type="button"
-            className={`${styles.micBtn} ${micState === "recording" ? styles.micRecording : ""}`}
-            onClick={handleMicClick}
-            disabled={loading || micState === "stopping" || micState === "transcribing"}
-            title={micState === "recording" ? "Stop recording" : "Record audio"}
-          >
-            {micState === "transcribing" || micState === "stopping" ? "..." : micState === "recording" ? <Square size={16} /> : <Mic size={16} />}
-          </button>
           <textarea
             ref={textareaRef}
             className={styles.inputField}
@@ -321,14 +315,37 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
             onInput={autoGrow}
             onKeyDown={handleKeyDown}
           />
-          <button
-            type="button"
-            className={styles.sendBtn}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={send}
-          >
-            <ArrowUp size={18} />
-          </button>
+          {micState === "recording" ? (
+            <button
+              type="button"
+              className={`${styles.actionBtn} ${styles.micRecording}`}
+              onClick={handleMicClick}
+            >
+              <Square size={16} />
+            </button>
+          ) : micState === "transcribing" || micState === "stopping" ? (
+            <button type="button" className={styles.actionBtn} disabled>
+              ...
+            </button>
+          ) : hasText || attachments.length > 0 ? (
+            <button
+              type="button"
+              className={`${styles.actionBtn} ${styles.actionBtnSend}`}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={send}
+            >
+              <ArrowUp size={18} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={styles.actionBtn}
+              onClick={handleMicClick}
+              disabled={loading}
+            >
+              <Mic size={16} />
+            </button>
+          )}
         </div>
         {micState === "transcribing" && <div className={styles.transcribeStatus}>Transcribing...</div>}
         {transcribeError && <div className={styles.transcribeError}>{transcribeError}</div>}
