@@ -44,6 +44,7 @@
 .messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 16px 20px 24px;
   display: flex;
   flex-direction: column;
@@ -61,6 +62,8 @@
 
 .msg {
   max-width: 720px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .meta {
@@ -91,6 +94,23 @@
   overflow-x: auto;
   margin: 8px 0;
   font-size: 13px;
+  max-width: 100%;
+}
+.text table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  margin: 8px 0;
+}
+.text th, .text td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+.text th {
+  background: var(--bg-card);
 }
 .text code {
   background: var(--bg-card);

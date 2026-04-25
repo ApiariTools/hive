@@ -765,7 +765,7 @@ async fn run_bot_claude(
     }
 
     if !full_text.is_empty() {
-        let _ = db.add_message(ws, bot, "assistant", &full_text, None);
+        let _ = db.add_message(ws, bot, "assistant", full_text.trim(), None);
     }
     Ok(())
 }
@@ -844,7 +844,7 @@ async fn run_bot_codex(
     }
 
     if !full_text.is_empty() {
-        let _ = db.add_message(ws, bot, "assistant", &full_text, None);
+        let _ = db.add_message(ws, bot, "assistant", full_text.trim(), None);
     }
     Ok(())
 }
@@ -921,7 +921,7 @@ async fn run_bot_gemini(
     }
 
     if !full_text.is_empty() {
-        let _ = db.add_message(ws, bot, "assistant", &full_text, None);
+        let _ = db.add_message(ws, bot, "assistant", full_text.trim(), None);
     }
     Ok(())
 }
