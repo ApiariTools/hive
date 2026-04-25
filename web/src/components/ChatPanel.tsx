@@ -113,12 +113,13 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     analyserRef.current = null;
   }
 
+  const smoothedBars = useRef<number[]>([]);
+
   function drawWaveform() {
     const canvas = canvasRef.current;
     const analyser = analyserRef.current;
     if (!canvas || !analyser) return;
 
-    // Match canvas resolution to display size
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     canvas.width = rect.width * dpr;
@@ -131,25 +132,50 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     const w = rect.width;
     const h = rect.height;
 
-    const data = new Uint8Array(analyser.frequencyBinCount);
-    analyser.getByteTimeDomainData(data);
+    // Use frequency data for bars instead of waveform
+    const freqData = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(freqData);
+
+    // Reduce to ~24 bars
+    const barCount = 24;
+    const step = Math.floor(freqData.length / barCount);
+
+    if (smoothedBars.current.length !== barCount) {
+      smoothedBars.current = new Array(barCount).fill(0);
+    }
 
     ctx.clearRect(0, 0, w, h);
-    ctx.strokeStyle = "#e85555";
-    ctx.lineWidth = 2;
-    ctx.lineJoin = "round";
-    ctx.beginPath();
 
-    const sliceWidth = w / data.length;
-    let x = 0;
-    for (let i = 0; i < data.length; i++) {
-      const v = data[i] / 128.0;
-      const y = (v * h) / 2;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-      x += sliceWidth;
+    const gap = 3;
+    const barWidth = (w - gap * (barCount - 1)) / barCount;
+    const centerY = h / 2;
+
+    for (let i = 0; i < barCount; i++) {
+      // Average a chunk of frequency bins
+      let sum = 0;
+      for (let j = 0; j < step; j++) {
+        sum += freqData[i * step + j];
+      }
+      const raw = sum / step / 255;
+
+      // Exaggerate — boost quiet sounds, cap loud ones
+      const boosted = Math.pow(raw, 0.6) * 1.5;
+      const target = Math.min(boosted, 1.0);
+
+      // Smooth — rise fast, fall slow
+      const prev = smoothedBars.current[i];
+      smoothedBars.current[i] = target > prev
+        ? prev + (target - prev) * 0.4
+        : prev + (target - prev) * 0.08;
+
+      const barH = Math.max(2, smoothedBars.current[i] * (h - 4));
+      const x = i * (barWidth + gap);
+
+      ctx.fillStyle = "#e85555";
+      ctx.beginPath();
+      ctx.roundRect(x, centerY - barH / 2, barWidth, barH, 2);
+      ctx.fill();
     }
-    ctx.stroke();
 
     animFrameRef.current = requestAnimationFrame(drawWaveform);
   }
