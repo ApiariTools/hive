@@ -290,10 +290,23 @@ async fn send_message(
     let bot_name = bot.clone();
     let ws_name = workspace.clone();
 
+    // For non-image attachments, inline their content into the message text
+    let text_attachments = extract_text_attachments(&body.attachments);
+    let message = if text_attachments.is_empty() {
+        body.message
+    } else {
+        let mut msg = body.message;
+        msg.push_str("\n\n--- Attached files ---\n");
+        for (name, content) in &text_attachments {
+            msg.push_str(&format!("\n### {name}\n```\n{content}\n```\n"));
+        }
+        msg
+    };
+
     match provider {
-        "codex" => stream_codex(body.message, system_prompt, working_dir, resume_id, db, ws_name, bot_name),
-        "gemini" => stream_gemini(body.message, system_prompt, working_dir, resume_id, db, ws_name, bot_name),
-        _ => stream_claude(body.message, system_prompt, working_dir, resume_id, images, db, ws_name, bot_name),
+        "codex" => stream_codex(message, system_prompt, working_dir, resume_id, db, ws_name, bot_name),
+        "gemini" => stream_gemini(message, system_prompt, working_dir, resume_id, db, ws_name, bot_name),
+        _ => stream_claude(message, system_prompt, working_dir, resume_id, images, db, ws_name, bot_name),
     }
 }
 
@@ -314,6 +327,52 @@ fn extract_images(attachments: &Option<Vec<ChatAttachment>>) -> Vec<(String, Str
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn extract_text_attachments(attachments: &Option<Vec<ChatAttachment>>) -> Vec<(String, String)> {
+    attachments
+        .as_ref()
+        .map(|atts| {
+            atts.iter()
+                .filter(|a| !a.mime_type.starts_with("image/"))
+                .filter_map(|a| {
+                    // data_url format: "data:text/plain;base64,SGVsbG8..."
+                    let parts: Vec<&str> = a.data_url.splitn(2, ',').collect();
+                    if parts.len() == 2 {
+                        // Decode base64 to text
+                        let decoded = base64_decode(parts[1])?;
+                        let text = String::from_utf8(decoded).ok()?;
+                        Some((a.name.clone(), text))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    // Simple base64 decode without pulling in a crate
+    let input = input.trim();
+    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in input.bytes() {
+        if byte == b'=' || byte == b'\n' || byte == b'\r' {
+            continue;
+        }
+        let val = table.iter().position(|&b| b == byte)? as u32;
+        acc = (acc << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            buf.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(buf)
 }
 
 fn stream_claude(
