@@ -44,6 +44,16 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, loading, loadingStatus]);
 
+  // Start/stop waveform drawing when recording state changes
+  useEffect(() => {
+    if (micState === "recording" && analyserRef.current) {
+      animFrameRef.current = requestAnimationFrame(drawWaveform);
+    }
+    return () => {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [micState]);
+
   useEffect(() => {
     return () => {
       mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -150,7 +160,6 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
       analyser.fftSize = 256;
       source.connect(analyser);
       analyserRef.current = analyser;
-      animFrameRef.current = requestAnimationFrame(drawWaveform);
 
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
