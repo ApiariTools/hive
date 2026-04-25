@@ -61,21 +61,26 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+  margin-left: 2px;
 }
 
 .workerCard {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  border-radius: 5px;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 13px;
   color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
 }
 
 .workerCard:hover {
-  background: var(--bg-card);
+  border-color: var(--text-faint);
 }
 
 .workerDot {
