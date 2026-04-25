@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { TopBar } from "./components/TopBar";
+import { CommandPalette } from "./components/CommandPalette";
 import { BotNav } from "./components/BotNav";
 import { ChatPanel } from "./components/ChatPanel";
 import { ReposPanel } from "./components/ReposPanel";
@@ -56,6 +57,7 @@ export default function App() {
   const [workersOpen, setWorkersOpen] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
   const [unread, setUnread] = useState<Record<string, number>>({});
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Load workspaces on mount
   useEffect(() => {
@@ -173,6 +175,24 @@ export default function App() {
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // Cmd+K: command palette, Cmd+J: focus chat
+  useEffect(() => {
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      if (e.repeat) return;
+      const key = e.key.toLowerCase();
+      if ((e.metaKey || e.ctrlKey) && key === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+      if ((e.metaKey || e.ctrlKey) && key === "j") {
+        e.preventDefault();
+        document.querySelector<HTMLTextAreaElement>('textarea[enterkeyhint="send"]')?.focus();
+      }
+    }
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, []);
 
   const handleSelectWorkspace = useCallback((ws: string) => {
@@ -298,6 +318,18 @@ export default function App() {
           onClose={() => setWorkersOpen(false)}
         />
       </div>
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        workspaces={workspaces}
+        bots={bots}
+        workers={workers}
+        currentWorkspace={workspace}
+        currentBot={bot}
+        onSelectWorkspace={handleSelectWorkspace}
+        onSelectBot={handleSelectBot}
+        onSelectWorker={handleSelectWorker}
+      />
     </>
   );
 }
