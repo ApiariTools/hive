@@ -452,6 +452,7 @@ async fn send_message(
                         system_prompt,
                         working_dir,
                         resume_id,
+                        images,
                         &db,
                         &ws_name,
                         &bot_name,
@@ -795,6 +796,7 @@ async fn run_bot_codex(
     system_prompt: Option<String>,
     working_dir: Option<PathBuf>,
     resume_id: Option<String>,
+    images: Vec<(String, String)>,
     db: &Db,
     ws: &str,
     bot: &str,
@@ -805,6 +807,20 @@ async fn run_bot_codex(
         Some(sys) => format!("{sys}\n\n---\n\n{message}"),
         None => message,
     };
+
+    // Save base64 images to temp files for codex --image flag
+    let _tmp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let image_paths: Vec<PathBuf> = images
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (mime, data))| {
+            let ext = if mime.contains("png") { "png" } else { "jpg" };
+            let path = _tmp_dir.path().join(format!("img_{i}.{ext}"));
+            let decoded = base64_decode(data)?;
+            std::fs::write(&path, decoded).ok()?;
+            Some(path)
+        })
+        .collect();
 
     let mut execution = if let Some(ref sid) = resume_id {
         client
@@ -826,6 +842,7 @@ async fn run_bot_codex(
                 apiari_codex_sdk::ExecOptions {
                     full_auto: true,
                     working_dir,
+                    images: image_paths,
                     ..Default::default()
                 },
             )
