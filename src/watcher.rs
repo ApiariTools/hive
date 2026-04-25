@@ -11,6 +11,7 @@ use tracing::info;
 
 /// Configuration for a watched bot.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct WatchedBot {
     pub workspace: String,
     pub name: String,
@@ -61,6 +62,7 @@ async fn run_watcher(bot: WatchedBot, db: Db) {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct Signal {
     source: String,
     title: String,
@@ -73,9 +75,14 @@ async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
     // Check for open PRs that need attention
     let output = tokio::process::Command::new("gh")
         .args([
-            "pr", "list", "--state", "open", "--json",
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
             "number,title,reviewDecision,statusCheckRollup",
-            "--limit", "5",
+            "--limit",
+            "5",
         ])
         .current_dir(dir)
         .output()
@@ -86,8 +93,7 @@ async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
         return None;
     }
 
-    let prs: Vec<serde_json::Value> =
-        serde_json::from_slice(&output.stdout).ok()?;
+    let prs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
 
     // Find PRs that need review or have failing CI
     for pr in &prs {
@@ -121,10 +127,7 @@ async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
 }
 
 async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) {
-    info!(
-        "[watcher] dispatching to {}: {}",
-        bot.name, signal.title
-    );
+    info!("[watcher] dispatching to {}: {}", bot.name, signal.title);
 
     // Store the signal as a system message in the bot's chat
     let _ = db.add_message(
@@ -173,7 +176,9 @@ async fn run_claude_autonomous(
     prompt: &str,
     working_dir: &Option<PathBuf>,
 ) -> Result<String, String> {
-    use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions, streaming::AssembledEvent, types::ContentBlock};
+    use apiari_claude_sdk::{
+        ClaudeClient, Event, SessionOptions, streaming::AssembledEvent, types::ContentBlock,
+    };
 
     let opts = SessionOptions {
         dangerously_skip_permissions: true,
@@ -203,10 +208,10 @@ async fn run_claude_autonomous(
                 }
                 Event::Assistant { message, .. } => {
                     for block in &message.message.content {
-                        if let ContentBlock::Text { text } = block {
-                            if full_text.is_empty() {
-                                full_text.push_str(text);
-                            }
+                        if let ContentBlock::Text { text } = block
+                            && full_text.is_empty()
+                        {
+                            full_text.push_str(text);
                         }
                     }
                 }
@@ -240,10 +245,10 @@ async fn run_codex_autonomous(
 
     let mut response = String::new();
     while let Ok(Some(event)) = execution.next_event().await {
-        if let apiari_codex_sdk::Event::ItemCompleted { item } = &event {
-            if let Some(text) = item.text() {
-                response = text.to_string();
-            }
+        if let apiari_codex_sdk::Event::ItemCompleted { item } = &event
+            && let Some(text) = item.text()
+        {
+            response = text.to_string();
         }
     }
     Ok(response)
@@ -267,10 +272,10 @@ async fn run_gemini_autonomous(
 
     let mut response = String::new();
     while let Ok(Some(event)) = execution.next_event().await {
-        if let apiari_gemini_sdk::Event::ItemCompleted { item } = &event {
-            if let Some(text) = item.text() {
-                response = text.to_string();
-            }
+        if let apiari_gemini_sdk::Event::ItemCompleted { item } = &event
+            && let Some(text) = item.text()
+        {
+            response = text.to_string();
         }
     }
     Ok(response)

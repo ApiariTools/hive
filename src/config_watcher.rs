@@ -49,22 +49,22 @@ async fn run_watcher(workspaces: Vec<WatchedWorkspace>, db: Db) {
                 let new_hash = compute_prompt_hash(ws, bot);
                 let key = (ws.name.clone(), bot.clone());
 
-                if let Some(old_hash) = hashes.get(&key) {
-                    if *old_hash != new_hash {
-                        info!(
-                            "[config-watcher] prompt changed for {}/{}, resetting session",
-                            ws.name, bot
-                        );
-                        let _ = db.add_message(
-                            &ws.name,
-                            bot,
-                            "system",
-                            "Session reset — bot configuration was updated.",
-                            None,
-                        );
-                        // Clear the session by setting an invalid hash
-                        // Next message will detect mismatch and start fresh
-                    }
+                if let Some(old_hash) = hashes.get(&key)
+                    && *old_hash != new_hash
+                {
+                    info!(
+                        "[config-watcher] prompt changed for {}/{}, resetting session",
+                        ws.name, bot
+                    );
+                    let _ = db.add_message(
+                        &ws.name,
+                        bot,
+                        "system",
+                        "Session reset — bot configuration was updated.",
+                        None,
+                    );
+                    // Clear the session by setting an invalid hash
+                    // Next message will detect mismatch and start fresh
                 }
 
                 hashes.insert(key, new_hash);

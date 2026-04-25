@@ -21,7 +21,8 @@ pub enum HiveEvent {
         status: String,
         tool_name: Option<String>,
     },
-    /// Worker state changed
+    /// Worker state changed (reserved for future use)
+    #[allow(dead_code)]
     WorkerUpdate {
         workspace: String,
         worker_id: String,
@@ -32,6 +33,12 @@ pub enum HiveEvent {
 #[derive(Clone)]
 pub struct EventHub {
     tx: Arc<broadcast::Sender<HiveEvent>>,
+}
+
+impl Default for EventHub {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EventHub {

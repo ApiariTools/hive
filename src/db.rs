@@ -1,5 +1,5 @@
 use color_eyre::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -67,7 +67,9 @@ const SCHEMA: &str = "
 
 fn open_conn(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+    )?;
     Ok(conn)
 }
 
@@ -204,7 +206,9 @@ impl Db {
                 if stored_hash == current_hash {
                     Ok(Some(id))
                 } else {
-                    tracing::info!("[session] prompt changed for {workspace}/{bot}, starting fresh");
+                    tracing::info!(
+                        "[session] prompt changed for {workspace}/{bot}, starting fresh"
+                    );
                     let _ = self.add_message(
                         workspace,
                         bot,
@@ -305,11 +309,7 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn get_all_conversations(
-        &self,
-        workspace: &str,
-        limit: i64,
-    ) -> Result<Vec<MessageRow>> {
+    pub fn get_all_conversations(&self, workspace: &str, limit: i64) -> Result<Vec<MessageRow>> {
         let conn = self.reader()?;
         let mut stmt = conn.prepare(
             "SELECT id, workspace, bot, role, content, attachments, created_at

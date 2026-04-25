@@ -35,7 +35,9 @@ async fn main() -> Result<()> {
     // Strip sandbox GH_TOKEN if running inside Claude Code
     if std::env::var("CLAUDECODE").is_ok() {
         info!("stripping sandbox GH_TOKEN");
-        unsafe { std::env::remove_var("GH_TOKEN"); }
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+        }
     }
 
     let cli = Cli::parse();
@@ -132,10 +134,7 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                                 .and_then(|p| p.as_str())
                                 .unwrap_or("claude")
                                 .to_string(),
-                            model: bot
-                                .get("model")
-                                .and_then(|m| m.as_str())
-                                .map(String::from),
+                            model: bot.get("model").and_then(|m| m.as_str()).map(String::from),
                             role: bot
                                 .get("role")
                                 .and_then(|r| r.as_str())

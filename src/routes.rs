@@ -1,8 +1,6 @@
 use apiari_claude_sdk::{
     ClaudeClient, Event, SessionOptions, streaming::AssembledEvent, types::ContentBlock,
 };
-use apiari_codex_sdk;
-use apiari_gemini_sdk;
 use axum::{
     Router,
     extract::{Multipart, Path, Query, State, WebSocketUpgrade, ws},
@@ -59,10 +57,7 @@ pub fn router(db: Db, config_dir: &std::path::Path, events: EventHub) -> Router 
         )
         .route("/api/transcribe", post(transcribe_audio))
         .route("/api/workspaces/{workspace}/unread", get(get_unread))
-        .route(
-            "/api/workspaces/{workspace}/seen/{bot}",
-            post(mark_seen),
-        )
+        .route("/api/workspaces/{workspace}/seen/{bot}", post(mark_seen))
         .route("/ws", get(ws_handler))
         .route("/api/workspaces/{workspace}/repos", get(list_repos))
         .route("/api/workspaces/{workspace}/workers", get(list_workers))
@@ -89,12 +84,12 @@ async fn list_workspaces(State(state): State<AppState>) -> Json<Vec<WorkspaceInf
     if let Ok(entries) = std::fs::read_dir(&workspaces_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "toml") {
-                if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                    workspaces.push(WorkspaceInfo {
-                        name: name.to_string(),
-                    });
-                }
+            if path.extension().is_some_and(|e| e == "toml")
+                && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+            {
+                workspaces.push(WorkspaceInfo {
+                    name: name.to_string(),
+                });
             }
         }
     }
@@ -154,10 +149,10 @@ fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
         watch: vec![],
     }];
 
-    if let Ok(content) = std::fs::read_to_string(path) {
-        if let Ok(config) = toml::from_str::<WorkspaceConfig>(&content) {
-            bots.extend(config.bots.unwrap_or_default());
-        }
+    if let Ok(content) = std::fs::read_to_string(path)
+        && let Ok(config) = toml::from_str::<WorkspaceConfig>(&content)
+    {
+        bots.extend(config.bots.unwrap_or_default());
     }
 
     bots
@@ -438,8 +433,10 @@ async fn send_message(
     // Set bot status to thinking
     let _ = db.set_bot_status(&ws_name, &bot_name, "thinking", "", None);
     events.send(HiveEvent::BotStatus {
-        workspace: ws_name.clone(), bot: bot_name.clone(),
-        status: "thinking".to_string(), tool_name: None,
+        workspace: ws_name.clone(),
+        bot: bot_name.clone(),
+        status: "thinking".to_string(),
+        tool_name: None,
     });
 
     // Spawn background task with 5-minute timeout
@@ -490,10 +487,7 @@ async fn send_message(
             }
         };
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            task,
-        ).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(300), task).await;
 
         match result {
             Ok(Err(e)) => {
@@ -519,12 +513,16 @@ async fn send_message(
 
         let _ = db.set_bot_status(&ws_name, &bot_name, "idle", "", None);
         events.send(HiveEvent::BotStatus {
-            workspace: ws_name.clone(), bot: bot_name.clone(),
-            status: "idle".to_string(), tool_name: None,
+            workspace: ws_name.clone(),
+            bot: bot_name.clone(),
+            status: "idle".to_string(),
+            tool_name: None,
         });
         events.send(HiveEvent::Message {
-            workspace: ws_name, bot: bot_name,
-            role: "assistant".to_string(), content: "".to_string(),
+            workspace: ws_name,
+            bot: bot_name,
+            role: "assistant".to_string(),
+            content: "".to_string(),
         });
     });
 
@@ -749,16 +747,17 @@ async fn run_bot_claude(
                                 full_text.push_str(&text);
                                 let _ = db.append_streaming(ws, bot, &text);
                             }
-                            AssembledEvent::ContentBlockComplete { block, .. } => {
-                                if let ContentBlock::ToolUse { name, .. } = block {
-                                    let _ = db.set_bot_status(
-                                        ws,
-                                        bot,
-                                        "streaming",
-                                        &full_text,
-                                        Some(&name),
-                                    );
-                                }
+                            AssembledEvent::ContentBlockComplete {
+                                block: ContentBlock::ToolUse { name, .. },
+                                ..
+                            } => {
+                                let _ = db.set_bot_status(
+                                    ws,
+                                    bot,
+                                    "streaming",
+                                    &full_text,
+                                    Some(&name),
+                                );
                             }
                             _ => {}
                         }
@@ -766,11 +765,12 @@ async fn run_bot_claude(
                 }
                 Event::Assistant { message: msg, .. } => {
                     for block in &msg.message.content {
-                        if let ContentBlock::Text { text } = block {
-                            if !text.is_empty() && full_text.is_empty() {
-                                full_text.push_str(text);
-                                let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
-                            }
+                        if let ContentBlock::Text { text } = block
+                            && !text.is_empty()
+                            && full_text.is_empty()
+                        {
+                            full_text.push_str(text);
+                            let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
                         }
                     }
                 }
@@ -859,11 +859,11 @@ async fn run_bot_codex(
                 let _ = db.set_session(ws, bot, thread_id, prompt_hash);
             }
             apiari_codex_sdk::Event::ItemCompleted { item } => {
-                if let Some(text) = item.text() {
-                    if !text.is_empty() {
-                        full_text = text.to_string();
-                        let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
-                    }
+                if let Some(text) = item.text()
+                    && !text.is_empty()
+                {
+                    full_text = text.to_string();
+                    let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
                 }
             }
             apiari_codex_sdk::Event::TurnFailed { error, .. } => {
@@ -936,11 +936,11 @@ async fn run_bot_gemini(
                 let _ = db.set_session(ws, bot, thread_id, prompt_hash);
             }
             apiari_gemini_sdk::Event::ItemCompleted { item } => {
-                if let Some(text) = item.text() {
-                    if !text.is_empty() {
-                        full_text = text.to_string();
-                        let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
-                    }
+                if let Some(text) = item.text()
+                    && !text.is_empty()
+                {
+                    full_text = text.to_string();
+                    let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
                 }
             }
             apiari_gemini_sdk::Event::TurnFailed { error, .. } => {
@@ -1152,25 +1152,24 @@ fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
     let mut repo_workers: std::collections::HashMap<String, Vec<WorkerInfo>> =
         std::collections::HashMap::new();
     let state_path = root.join(".swarm/state.json");
-    if let Ok(content) = std::fs::read_to_string(&state_path) {
-        if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(worktrees) = state.get("worktrees").and_then(|w| w.as_array()) {
-                for wt in worktrees {
-                    let repo_name = wt
-                        .get("repo_path")
-                        .and_then(|p| p.as_str())
-                        .and_then(|p| std::path::Path::new(p).file_name())
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let wt_id = wt.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                    if let Some(worker) = all_workers.iter().find(|w| w.id == wt_id) {
-                        repo_workers
-                            .entry(repo_name)
-                            .or_default()
-                            .push(worker.clone());
-                    }
-                }
+    if let Ok(content) = std::fs::read_to_string(&state_path)
+        && let Ok(state) = serde_json::from_str::<serde_json::Value>(&content)
+        && let Some(worktrees) = state.get("worktrees").and_then(|w| w.as_array())
+    {
+        for wt in worktrees {
+            let repo_name = wt
+                .get("repo_path")
+                .and_then(|p| p.as_str())
+                .and_then(|p| std::path::Path::new(p).file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let wt_id = wt.get("id").and_then(|i| i.as_str()).unwrap_or("");
+            if let Some(worker) = all_workers.iter().find(|w| w.id == wt_id) {
+                repo_workers
+                    .entry(repo_name)
+                    .or_default()
+                    .push(worker.clone());
             }
         }
     }
