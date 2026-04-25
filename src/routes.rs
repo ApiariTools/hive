@@ -1,9 +1,11 @@
-use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions, streaming::AssembledEvent, types::ContentBlock};
+use apiari_claude_sdk::{
+    ClaudeClient, Event, SessionOptions, streaming::AssembledEvent, types::ContentBlock,
+};
 use apiari_codex_sdk;
 use apiari_gemini_sdk;
 use axum::{
     Router,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
@@ -38,10 +40,7 @@ pub fn router(db: Db, config_dir: &std::path::Path) -> Router {
             "/api/workspaces/{workspace}/conversations/{bot}",
             get(get_bot_conversations),
         )
-        .route(
-            "/api/workspaces/{workspace}/chat/{bot}",
-            post(send_message),
-        )
+        .route("/api/workspaces/{workspace}/chat/{bot}", post(send_message))
         .route(
             "/api/workspaces/{workspace}/conversations/{bot}/search",
             get(search_conversations),
@@ -54,6 +53,7 @@ pub fn router(db: Db, config_dir: &std::path::Path) -> Router {
             "/api/workspaces/{workspace}/bots/{bot}/cancel",
             post(cancel_bot),
         )
+        .route("/api/transcribe", post(transcribe_audio))
         .route("/api/workspaces/{workspace}/workers", get(list_workers))
         .route(
             "/api/workspaces/{workspace}/workers/{worker_id}",
@@ -188,7 +188,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         if let Ok(custom) = std::fs::read_to_string(&path) {
             // Custom prompt gets workspace context appended
             let mut prompt = custom;
-            if !prompt.ends_with('\n') { prompt.push('\n'); }
+            if !prompt.ends_with('\n') {
+                prompt.push('\n');
+            }
             prompt.push_str(&format!("\nWorkspace: {ws_name} — {ws_desc}\n"));
             if let Some(ref root) = ws.root {
                 prompt.push_str(&format!("Working directory: {root}\n"));
@@ -217,7 +219,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         if let Ok(context) = std::fs::read_to_string(&context_path) {
             prompt.push_str("\n## Project Context\n");
             prompt.push_str(&context);
-            if !context.ends_with('\n') { prompt.push('\n'); }
+            if !context.ends_with('\n') {
+                prompt.push('\n');
+            }
         }
 
         // Load .apiari/soul.md if it exists
@@ -225,7 +229,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         if let Ok(soul) = std::fs::read_to_string(&soul_path) {
             prompt.push_str("\n## Communication Style\n");
             prompt.push_str(&soul);
-            if !soul.ends_with('\n') { prompt.push('\n'); }
+            if !soul.ends_with('\n') {
+                prompt.push('\n');
+            }
         }
 
         // Swarm worker dispatch instructions
@@ -421,13 +427,56 @@ async fn send_message(
     // Spawn background task — daemon owns the session
     tokio::spawn(async move {
         let result = match provider.as_str() {
-            "codex" => run_bot_codex(message, system_prompt, working_dir, resume_id, &db, &ws_name, &bot_name, &hash).await,
-            "gemini" => run_bot_gemini(message, system_prompt, working_dir, resume_id, &db, &ws_name, &bot_name, &hash).await,
-            _ => run_bot_claude(message, system_prompt, working_dir, resume_id, images, &db, &ws_name, &bot_name, &hash).await,
+            "codex" => {
+                run_bot_codex(
+                    message,
+                    system_prompt,
+                    working_dir,
+                    resume_id,
+                    &db,
+                    &ws_name,
+                    &bot_name,
+                    &hash,
+                )
+                .await
+            }
+            "gemini" => {
+                run_bot_gemini(
+                    message,
+                    system_prompt,
+                    working_dir,
+                    resume_id,
+                    &db,
+                    &ws_name,
+                    &bot_name,
+                    &hash,
+                )
+                .await
+            }
+            _ => {
+                run_bot_claude(
+                    message,
+                    system_prompt,
+                    working_dir,
+                    resume_id,
+                    images,
+                    &db,
+                    &ws_name,
+                    &bot_name,
+                    &hash,
+                )
+                .await
+            }
         };
 
         if let Err(e) = result {
-            let _ = db.add_message(&ws_name, &bot_name, "assistant", &format!("Error: {e}"), None);
+            let _ = db.add_message(
+                &ws_name,
+                &bot_name,
+                "assistant",
+                &format!("Error: {e}"),
+                None,
+            );
         }
 
         let _ = db.set_bot_status(&ws_name, &bot_name, "idle", "", None);
@@ -462,11 +511,15 @@ async fn cancel_bot(
     Path((workspace, bot)): Path<(String, String)>,
 ) -> Json<serde_json::Value> {
     info!("[chat] cancelling {workspace}/{bot}");
-    let _ = state.db.set_bot_status(&workspace, &bot, "cancelled", "", None);
+    let _ = state
+        .db
+        .set_bot_status(&workspace, &bot, "cancelled", "", None);
     // Give the background task a moment to notice
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = state.db.set_bot_status(&workspace, &bot, "idle", "", None);
-    let _ = state.db.add_message(&workspace, &bot, "system", "Response cancelled.", None);
+    let _ = state
+        .db
+        .add_message(&workspace, &bot, "system", "Response cancelled.", None);
     Json(serde_json::json!({"ok": true}))
 }
 
@@ -592,7 +645,13 @@ async fn run_bot_claude(
                             }
                             AssembledEvent::ContentBlockComplete { block, .. } => {
                                 if let ContentBlock::ToolUse { name, .. } = block {
-                                    let _ = db.set_bot_status(ws, bot, "streaming", &full_text, Some(&name));
+                                    let _ = db.set_bot_status(
+                                        ws,
+                                        bot,
+                                        "streaming",
+                                        &full_text,
+                                        Some(&name),
+                                    );
                                 }
                             }
                             _ => {}
@@ -643,18 +702,30 @@ async fn run_bot_codex(
     };
 
     let mut execution = if let Some(ref sid) = resume_id {
-        client.exec_resume(&prompt, apiari_codex_sdk::ResumeOptions {
-            session_id: Some(sid.clone()),
-            full_auto: true,
-            working_dir,
-            ..Default::default()
-        }).await.map_err(|e| e.to_string())?
+        client
+            .exec_resume(
+                &prompt,
+                apiari_codex_sdk::ResumeOptions {
+                    session_id: Some(sid.clone()),
+                    full_auto: true,
+                    working_dir,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?
     } else {
-        client.exec(&prompt, apiari_codex_sdk::ExecOptions {
-            full_auto: true,
-            working_dir,
-            ..Default::default()
-        }).await.map_err(|e| e.to_string())?
+        client
+            .exec(
+                &prompt,
+                apiari_codex_sdk::ExecOptions {
+                    full_auto: true,
+                    working_dir,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?
     };
 
     let _ = db.set_bot_status(ws, bot, "streaming", "", None);
@@ -674,7 +745,10 @@ async fn run_bot_codex(
                 }
             }
             apiari_codex_sdk::Event::TurnFailed { error, .. } => {
-                let msg = error.as_ref().and_then(|e| e.message.as_deref()).unwrap_or("codex failed");
+                let msg = error
+                    .as_ref()
+                    .and_then(|e| e.message.as_deref())
+                    .unwrap_or("codex failed");
                 return Err(msg.to_string());
             }
             apiari_codex_sdk::Event::Error { message } => {
@@ -707,16 +781,28 @@ async fn run_bot_gemini(
     };
 
     let mut execution = if let Some(ref sid) = resume_id {
-        client.exec_resume(&prompt, apiari_gemini_sdk::SessionOptions {
-            session_id: Some(sid.clone()),
-            working_dir,
-            ..Default::default()
-        }).await.map_err(|e| e.to_string())?
+        client
+            .exec_resume(
+                &prompt,
+                apiari_gemini_sdk::SessionOptions {
+                    session_id: Some(sid.clone()),
+                    working_dir,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?
     } else {
-        client.exec(&prompt, apiari_gemini_sdk::GeminiOptions {
-            working_dir,
-            ..Default::default()
-        }).await.map_err(|e| e.to_string())?
+        client
+            .exec(
+                &prompt,
+                apiari_gemini_sdk::GeminiOptions {
+                    working_dir,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?
     };
 
     let _ = db.set_bot_status(ws, bot, "streaming", "", None);
@@ -736,7 +822,10 @@ async fn run_bot_gemini(
                 }
             }
             apiari_gemini_sdk::Event::TurnFailed { error, .. } => {
-                let msg = error.as_ref().and_then(|e| e.message.as_deref()).unwrap_or("gemini failed");
+                let msg = error
+                    .as_ref()
+                    .and_then(|e| e.message.as_deref())
+                    .unwrap_or("gemini failed");
                 return Err(msg.to_string());
             }
             apiari_gemini_sdk::Event::Error { message } => {
@@ -750,6 +839,114 @@ async fn run_bot_gemini(
         let _ = db.add_message(ws, bot, "assistant", &full_text, None);
     }
     Ok(())
+}
+
+// ── Transcription ──
+
+fn transcribe_err(msg: impl Into<String>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "error": msg.into() }))
+}
+
+async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_json::Value>) {
+    // Stream audio field directly to a temp file to avoid buffering in memory
+    let tmp_dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err("failed to create temp dir"),
+            );
+        }
+    };
+    let audio_path = tmp_dir.path().join("audio.webm");
+
+    let mut found_audio = false;
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        if field.name() == Some("audio") {
+            found_audio = true;
+            let mut file = match tokio::fs::File::create(&audio_path).await {
+                Ok(f) => f,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        transcribe_err("failed to create audio file"),
+                    );
+                }
+            };
+            while let Ok(Some(chunk)) = field.chunk().await {
+                if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                    .await
+                    .is_err()
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        transcribe_err("failed to write audio chunk"),
+                    );
+                }
+            }
+            break;
+        }
+    }
+    if !found_audio {
+        return (
+            StatusCode::BAD_REQUEST,
+            transcribe_err("missing 'audio' field in multipart body"),
+        );
+    }
+
+    // Try to run whisper directly — detect NotFound to give a helpful install message
+    let output = match tokio::process::Command::new("whisper")
+        .arg("--model")
+        .arg("base")
+        .arg("--output-txt")
+        .arg("--no-timestamps")
+        .arg("--output-dir")
+        .arg(tmp_dir.path())
+        .arg(&audio_path)
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::OK,
+                transcribe_err("whisper.cpp not found. Install it with: brew install whisper-cpp"),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err(format!("failed to run whisper: {e}")),
+            );
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return (
+            StatusCode::OK,
+            transcribe_err(format!("whisper failed: {stderr}")),
+        );
+    }
+
+    // Read the output text file
+    let txt_path = tmp_dir.path().join("audio.txt");
+    match tokio::fs::read_to_string(&txt_path).await {
+        Ok(text) => {
+            let trimmed = text.trim().to_string();
+            (StatusCode::OK, Json(serde_json::json!({ "text": trimmed })))
+        }
+        Err(_) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err(format!(
+                    "whisper produced no output file. stdout: {stdout}, stderr: {stderr}"
+                )),
+            )
+        }
+    }
 }
 
 // ── Workers ──
@@ -1044,9 +1241,7 @@ async fn send_worker_message(
 
 // ── Frontend ──
 
-async fn serve_frontend(
-    _uri: axum::http::Uri,
-) -> Result<axum::response::Html<String>, StatusCode> {
+async fn serve_frontend(_uri: axum::http::Uri) -> Result<axum::response::Html<String>, StatusCode> {
     let html = include_str!("../web/index.html");
     Ok(axum::response::Html(html.to_string()))
 }
