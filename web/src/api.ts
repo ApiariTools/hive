@@ -50,70 +50,29 @@ export async function sendWorkerMessage(
   return res.json();
 }
 
-export interface StreamCallbacks {
-  onText: (text: string) => void;
-  onToolUse: (tool: string) => void;
-  onDone: (fullText: string) => void;
-  onError: (error: string) => void;
+export interface BotStatus {
+  status: string;
+  streaming_content: string;
+  tool_name: string | null;
 }
 
-export async function sendMessageStream(
+export function getBotStatus(
+  workspace: string,
+  bot: string,
+): Promise<BotStatus> {
+  return get(`/workspaces/${workspace}/bots/${bot}/status`);
+}
+
+export async function sendMessage(
   workspace: string,
   bot: string,
   message: string,
-  callbacks: StreamCallbacks,
   attachments?: Array<{ name: string; type: string; dataUrl: string }>,
-): Promise<void> {
+): Promise<{ ok: boolean }> {
   const res = await fetch(`${BASE}/workspaces/${workspace}/chat/${bot}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, attachments }),
   });
-
-  if (!res.ok || !res.body) {
-    callbacks.onError(`Request failed: ${res.status}`);
-    return;
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-
-    // Parse SSE events from buffer
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() || "";
-
-    for (const part of parts) {
-      const dataLine = part
-        .split("\n")
-        .find((line) => line.startsWith("data: "));
-      if (!dataLine) continue;
-
-      try {
-        const data = JSON.parse(dataLine.slice(6));
-        switch (data.type) {
-          case "text":
-            callbacks.onText(data.content);
-            break;
-          case "tool_use":
-            callbacks.onToolUse(data.tool);
-            break;
-          case "done":
-            callbacks.onDone(data.content);
-            break;
-          case "error":
-            callbacks.onError(data.content);
-            break;
-        }
-      } catch {
-        // Skip malformed events
-      }
-    }
-  }
+  return res.json();
 }

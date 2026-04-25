@@ -32,6 +32,16 @@ impl Db {
                 PRIMARY KEY (workspace, bot)
             );
 
+            CREATE TABLE IF NOT EXISTS bot_status (
+                workspace TEXT NOT NULL,
+                bot TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'idle',
+                streaming_content TEXT NOT NULL DEFAULT '',
+                tool_name TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (workspace, bot)
+            );
+
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 workspace TEXT NOT NULL,
@@ -97,7 +107,6 @@ impl Db {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        // Return in chronological order
         let mut rows = rows;
         rows.reverse();
         Ok(rows)
@@ -123,6 +132,58 @@ impl Db {
         );
         match result {
             Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ── Bot status (streaming state) ──
+
+    pub fn set_bot_status(
+        &self,
+        workspace: &str,
+        bot: &str,
+        status: &str,
+        streaming_content: &str,
+        tool_name: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO bot_status (workspace, bot, status, streaming_content, tool_name, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+             ON CONFLICT(workspace, bot) DO UPDATE SET
+               status = ?3, streaming_content = ?4, tool_name = ?5, updated_at = datetime('now')",
+            params![workspace, bot, status, streaming_content, tool_name],
+        )?;
+        Ok(())
+    }
+
+    pub fn append_streaming(&self, workspace: &str, bot: &str, text: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE bot_status SET streaming_content = streaming_content || ?1, updated_at = datetime('now')
+             WHERE workspace = ?2 AND bot = ?3",
+            params![text, workspace, bot],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_bot_status(&self, workspace: &str, bot: &str) -> Result<Option<BotStatus>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT status, streaming_content, tool_name FROM bot_status
+             WHERE workspace = ?1 AND bot = ?2",
+            params![workspace, bot],
+            |row| {
+                Ok(BotStatus {
+                    status: row.get(0)?,
+                    streaming_content: row.get(1)?,
+                    tool_name: row.get(2)?,
+                })
+            },
+        );
+        match result {
+            Ok(s) => Ok(Some(s)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -168,4 +229,11 @@ pub struct MessageRow {
     pub content: String,
     pub attachments: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BotStatus {
+    pub status: String,
+    pub streaming_content: String,
+    pub tool_name: Option<String>,
 }

@@ -3,10 +3,9 @@ use apiari_codex_sdk;
 use apiari_gemini_sdk;
 use axum::{
     Router,
-    body::Body,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{Json, Response},
+    response::Json,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -42,6 +41,10 @@ pub fn router(db: Db, config_dir: &std::path::Path) -> Router {
         .route(
             "/api/workspaces/{workspace}/chat/{bot}",
             post(send_message),
+        )
+        .route(
+            "/api/workspaces/{workspace}/bots/{bot}/status",
+            get(get_bot_status),
         )
         .route("/api/workspaces/{workspace}/workers", get(list_workers))
         .route(
@@ -240,21 +243,16 @@ async fn send_message(
     State(state): State<AppState>,
     Path((workspace, bot)): Path<(String, String)>,
     Json(body): Json<ChatRequest>,
-) -> Response {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     // Store user message with attachments
     let att_json = body
         .attachments
         .as_ref()
         .and_then(|a| serde_json::to_string(a).ok());
-    if let Err(e) = state.db.add_message(
-        &workspace,
-        &bot,
-        "user",
-        &body.message,
-        att_json.as_deref(),
-    ) {
-        return sse_error(&format!("DB error: {e}"));
-    }
+    state
+        .db
+        .add_message(&workspace, &bot, "user", &body.message, att_json.as_deref())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     info!("[chat] {workspace}/{bot}: {}", body.message);
 
@@ -277,8 +275,8 @@ async fn send_message(
         .and_then(|bots| bots.iter().find(|b| b.name == bot).cloned());
     let provider = bot_config
         .as_ref()
-        .map(|b| b.provider.as_str())
-        .unwrap_or("claude");
+        .map(|b| b.provider.clone())
+        .unwrap_or_else(|| "claude".to_string());
 
     // Check for existing session to resume
     let resume_id = state.db.get_session_id(&workspace, &bot).unwrap_or(None);
@@ -294,11 +292,6 @@ async fn send_message(
 
     let images = extract_images(&body.attachments);
 
-    let db = state.db.clone();
-    let bot_name = bot.clone();
-    let ws_name = workspace.clone();
-
-    // For non-image attachments, inline their content into the message text
     let text_attachments = extract_text_attachments(&body.attachments);
     let message = if text_attachments.is_empty() {
         body.message
@@ -311,10 +304,49 @@ async fn send_message(
         msg
     };
 
-    match provider {
-        "codex" => stream_codex(message, system_prompt, working_dir, resume_id, db, ws_name, bot_name),
-        "gemini" => stream_gemini(message, system_prompt, working_dir, resume_id, db, ws_name, bot_name),
-        _ => stream_claude(message, system_prompt, working_dir, resume_id, images, db, ws_name, bot_name),
+    let db = state.db.clone();
+    let ws_name = workspace.clone();
+    let bot_name = bot.clone();
+
+    // Set bot status to thinking
+    let _ = db.set_bot_status(&ws_name, &bot_name, "thinking", "", None);
+
+    // Spawn background task — daemon owns the session
+    tokio::spawn(async move {
+        let result = match provider.as_str() {
+            "codex" => run_bot_codex(message, system_prompt, working_dir, resume_id, &db, &ws_name, &bot_name).await,
+            "gemini" => run_bot_gemini(message, system_prompt, working_dir, resume_id, &db, &ws_name, &bot_name).await,
+            _ => run_bot_claude(message, system_prompt, working_dir, resume_id, images, &db, &ws_name, &bot_name).await,
+        };
+
+        if let Err(e) = result {
+            let _ = db.add_message(&ws_name, &bot_name, "assistant", &format!("Error: {e}"), None);
+        }
+
+        let _ = db.set_bot_status(&ws_name, &bot_name, "idle", "", None);
+    });
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── Bot status endpoint ──
+
+async fn get_bot_status(
+    State(state): State<AppState>,
+    Path((workspace, bot)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let status = state.db.get_bot_status(&workspace, &bot).unwrap_or(None);
+    match status {
+        Some(s) => Json(serde_json::json!({
+            "status": s.status,
+            "streaming_content": s.streaming_content,
+            "tool_name": s.tool_name,
+        })),
+        None => Json(serde_json::json!({
+            "status": "idle",
+            "streaming_content": "",
+            "tool_name": null,
+        })),
     }
 }
 
@@ -383,300 +415,209 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn stream_claude(
+// ── Background bot runners (write to DB, not SSE) ──
+
+async fn run_bot_claude(
     message: String,
     system_prompt: Option<String>,
     working_dir: Option<PathBuf>,
     resume_id: Option<String>,
     images: Vec<(String, String)>,
-    db: Db,
-    ws_name: String,
-    bot_name: String,
-) -> Response {
-    let stream = async_stream::stream! {
-        let opts = SessionOptions {
-            dangerously_skip_permissions: true,
-            include_partial_messages: true,
+    db: &Db,
+    ws: &str,
+    bot: &str,
+) -> Result<(), String> {
+    let opts = SessionOptions {
+        dangerously_skip_permissions: true,
+        include_partial_messages: true,
+        working_dir,
+        max_turns: Some(50),
+        resume: resume_id,
+        system_prompt,
+        ..Default::default()
+    };
+
+    let client = ClaudeClient::new();
+    let mut session = client.spawn(opts).await.map_err(|e| e.to_string())?;
+
+    let send_result = if images.is_empty() {
+        session.send_message(&message).await
+    } else {
+        session.send_message_with_images(&message, images).await
+    };
+    send_result.map_err(|e| e.to_string())?;
+
+    let _ = db.set_bot_status(ws, bot, "streaming", "", None);
+
+    let mut full_text = String::new();
+    loop {
+        match session.next_event().await {
+            Ok(Some(event)) => match event {
+                Event::Stream { assembled, .. } => {
+                    for asm in assembled {
+                        match asm {
+                            AssembledEvent::TextDelta { text, .. } => {
+                                full_text.push_str(&text);
+                                let _ = db.append_streaming(ws, bot, &text);
+                            }
+                            AssembledEvent::ContentBlockComplete { block, .. } => {
+                                if let ContentBlock::ToolUse { name, .. } = block {
+                                    let _ = db.set_bot_status(ws, bot, "streaming", &full_text, Some(&name));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Event::Assistant { message: msg, .. } => {
+                    for block in &msg.message.content {
+                        if let ContentBlock::Text { text } = block {
+                            if !text.is_empty() && full_text.is_empty() {
+                                full_text.push_str(text);
+                                let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
+                            }
+                        }
+                    }
+                }
+                Event::Result(result) => {
+                    let _ = db.set_session_id(ws, bot, &result.session_id);
+                    break;
+                }
+                _ => {}
+            },
+            Ok(None) => break,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    if !full_text.is_empty() {
+        let _ = db.add_message(ws, bot, "assistant", &full_text, None);
+    }
+    Ok(())
+}
+
+async fn run_bot_codex(
+    message: String,
+    system_prompt: Option<String>,
+    working_dir: Option<PathBuf>,
+    resume_id: Option<String>,
+    db: &Db,
+    ws: &str,
+    bot: &str,
+) -> Result<(), String> {
+    let client = apiari_codex_sdk::CodexClient::new();
+    let prompt = match system_prompt {
+        Some(sys) => format!("{sys}\n\n---\n\n{message}"),
+        None => message,
+    };
+
+    let mut execution = if let Some(ref sid) = resume_id {
+        client.exec_resume(&prompt, apiari_codex_sdk::ResumeOptions {
+            session_id: Some(sid.clone()),
+            full_auto: true,
             working_dir,
-            max_turns: Some(50),
-            resume: resume_id,
-            system_prompt,
             ..Default::default()
-        };
-
-        let client = ClaudeClient::new();
-        let mut session = match client.spawn(opts).await {
-            Ok(s) => s,
-            Err(e) => {
-                yield Ok::<_, std::io::Error>(sse_event("data",
-                    &serde_json::json!({"type":"error","content":format!("Failed to start claude: {e}")}).to_string()));
-                return;
-            }
-        };
-
-        let send_result = if images.is_empty() {
-            session.send_message(&message).await
-        } else {
-            session.send_message_with_images(&message, images).await
-        };
-        if let Err(e) = send_result {
-            yield Ok::<_, std::io::Error>(sse_event("data",
-                &serde_json::json!({"type":"error","content":format!("Failed to send: {e}")}).to_string()));
-            return;
-        }
-
-        let mut full_text = String::new();
-        loop {
-            match session.next_event().await {
-                Ok(Some(event)) => match event {
-                    Event::Stream { assembled, .. } => {
-                        for asm in assembled {
-                            match asm {
-                                AssembledEvent::TextDelta { text, .. } => {
-                                    full_text.push_str(&text);
-                                    let data = serde_json::json!({"type":"text","content":text});
-                                    yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                                }
-                                AssembledEvent::ContentBlockComplete { block, .. } => {
-                                    if let ContentBlock::ToolUse { name, .. } = block {
-                                        let data = serde_json::json!({"type":"tool_use","tool":name,"status":"running"});
-                                        yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    Event::Assistant { message, .. } => {
-                        for block in &message.message.content {
-                            if let ContentBlock::Text { text } = block {
-                                if !text.is_empty() && full_text.is_empty() {
-                                    full_text.push_str(text);
-                                    let data = serde_json::json!({"type":"text","content":text});
-                                    yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                                }
-                            }
-                        }
-                    }
-                    Event::Result(result) => {
-                        if !full_text.is_empty() {
-                            let _ = db.add_message(&ws_name, &bot_name, "assistant", &full_text, None);
-                        }
-                        let _ = db.set_session_id(&ws_name, &bot_name, &result.session_id);
-                        let data = serde_json::json!({"type":"done","content":full_text,"session_id":result.session_id});
-                        yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                        break;
-                    }
-                    _ => {}
-                },
-                Ok(None) => {
-                    if !full_text.is_empty() {
-                        let _ = db.add_message(&ws_name, &bot_name, "assistant", &full_text, None);
-                    }
-                    let data = serde_json::json!({"type":"done","content":full_text});
-                    yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                    break;
-                }
-                Err(e) => {
-                    let data = serde_json::json!({"type":"error","content":format!("SDK error: {e}")});
-                    yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                    break;
-                }
-            }
-        }
+        }).await.map_err(|e| e.to_string())?
+    } else {
+        client.exec(&prompt, apiari_codex_sdk::ExecOptions {
+            full_auto: true,
+            working_dir,
+            ..Default::default()
+        }).await.map_err(|e| e.to_string())?
     };
 
-    sse_response(stream)
+    let _ = db.set_bot_status(ws, bot, "streaming", "", None);
+    let mut full_text = String::new();
+
+    while let Ok(Some(event)) = execution.next_event().await {
+        match &event {
+            apiari_codex_sdk::Event::ThreadStarted { thread_id } => {
+                let _ = db.set_session_id(ws, bot, thread_id);
+            }
+            apiari_codex_sdk::Event::ItemCompleted { item } => {
+                if let Some(text) = item.text() {
+                    if !text.is_empty() {
+                        full_text = text.to_string();
+                        let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
+                    }
+                }
+            }
+            apiari_codex_sdk::Event::TurnFailed { error, .. } => {
+                let msg = error.as_ref().and_then(|e| e.message.as_deref()).unwrap_or("codex failed");
+                return Err(msg.to_string());
+            }
+            apiari_codex_sdk::Event::Error { message } => {
+                return Err(message.as_deref().unwrap_or("codex error").to_string());
+            }
+            _ => {}
+        }
+    }
+
+    if !full_text.is_empty() {
+        let _ = db.add_message(ws, bot, "assistant", &full_text, None);
+    }
+    Ok(())
 }
 
-fn stream_codex(
+async fn run_bot_gemini(
     message: String,
     system_prompt: Option<String>,
     working_dir: Option<PathBuf>,
     resume_id: Option<String>,
-    db: Db,
-    ws_name: String,
-    bot_name: String,
-) -> Response {
-    let stream = async_stream::stream! {
-        let client = apiari_codex_sdk::CodexClient::new();
-        let prompt = if let Some(sys) = system_prompt {
-            format!("{sys}\n\n---\n\n{message}")
-        } else {
-            message
-        };
-
-        let mut execution = if let Some(ref sid) = resume_id {
-            match client.exec_resume(&prompt, apiari_codex_sdk::ResumeOptions {
-                session_id: Some(sid.clone()),
-                full_auto: true,
-                working_dir,
-                ..Default::default()
-            }).await {
-                Ok(e) => e,
-                Err(e) => {
-                    yield Ok::<_, std::io::Error>(sse_event("data",
-                        &serde_json::json!({"type":"error","content":format!("Codex error: {e}")}).to_string()));
-                    return;
-                }
-            }
-        } else {
-            match client.exec(&prompt, apiari_codex_sdk::ExecOptions {
-                full_auto: true,
-                working_dir,
-                ..Default::default()
-            }).await {
-                Ok(e) => e,
-                Err(e) => {
-                    yield Ok::<_, std::io::Error>(sse_event("data",
-                        &serde_json::json!({"type":"error","content":format!("Codex error: {e}")}).to_string()));
-                    return;
-                }
-            }
-        };
-
-        let mut full_text = String::new();
-        while let Ok(Some(event)) = execution.next_event().await {
-            match &event {
-                apiari_codex_sdk::Event::ThreadStarted { thread_id } => {
-                    let _ = db.set_session_id(&ws_name, &bot_name, thread_id);
-                }
-                apiari_codex_sdk::Event::ItemCompleted { item } => {
-                    if let Some(text) = item.text() {
-                        if !text.is_empty() {
-                            full_text = text.to_string();
-                            let data = serde_json::json!({"type":"text","content":text});
-                            yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                        }
-                    }
-                }
-                apiari_codex_sdk::Event::TurnFailed { error, .. } => {
-                    let msg = error.as_ref().and_then(|e| e.message.as_deref()).unwrap_or("codex failed");
-                    let data = serde_json::json!({"type":"error","content":msg});
-                    yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                }
-                apiari_codex_sdk::Event::Error { message } => {
-                    let msg = message.as_deref().unwrap_or("codex error");
-                    let data = serde_json::json!({"type":"error","content":msg});
-                    yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                }
-                _ => {}
-            }
-        }
-
-        if !full_text.is_empty() {
-            let _ = db.add_message(&ws_name, &bot_name, "assistant", &full_text, None);
-        }
-        let data = serde_json::json!({"type":"done","content":full_text});
-        yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
+    db: &Db,
+    ws: &str,
+    bot: &str,
+) -> Result<(), String> {
+    let client = apiari_gemini_sdk::GeminiClient::new();
+    let prompt = match system_prompt {
+        Some(sys) => format!("{sys}\n\n---\n\n{message}"),
+        None => message,
     };
 
-    sse_response(stream)
-}
-
-fn stream_gemini(
-    message: String,
-    system_prompt: Option<String>,
-    working_dir: Option<PathBuf>,
-    resume_id: Option<String>,
-    db: Db,
-    ws_name: String,
-    bot_name: String,
-) -> Response {
-    let stream = async_stream::stream! {
-        let client = apiari_gemini_sdk::GeminiClient::new();
-        let prompt = if let Some(sys) = system_prompt {
-            format!("{sys}\n\n---\n\n{message}")
-        } else {
-            message
-        };
-
-        let mut execution = if let Some(ref sid) = resume_id {
-            match client.exec_resume(&prompt, apiari_gemini_sdk::SessionOptions {
-                session_id: Some(sid.clone()),
-                working_dir,
-                ..Default::default()
-            }).await {
-                Ok(e) => e,
-                Err(e) => {
-                    yield Ok::<_, std::io::Error>(sse_event("data",
-                        &serde_json::json!({"type":"error","content":format!("Gemini error: {e}")}).to_string()));
-                    return;
-                }
-            }
-        } else {
-            match client.exec(&prompt, apiari_gemini_sdk::GeminiOptions {
-                working_dir,
-                ..Default::default()
-            }).await {
-                Ok(e) => e,
-                Err(e) => {
-                    yield Ok::<_, std::io::Error>(sse_event("data",
-                        &serde_json::json!({"type":"error","content":format!("Gemini error: {e}")}).to_string()));
-                    return;
-                }
-            }
-        };
-
-        let mut full_text = String::new();
-        while let Ok(Some(event)) = execution.next_event().await {
-            match &event {
-                apiari_gemini_sdk::Event::ThreadStarted { thread_id } => {
-                    let _ = db.set_session_id(&ws_name, &bot_name, thread_id);
-                }
-                apiari_gemini_sdk::Event::ItemCompleted { item } => {
-                    if let Some(text) = item.text() {
-                        if !text.is_empty() {
-                            full_text = text.to_string();
-                            let data = serde_json::json!({"type":"text","content":text});
-                            yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                        }
-                    }
-                }
-                apiari_gemini_sdk::Event::TurnFailed { error, .. } => {
-                    let msg = error.as_ref().and_then(|e| e.message.as_deref()).unwrap_or("gemini failed");
-                    let data = serde_json::json!({"type":"error","content":msg});
-                    yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                }
-                apiari_gemini_sdk::Event::Error { message } => {
-                    let msg = message.as_deref().unwrap_or("gemini error");
-                    let data = serde_json::json!({"type":"error","content":msg});
-                    yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
-                }
-                _ => {}
-            }
-        }
-
-        if !full_text.is_empty() {
-            let _ = db.add_message(&ws_name, &bot_name, "assistant", &full_text, None);
-        }
-        let data = serde_json::json!({"type":"done","content":full_text});
-        yield Ok::<_, std::io::Error>(sse_event("data", &data.to_string()));
+    let mut execution = if let Some(ref sid) = resume_id {
+        client.exec_resume(&prompt, apiari_gemini_sdk::SessionOptions {
+            session_id: Some(sid.clone()),
+            working_dir,
+            ..Default::default()
+        }).await.map_err(|e| e.to_string())?
+    } else {
+        client.exec(&prompt, apiari_gemini_sdk::GeminiOptions {
+            working_dir,
+            ..Default::default()
+        }).await.map_err(|e| e.to_string())?
     };
 
-    sse_response(stream)
-}
+    let _ = db.set_bot_status(ws, bot, "streaming", "", None);
+    let mut full_text = String::new();
 
-fn sse_response(stream: impl futures_core::Stream<Item = Result<String, std::io::Error>> + Send + 'static) -> Response {
-    Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
-        .body(Body::from_stream(stream))
-        .unwrap()
-}
+    while let Ok(Some(event)) = execution.next_event().await {
+        match &event {
+            apiari_gemini_sdk::Event::ThreadStarted { thread_id } => {
+                let _ = db.set_session_id(ws, bot, thread_id);
+            }
+            apiari_gemini_sdk::Event::ItemCompleted { item } => {
+                if let Some(text) = item.text() {
+                    if !text.is_empty() {
+                        full_text = text.to_string();
+                        let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
+                    }
+                }
+            }
+            apiari_gemini_sdk::Event::TurnFailed { error, .. } => {
+                let msg = error.as_ref().and_then(|e| e.message.as_deref()).unwrap_or("gemini failed");
+                return Err(msg.to_string());
+            }
+            apiari_gemini_sdk::Event::Error { message } => {
+                return Err(message.as_deref().unwrap_or("gemini error").to_string());
+            }
+            _ => {}
+        }
+    }
 
-fn sse_event(event: &str, data: &str) -> String {
-    format!("event: {event}\ndata: {data}\n\n")
-}
-
-fn sse_error(msg: &str) -> Response {
-    let data = serde_json::json!({"type": "error", "content": msg});
-    Response::builder()
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .body(Body::from(format!("event: data\ndata: {}\n\n", data)))
-        .unwrap()
+    if !full_text.is_empty() {
+        let _ = db.add_message(ws, bot, "assistant", &full_text, None);
+    }
+    Ok(())
 }
 
 // ── Workers ──

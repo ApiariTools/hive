@@ -70,10 +70,34 @@ export default function App() {
     api.getWorkers(workspace).then(setWorkers);
   }, [workspace]);
 
-  // Load conversations when workspace or bot changes
+  // Load conversations when workspace or bot changes, poll for updates + bot status
   useEffect(() => {
     if (!workspace || !bot) return;
+    setMessages([]);
+    setLoading(false);
+    setLoadingStatus(undefined);
     api.getConversations(workspace, bot).then(setMessages);
+    api.getBotStatus(workspace, bot).then((s) => {
+      if (s.status !== "idle") {
+        setLoading(true);
+        setLoadingStatus(s.tool_name ? `Using ${s.tool_name}...` : "Thinking...");
+      }
+    });
+
+    // Poll every 2s for conversations + bot status
+    const interval = setInterval(() => {
+      api.getConversations(workspace, bot).then(setMessages);
+      api.getBotStatus(workspace, bot).then((s) => {
+        if (s.status === "idle") {
+          setLoading(false);
+          setLoadingStatus(undefined);
+        } else {
+          setLoading(true);
+          setLoadingStatus(s.tool_name ? `Using ${s.tool_name}...` : "Thinking...");
+        }
+      });
+    }, 2000);
+    return () => clearInterval(interval);
   }, [workspace, bot]);
 
   // Poll workers every 5s
@@ -106,12 +130,16 @@ export default function App() {
     setWorkspace(ws);
     setBot("Main");
     setWorkerId(null);
+    setLoading(false);
+    setLoadingStatus(undefined);
   }, []);
 
   const handleSelectBot = useCallback((name: string) => {
     setBot(name);
     setWorkerId(null);
     setMenuOpen(false);
+    setLoading(false);
+    setLoadingStatus(undefined);
   }, []);
 
   const handleSelectWorker = useCallback((id: string) => {
@@ -128,87 +156,17 @@ export default function App() {
 
   const handleSend = useCallback(
     async (text: string, attachments?: import("./components/ChatPanel").Attachment[]) => {
-      const attJson = attachments ? JSON.stringify(attachments) : null;
-      const userMsg: Message = {
-        id: Date.now(),
-        workspace,
-        bot,
-        role: "user",
-        content: text,
-        attachments: attJson,
-        created_at: new Date().toISOString(),
-      };
-      const streamId = Date.now() + 1;
-      let messageCreated = false;
-      setMessages((prev) => [...prev, userMsg]);
+      const apiAttachments = attachments?.map((a) => ({
+        name: a.name,
+        type: a.type,
+        dataUrl: a.dataUrl,
+      }));
+
+      // Fire and forget — daemon handles everything
       setLoading(true);
       setLoadingStatus("Thinking...");
-
-      try {
-        const apiAttachments = attachments?.map((a) => ({
-          name: a.name,
-          type: a.type,
-          dataUrl: a.dataUrl,
-        }));
-        await api.sendMessageStream(workspace, bot, text, {
-          onText: (chunk) => {
-            if (!messageCreated) {
-              // Skip empty/whitespace-only leading chunks
-              const trimmed = chunk.trimStart();
-              if (!trimmed) return;
-              messageCreated = true;
-              setLoading(false);
-              setLoadingStatus(undefined);
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: streamId,
-                  workspace,
-                  bot,
-                  role: "assistant",
-                  content: trimmed,
-                  attachments: null,
-                  created_at: new Date().toISOString(),
-                },
-              ]);
-            } else {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === streamId
-                    ? { ...m, content: m.content + chunk }
-                    : m,
-                ),
-              );
-            }
-          },
-          onToolUse: (tool) => {
-            setLoadingStatus(`Using ${tool}...`);
-          },
-          onDone: () => {
-            setLoading(false);
-            setLoadingStatus(undefined);
-          },
-          onError: (error) => {
-            setLoading(false);
-            setLoadingStatus(undefined);
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: streamId,
-                workspace,
-                bot,
-                role: "assistant",
-                content: `Error: ${error}`,
-                attachments: null,
-                created_at: new Date().toISOString(),
-              },
-            ]);
-          },
-        }, apiAttachments);
-      } catch {
-        setLoading(false);
-        setLoadingStatus(undefined);
-      }
+      await api.sendMessage(workspace, bot, text, apiAttachments);
+      // Polling will pick up the user message + bot response from DB
     },
     [workspace, bot],
   );
