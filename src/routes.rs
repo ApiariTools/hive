@@ -1,13 +1,16 @@
+use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions, streaming::AssembledEvent, types::ContentBlock};
 use axum::{
     Router,
+    body::Body,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Json,
+    response::{Json, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tower_http::cors::CorsLayer;
+use tracing::info;
 
 use crate::db::Db;
 
@@ -78,7 +81,10 @@ async fn list_bots(
     State(state): State<AppState>,
     Path(workspace): Path<String>,
 ) -> Json<Vec<BotInfo>> {
-    let config_path = state.config_dir.join("workspaces").join(format!("{workspace}.toml"));
+    let config_path = state
+        .config_dir
+        .join("workspaces")
+        .join(format!("{workspace}.toml"));
     let bots = load_bots_from_config(&config_path);
     Json(bots)
 }
@@ -95,7 +101,6 @@ struct BotInfo {
 }
 
 fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
-    // Always include Main bot
     let mut bots = vec![BotInfo {
         name: "Main".to_string(),
         color: Some("#f5c542".to_string()),
@@ -150,38 +155,184 @@ struct ConvQuery {
     limit: Option<i64>,
 }
 
-// ── Chat ──
-
-async fn send_message(
-    State(state): State<AppState>,
-    Path((workspace, bot)): Path<(String, String)>,
-    Json(body): Json<ChatRequest>,
-) -> Result<Json<ChatResponse>, StatusCode> {
-    // Store user message
-    state
-        .db
-        .add_message(&workspace, &bot, "user", &body.message, None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // TODO: Send to Claude and stream response
-    // For now, echo back a placeholder
-    let reply = format!("(hive is not wired to a model yet — you said: {})", body.message);
-    state
-        .db
-        .add_message(&workspace, &bot, "assistant", &reply, None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(ChatResponse { reply }))
-}
+// ── Chat (SSE streaming via apiari-claude-sdk) ──
 
 #[derive(Deserialize)]
 struct ChatRequest {
     message: String,
 }
 
-#[derive(Serialize)]
-struct ChatResponse {
-    reply: String,
+async fn send_message(
+    State(state): State<AppState>,
+    Path((workspace, bot)): Path<(String, String)>,
+    Json(body): Json<ChatRequest>,
+) -> Response {
+    // Store user message
+    if let Err(e) = state
+        .db
+        .add_message(&workspace, &bot, "user", &body.message, None)
+    {
+        return sse_error(&format!("DB error: {e}"));
+    }
+
+    info!("[chat] {workspace}/{bot}: {}", body.message);
+
+    // Resolve workspace root for working directory
+    let config_path = state
+        .config_dir
+        .join("workspaces")
+        .join(format!("{workspace}.toml"));
+    let working_dir = load_workspace_root(&config_path);
+
+    // Build session options
+    let opts = SessionOptions {
+        dangerously_skip_permissions: true,
+        include_partial_messages: true,
+        working_dir,
+        max_turns: Some(1),
+        ..Default::default()
+    };
+
+    // Spawn claude session via SDK
+    let client = ClaudeClient::new();
+    let mut session = match client.spawn(opts).await {
+        Ok(s) => s,
+        Err(e) => return sse_error(&format!("Failed to start claude: {e}")),
+    };
+
+    // Send the user's message
+    if let Err(e) = session.send_message(&body.message).await {
+        return sse_error(&format!("Failed to send message: {e}"));
+    }
+
+    // Stream events back as SSE
+    let db = state.db.clone();
+    let bot_name = bot.clone();
+    let ws_name = workspace.clone();
+
+    let stream = async_stream::stream! {
+        let mut full_text = String::new();
+
+        loop {
+            match session.next_event().await {
+                Ok(Some(event)) => {
+                    match event {
+                        Event::Stream { assembled, .. } => {
+                            for asm in assembled {
+                                match asm {
+                                    AssembledEvent::TextDelta { text, .. } => {
+                                        full_text.push_str(&text);
+                                        let data = serde_json::json!({
+                                            "type": "text",
+                                            "content": text
+                                        });
+                                        yield Ok::<_, std::io::Error>(
+                                            sse_event("data", &data.to_string())
+                                        );
+                                    }
+                                    AssembledEvent::ContentBlockComplete { block, .. } => {
+                                        if let ContentBlock::ToolUse { name, .. } = block {
+                                            let data = serde_json::json!({
+                                                "type": "tool_use",
+                                                "tool": name,
+                                                "status": "running"
+                                            });
+                                            yield Ok::<_, std::io::Error>(
+                                                sse_event("data", &data.to_string())
+                                            );
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Event::Assistant { message, .. } => {
+                            // Fallback: if not streaming, extract text from full message
+                            for block in &message.message.content {
+                                if let ContentBlock::Text { text } = block {
+                                    if !text.is_empty() && full_text.is_empty() {
+                                        full_text.push_str(text);
+                                        let data = serde_json::json!({
+                                            "type": "text",
+                                            "content": text
+                                        });
+                                        yield Ok::<_, std::io::Error>(
+                                            sse_event("data", &data.to_string())
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Event::Result(result) => {
+                            // Store the full response
+                            if !full_text.is_empty() {
+                                let _ = db.add_message(
+                                    &ws_name, &bot_name, "assistant", &full_text, None
+                                );
+                            }
+                            let data = serde_json::json!({
+                                "type": "done",
+                                "content": full_text,
+                                "session_id": result.session_id,
+                                "cost": result.total_cost_usd,
+                            });
+                            yield Ok::<_, std::io::Error>(
+                                sse_event("data", &data.to_string())
+                            );
+                            break;
+                        }
+                        _ => {} // System, User, RateLimit — skip
+                    }
+                }
+                Ok(None) => {
+                    // EOF — store whatever we have
+                    if !full_text.is_empty() {
+                        let _ = db.add_message(
+                            &ws_name, &bot_name, "assistant", &full_text, None
+                        );
+                    }
+                    let data = serde_json::json!({
+                        "type": "done",
+                        "content": full_text,
+                    });
+                    yield Ok::<_, std::io::Error>(
+                        sse_event("data", &data.to_string())
+                    );
+                    break;
+                }
+                Err(e) => {
+                    let data = serde_json::json!({
+                        "type": "error",
+                        "content": format!("SDK error: {e}"),
+                    });
+                    yield Ok::<_, std::io::Error>(
+                        sse_event("data", &data.to_string())
+                    );
+                    break;
+                }
+            }
+        }
+    };
+
+    Response::builder()
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "keep-alive")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+fn sse_event(event: &str, data: &str) -> String {
+    format!("event: {event}\ndata: {data}\n\n")
+}
+
+fn sse_error(msg: &str) -> Response {
+    let data = serde_json::json!({"type": "error", "content": msg});
+    Response::builder()
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .body(Body::from(format!("event: data\ndata: {}\n\n", data)))
+        .unwrap()
 }
 
 // ── Workers ──
@@ -190,7 +341,6 @@ async fn list_workers(
     State(state): State<AppState>,
     Path(workspace): Path<String>,
 ) -> Json<Vec<WorkerInfo>> {
-    // Read from swarm state.json if workspace has a root configured
     let config_path = state
         .config_dir
         .join("workspaces")
@@ -292,12 +442,9 @@ fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
 
 // ── Frontend ──
 
-// In dev, proxy to Vite. In release, serve embedded files.
 async fn serve_frontend(
     _uri: axum::http::Uri,
 ) -> Result<axum::response::Html<String>, StatusCode> {
-    // For now, serve a simple redirect to the dev server
-    // In production this would use rust-embed
     let html = include_str!("../web/index.html");
     Ok(axum::response::Html(html.to_string()))
 }

@@ -130,23 +130,57 @@ export default function App() {
         attachments: null,
         created_at: new Date().toISOString(),
       };
+      const streamId = Date.now() + 1;
       setMessages((prev) => [...prev, userMsg]);
       setLoading(true);
       setLoadingStatus("Thinking...");
 
-      try {
-        const reply = await api.sendMessage(workspace, bot, text);
-        const assistantMsg: Message = {
-          id: Date.now() + 1,
+      // Add an empty assistant message that we'll stream into
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: streamId,
           workspace,
           bot,
           role: "assistant",
-          content: reply,
+          content: "",
           attachments: null,
           created_at: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, assistantMsg]);
-      } finally {
+        },
+      ]);
+
+      try {
+        await api.sendMessageStream(workspace, bot, text, {
+          onText: (chunk) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === streamId
+                  ? { ...m, content: m.content + chunk }
+                  : m,
+              ),
+            );
+            setLoadingStatus(undefined);
+          },
+          onToolUse: (tool) => {
+            setLoadingStatus(`Using ${tool}...`);
+          },
+          onDone: () => {
+            setLoading(false);
+            setLoadingStatus(undefined);
+          },
+          onError: (error) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === streamId
+                  ? { ...m, content: `Error: ${error}` }
+                  : m,
+              ),
+            );
+            setLoading(false);
+            setLoadingStatus(undefined);
+          },
+        });
+      } catch {
         setLoading(false);
         setLoadingStatus(undefined);
       }
