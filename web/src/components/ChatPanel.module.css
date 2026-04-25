@@ -44,6 +44,7 @@
 .messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 16px 20px 24px;
   display: flex;
   flex-direction: column;
@@ -62,6 +63,7 @@
 .msg {
   max-width: 720px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .meta {
@@ -79,6 +81,7 @@
   font-size: 16px;
   line-height: 1.65;
   color: var(--text-strong);
+  overflow-x: auto;
 }
 
 .text p { margin: 0 0 8px; }
