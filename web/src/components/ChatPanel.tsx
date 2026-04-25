@@ -94,6 +94,9 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
 
       <div className={styles.inputArea}>
         <div className={styles.inputRow}>
+          <button type="button" className={styles.attachBtn}>
+            +
+          </button>
           <textarea
             ref={textareaRef}
             className={styles.inputField}

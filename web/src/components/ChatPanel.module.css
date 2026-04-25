@@ -110,7 +110,7 @@
 /* ── Input ── */
 
 .inputArea {
-  padding: 10px 16px;
+  padding: 12px 20px 32px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
