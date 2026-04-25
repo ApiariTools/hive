@@ -122,6 +122,8 @@ struct BotInfo {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
+    prompt_file: Option<String>,
+    #[serde(default)]
     watch: Vec<String>,
 }
 
@@ -136,6 +138,7 @@ fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
         role: Some("Workspace assistant".to_string()),
         provider: default_provider(),
         model: None,
+        prompt_file: None,
         watch: vec![],
     }];
 
@@ -173,11 +176,28 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
     let ws_name = ws.name.as_deref().unwrap_or("unknown");
     let ws_desc = ws.description.as_deref().unwrap_or("");
 
-    // Find this bot's role
-    let bot_role = ws_config
+    let bot_config = ws_config
         .bots
         .as_ref()
-        .and_then(|bots| bots.iter().find(|b| b.name == bot_name))
+        .and_then(|bots| bots.iter().find(|b| b.name == bot_name));
+
+    // Check for a bot-level prompt file (replaces the default identity section)
+    if let Some(ref prompt_file) = bot_config.and_then(|b| b.prompt_file.clone()) {
+        let root = ws.root.as_deref().unwrap_or(".");
+        let path = std::path::Path::new(root).join(prompt_file);
+        if let Ok(custom) = std::fs::read_to_string(&path) {
+            // Custom prompt gets workspace context appended
+            let mut prompt = custom;
+            if !prompt.ends_with('\n') { prompt.push('\n'); }
+            prompt.push_str(&format!("\nWorkspace: {ws_name} — {ws_desc}\n"));
+            if let Some(ref root) = ws.root {
+                prompt.push_str(&format!("Working directory: {root}\n"));
+            }
+            return prompt;
+        }
+    }
+
+    let bot_role = bot_config
         .and_then(|b| b.role.as_deref())
         .unwrap_or("Workspace assistant");
 
@@ -185,9 +205,6 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         "You are {bot_name}, a bot in the \"{ws_name}\" workspace.\n\
          Workspace: {ws_desc}\n\
          Your role: {bot_role}\n\n\
-         Be concise. Short sentences. Use markdown formatting — bullets, bold, \
-         code blocks — to make responses scannable. No walls of text. \
-         Lead with the answer, explain after if needed.\n\
          If you're unsure, ask instead of guessing.\n"
     );
 
