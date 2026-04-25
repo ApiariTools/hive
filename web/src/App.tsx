@@ -40,6 +40,14 @@ function pushHash(r: Route) {
 // ── App ──
 
 export default function App() {
+  // Prevent iOS Safari from scrolling the document when keyboard opens.
+  // Our app has its own scrollable areas — window scroll is never wanted.
+  useEffect(() => {
+    const lock = () => window.scrollTo(0, 0);
+    window.addEventListener("scroll", lock, { passive: false });
+    return () => window.removeEventListener("scroll", lock);
+  }, []);
+
   const initial = parseHash();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState(initial.workspace);

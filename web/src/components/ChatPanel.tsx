@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { Message } from "../types";
+import { useKeyboardHeight } from "../useKeyboardHeight";
 import styles from "./ChatPanel.module.css";
 
 interface Props {
@@ -14,6 +15,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const kbHeight = useKeyboardHeight();
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -92,7 +94,11 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
         <div ref={bottomRef} />
       </div>
 
-      <form className={styles.inputArea} onSubmit={handleSubmit}>
+      <form
+        className={styles.inputArea}
+        onSubmit={handleSubmit}
+        style={kbHeight > 0 ? { paddingBottom: kbHeight + 16 } : undefined}
+      >
         <div className={styles.inputRow}>
           <button type="button" className={styles.attachBtn}>
             +
