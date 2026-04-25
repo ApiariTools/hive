@@ -59,7 +59,10 @@ pub fn router(db: Db, config_dir: &std::path::Path, events: EventHub) -> Router 
         )
         .route("/api/transcribe", post(transcribe_audio))
         .route("/api/workspaces/{workspace}/unread", get(get_unread))
-        .route("/api/workspaces/{workspace}/seen/{bot}", post(mark_seen))
+        .route(
+            "/api/workspaces/{workspace}/seen/{bot}",
+            post(mark_seen),
+        )
         .route("/ws", get(ws_handler))
         .route("/api/workspaces/{workspace}/repos", get(list_repos))
         .route("/api/workspaces/{workspace}/workers", get(list_workers))
@@ -434,10 +437,8 @@ async fn send_message(
     // Set bot status to thinking
     let _ = db.set_bot_status(&ws_name, &bot_name, "thinking", "", None);
     events.send(HiveEvent::BotStatus {
-        workspace: ws_name.clone(),
-        bot: bot_name.clone(),
-        status: "thinking".to_string(),
-        tool_name: None,
+        workspace: ws_name.clone(), bot: bot_name.clone(),
+        status: "thinking".to_string(), tool_name: None,
     });
 
     // Spawn background task — daemon owns the session
@@ -497,16 +498,12 @@ async fn send_message(
 
         let _ = db.set_bot_status(&ws_name, &bot_name, "idle", "", None);
         events.send(HiveEvent::BotStatus {
-            workspace: ws_name.clone(),
-            bot: bot_name.clone(),
-            status: "idle".to_string(),
-            tool_name: None,
+            workspace: ws_name.clone(), bot: bot_name.clone(),
+            status: "idle".to_string(), tool_name: None,
         });
         events.send(HiveEvent::Message {
-            workspace: ws_name,
-            bot: bot_name,
-            role: "assistant".to_string(),
-            content: "".to_string(),
+            workspace: ws_name, bot: bot_name,
+            role: "assistant".to_string(), content: "".to_string(),
         });
     });
 
@@ -1075,7 +1072,7 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
 
 // ── Repos ──
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct RepoInfo {
     name: String,
     path: String,
@@ -1105,10 +1102,20 @@ async fn list_repos(
         None => return Json(vec![]),
     };
 
-    // Collect all repo paths from .swarm/state.json worktrees
-    let state_path = root.join(".swarm/state.json");
-    let all_workers = read_swarm_workers(&root);
+    let repos = tokio::task::spawn_blocking(move || build_repos_list(&root))
+        .await
+        .unwrap_or_default();
 
+    Json(repos)
+}
+
+fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
+    let state_path = root.join(".swarm/state.json");
+    let all_workers = read_swarm_workers(root);
+
+    // Parse state.json once to build worktree_id -> repo_path map
+    let mut worker_repo_map: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
     let mut repo_paths: std::collections::HashMap<PathBuf, Vec<WorkerInfo>> =
         std::collections::HashMap::new();
 
@@ -1119,7 +1126,10 @@ async fn list_repos(
                     if let Some(repo_path) = wt.get("repo_path").and_then(|p| p.as_str()) {
                         let canon = std::fs::canonicalize(repo_path)
                             .unwrap_or_else(|_| PathBuf::from(repo_path));
-                        repo_paths.entry(canon).or_default();
+                        repo_paths.entry(canon.clone()).or_default();
+                        if let Some(id) = wt.get("id").and_then(|i| i.as_str()) {
+                            worker_repo_map.insert(id.to_string(), canon);
+                        }
                     }
                 }
             }
@@ -1128,38 +1138,27 @@ async fn list_repos(
 
     // Also check workspace root
     if root.join(".git").exists() {
-        let canon = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         repo_paths.entry(canon).or_default();
     }
 
-    // Assign workers to repos
+    // Assign workers to repos using the pre-built map
     for worker in &all_workers {
-        // Try to find which repo this worker belongs to by checking worktree state
-        if let Ok(content) = std::fs::read_to_string(&state_path) {
-            if let Ok(state_val) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(worktrees) = state_val.get("worktrees").and_then(|w| w.as_array()) {
-                    for wt in worktrees {
-                        let wt_id = wt.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                        if wt_id == worker.id {
-                            if let Some(repo_path) = wt.get("repo_path").and_then(|p| p.as_str()) {
-                                let canon = std::fs::canonicalize(repo_path)
-                                    .unwrap_or_else(|_| PathBuf::from(repo_path));
-                                repo_paths.entry(canon).or_default().push(WorkerInfo {
-                                    id: worker.id.clone(),
-                                    branch: worker.branch.clone(),
-                                    status: worker.status.clone(),
-                                    agent: worker.agent.clone(),
-                                    pr_url: worker.pr_url.clone(),
-                                    pr_title: worker.pr_title.clone(),
-                                    description: worker.description.clone(),
-                                    elapsed_secs: worker.elapsed_secs,
-                                    dispatched_by: worker.dispatched_by.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(repo_path) = worker_repo_map.get(&worker.id) {
+            repo_paths
+                .entry(repo_path.clone())
+                .or_default()
+                .push(WorkerInfo {
+                    id: worker.id.clone(),
+                    branch: worker.branch.clone(),
+                    status: worker.status.clone(),
+                    agent: worker.agent.clone(),
+                    pr_url: worker.pr_url.clone(),
+                    pr_title: worker.pr_title.clone(),
+                    description: worker.description.clone(),
+                    elapsed_secs: worker.elapsed_secs,
+                    dispatched_by: worker.dispatched_by.clone(),
+                });
         }
     }
 
@@ -1193,12 +1192,47 @@ async fn list_repos(
         .collect();
 
     repos.sort_by(|a, b| a.name.cmp(&b.name));
-    Json(repos)
+    repos
 }
 
-/// Returns (ahead, behind) counts relative to origin/main. (-1, -1) on error.
+/// Detect the default remote branch (origin/main, origin/master, etc.)
+fn get_origin_default_ref(repo_path: &std::path::Path) -> Option<String> {
+    // Try symbolic-ref first
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repo_path)
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let refname = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !refname.is_empty() {
+            return Some(refname);
+        }
+    }
+    // Fallback: try origin/main, then origin/master
+    for branch in &["origin/main", "origin/master"] {
+        let check = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(repo_path)
+            .args(["rev-parse", "--verify", branch])
+            .output();
+        if let Ok(o) = check {
+            if o.status.success() {
+                return Some(branch.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Returns (ahead, behind) counts relative to the origin default branch. (-1, -1) on error.
 fn get_git_sync_status(repo_path: &std::path::Path) -> (i64, i64) {
-    // First check if HEAD and origin/main exist
+    let origin_ref = match get_origin_default_ref(repo_path) {
+        Some(r) => r,
+        None => return (-1, -1),
+    };
+
     let head = std::process::Command::new("git")
         .args(["-C"])
         .arg(repo_path)
@@ -1207,10 +1241,10 @@ fn get_git_sync_status(repo_path: &std::path::Path) -> (i64, i64) {
     let origin = std::process::Command::new("git")
         .args(["-C"])
         .arg(repo_path)
-        .args(["rev-parse", "origin/main"])
+        .args(["rev-parse", &origin_ref])
         .output();
 
-    let (head_out, origin_out) = match (head, origin) {
+    let (head_sha, origin_sha) = match (head, origin) {
         (Ok(h), Ok(o)) if h.status.success() && o.status.success() => {
             let h_sha = String::from_utf8_lossy(&h.stdout).trim().to_string();
             let o_sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -1219,15 +1253,15 @@ fn get_git_sync_status(repo_path: &std::path::Path) -> (i64, i64) {
         _ => return (-1, -1),
     };
 
-    if head_out == origin_out {
+    if head_sha == origin_sha {
         return (0, 0);
     }
 
-    // Use rev-list to count
+    let rev_list_ref = format!("HEAD...{origin_ref}");
     let output = std::process::Command::new("git")
         .args(["-C"])
         .arg(repo_path)
-        .args(["rev-list", "--left-right", "--count", "HEAD...origin/main"])
+        .args(["rev-list", "--left-right", "--count", &rev_list_ref])
         .output();
 
     match output {

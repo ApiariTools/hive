@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { TopBar } from "./components/TopBar";
 import { BotNav } from "./components/BotNav";
 import { ChatPanel } from "./components/ChatPanel";
@@ -229,6 +229,15 @@ export default function App() {
     [workspace, bot],
   );
 
+  // Merge fresh worker data (5s poll) into repos (30s poll) so worker status stays current
+  const reposWithFreshWorkers = useMemo(() => {
+    const workerMap = new Map(workers.map((w) => [w.id, w]));
+    return repos.map((repo) => ({
+      ...repo,
+      workers: repo.workers.map((rw) => workerMap.get(rw.id) || rw),
+    }));
+  }, [repos, workers]);
+
   const selectedWorker = workerId
     ? workers.find((w) => w.id === workerId) || null
     : null;
@@ -280,7 +289,7 @@ export default function App() {
           />
         )}
         <ReposPanel
-          repos={repos}
+          repos={reposWithFreshWorkers}
           onSelectWorker={(id) => {
             setWorkersOpen(false);
             handleSelectWorker(id);
