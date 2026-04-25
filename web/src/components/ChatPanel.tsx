@@ -27,6 +27,11 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [transcribeError, setTranscribeError] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -73,6 +78,69 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
 
   function removeAttachment(index: number) {
     setAttachments((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function startRecording() {
+    setTranscribeError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        await transcribeAudio(blob);
+      };
+
+      mediaRecorder.start();
+      setRecording(true);
+    } catch {
+      setTranscribeError("Microphone access denied");
+    }
+  }
+
+  function stopRecording() {
+    mediaRecorderRef.current?.stop();
+    setRecording(false);
+  }
+
+  async function transcribeAudio(blob: Blob) {
+    setTranscribing(true);
+    setTranscribeError(null);
+    try {
+      const form = new FormData();
+      form.append("audio", blob, "audio.webm");
+      const res = await fetch("/api/transcribe", { method: "POST", body: form });
+      const data = await res.json();
+      if (data.error) {
+        setTranscribeError(data.error);
+      } else if (data.text) {
+        const el = textareaRef.current;
+        if (el) {
+          const current = el.value;
+          el.value = current ? current + " " + data.text : data.text;
+          autoGrow();
+        }
+      }
+    } catch {
+      setTranscribeError("Transcription failed");
+    } finally {
+      setTranscribing(false);
+    }
+  }
+
+  function handleMicClick() {
+    if (recording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
   }
 
   function formatTime(iso: string): string {
@@ -199,6 +267,15 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
           >
             +
           </button>
+          <button
+            type="button"
+            className={`${styles.micBtn} ${recording ? styles.micRecording : ""}`}
+            onClick={handleMicClick}
+            disabled={loading || transcribing}
+            title={recording ? "Stop recording" : "Record audio"}
+          >
+            {transcribing ? "..." : recording ? "\u25A0" : "\uD83C\uDFA4"}
+          </button>
           <textarea
             ref={textareaRef}
             className={styles.inputField}
@@ -218,6 +295,8 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
             &uarr;
           </button>
         </div>
+        {transcribing && <div className={styles.transcribeStatus}>Transcribing...</div>}
+        {transcribeError && <div className={styles.transcribeError}>{transcribeError}</div>}
       </div>
     </div>
   );
