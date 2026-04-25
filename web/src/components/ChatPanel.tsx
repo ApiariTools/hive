@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Mic, Square, Paperclip, ArrowUp } from "lucide-react";
 import type { Message } from "../types";
 import styles from "./ChatPanel.module.css";
 
@@ -299,7 +300,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
             className={styles.attachBtn}
             onClick={() => fileInputRef.current?.click()}
           >
-            +
+            <Paperclip size={16} />
           </button>
           <button
             type="button"
@@ -308,7 +309,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
             disabled={loading || micState === "stopping" || micState === "transcribing"}
             title={micState === "recording" ? "Stop recording" : "Record audio"}
           >
-            {micState === "transcribing" || micState === "stopping" ? "..." : micState === "recording" ? "\u25A0" : "\uD83C\uDFA4"}
+            {micState === "transcribing" || micState === "stopping" ? "..." : micState === "recording" ? <Square size={16} /> : <Mic size={16} />}
           </button>
           <textarea
             ref={textareaRef}
@@ -326,7 +327,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
             onMouseDown={(e) => e.preventDefault()}
             onClick={send}
           >
-            &uarr;
+            <ArrowUp size={18} />
           </button>
         </div>
         {micState === "transcribing" && <div className={styles.transcribeStatus}>Transcribing...</div>}
