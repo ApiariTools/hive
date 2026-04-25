@@ -230,7 +230,13 @@ export default function App() {
   );
 
   // Merge fresh worker data (5s poll) into repos (30s poll) so worker status stays current
-  const reposWithFreshWorkers = repos;
+  const reposWithFreshWorkers = useMemo(() => {
+    const workerMap = new Map(workers.map((w) => [w.id, w]));
+    return repos.map((repo) => ({
+      ...repo,
+      workers: repo.workers.map((rw) => workerMap.get(rw.id) || rw),
+    }));
+  }, [repos, workers]);
 
   const selectedWorker = workerId
     ? workers.find((w) => w.id === workerId) || null
@@ -284,6 +290,10 @@ export default function App() {
         )}
         <ReposPanel
           repos={reposWithFreshWorkers}
+          onSelectWorker={(id) => {
+            setWorkersOpen(false);
+            handleSelectWorker(id);
+          }}
           mobileOpen={workersOpen}
           onClose={() => setWorkersOpen(false)}
         />

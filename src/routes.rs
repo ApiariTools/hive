@@ -1077,7 +1077,9 @@ struct RepoInfo {
     name: String,
     path: String,
     has_swarm: bool,
-    worker_count: usize,
+    is_clean: bool,
+    branch: String,
+    workers: Vec<WorkerInfo>,
 }
 
 async fn list_repos(
@@ -1107,27 +1109,36 @@ async fn list_repos(
 }
 
 fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
-    // Count workers per repo from swarm state
-    let mut worker_counts: std::collections::HashMap<String, usize> =
+    let all_workers = read_swarm_workers(root);
+
+    // Map workers to repos from swarm state
+    let mut repo_workers: std::collections::HashMap<String, Vec<WorkerInfo>> =
         std::collections::HashMap::new();
     let state_path = root.join(".swarm/state.json");
     if let Ok(content) = std::fs::read_to_string(&state_path) {
         if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(worktrees) = state.get("worktrees").and_then(|w| w.as_array()) {
                 for wt in worktrees {
-                    if let Some(repo_path) = wt.get("repo_path").and_then(|p| p.as_str()) {
-                        let name = std::path::Path::new(repo_path)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-                        *worker_counts.entry(name.to_string()).or_default() += 1;
+                    let repo_name = wt
+                        .get("repo_path")
+                        .and_then(|p| p.as_str())
+                        .and_then(|p| std::path::Path::new(p).file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let wt_id = wt.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                    if let Some(worker) = all_workers.iter().find(|w| w.id == wt_id) {
+                        repo_workers
+                            .entry(repo_name)
+                            .or_default()
+                            .push(worker.clone());
                     }
                 }
             }
         }
     }
 
-    // Scan for git repos in workspace
+    // Scan for git repos
     let mut repos = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
@@ -1138,13 +1149,36 @@ fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .to_string();
+
+                // Quick git status check
+                let is_clean = std::process::Command::new("git")
+                    .args(["-C"])
+                    .arg(&path)
+                    .args(["status", "--porcelain"])
+                    .output()
+                    .map(|o| o.status.success() && o.stdout.is_empty())
+                    .unwrap_or(false);
+
+                let branch = std::process::Command::new("git")
+                    .args(["-C"])
+                    .arg(&path)
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
                 let has_swarm = root.join(".swarm").exists();
-                let worker_count = worker_counts.get(&name).copied().unwrap_or(0);
+                let workers = repo_workers.remove(&name).unwrap_or_default();
+
                 repos.push(RepoInfo {
                     name,
                     path: path.to_string_lossy().to_string(),
                     has_swarm,
-                    worker_count,
+                    is_clean,
+                    branch,
+                    workers,
                 });
             }
         }

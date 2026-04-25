@@ -14,135 +14,105 @@
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--text-faint);
-  padding: 0 20px 16px;
+  padding: 0 16px 12px;
 }
 
 .repoRow {
-  padding: 12px 20px;
+  padding: 10px 16px;
   border-top: 1px solid var(--border);
 }
 
 .repoHeader {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
-.repoDot {
-  width: 8px;
-  height: 8px;
+.statusDot {
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
 .repoName {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-strong);
 }
 
-.syncBadge {
+.repoBranch {
+  font-size: 12px;
+  color: var(--text-faint);
   margin-left: auto;
-  font-size: 13px;
+}
+
+.dirtyBadge {
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(245, 197, 66, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
   font-weight: 500;
 }
 
-.syncSynced { color: #4ade80; }
-.syncBehind { color: var(--accent); }
-.syncAhead { color: #60a5fa; }
-.syncDiverged { color: #f87171; }
-.syncUnknown { color: var(--text-faint); }
-
-.dotSynced { background: #4ade80; }
-.dotBehind { background: var(--accent); }
-.dotAhead { background: #60a5fa; }
-.dotDiverged { background: #f87171; }
-.dotUnknown { background: var(--text-faint); }
-
 .workerList {
   margin-top: 8px;
-  padding-left: 18px;
-  border-left: 2px solid var(--border);
-  margin-left: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .workerCard {
-  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 5px;
   cursor: pointer;
-  border-radius: 6px;
-  transition: background 0.1s;
+  font-size: 13px;
+  color: var(--text);
 }
 
 .workerCard:hover {
   background: var(--bg-card);
 }
 
-.workerTop {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
 .workerDot {
-  width: 7px;
-  height: 7px;
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-.running {
-  animation: pulse 2s infinite;
-}
-
 .workerId {
-  font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-strong);
 }
 
-.workerTime {
-  margin-left: auto;
-  font-size: 12px;
+.workerBranch {
   color: var(--text-faint);
-}
-
-.workerDesc {
-  font-size: 13px;
-  color: var(--text);
-  line-height: 1.4;
-  margin-bottom: 6px;
-}
-
-.tags {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.tag {
   font-size: 12px;
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 4px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.tagPr {
-  background: var(--accent-soft);
+.prBadge {
+  font-size: 10px;
   color: var(--accent);
+  background: rgba(245, 197, 66, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
 }
 
-.tagBot {
-  background: rgba(170, 170, 170, 0.08);
+.empty {
   color: var(--text-faint);
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  font-size: 14px;
+  text-align: center;
+  margin-top: 40px;
 }
 
 .backdrop {
@@ -157,6 +127,7 @@
     background: rgba(0, 0, 0, 0.5);
     z-index: 99;
   }
+
   .panel {
     display: none;
     position: fixed;

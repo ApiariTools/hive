@@ -25,7 +25,9 @@ export interface Repo {
   name: string;
   path: string;
   has_swarm: boolean;
-  worker_count: number;
+  is_clean: boolean;
+  branch: string;
+  workers: Worker[];
 }
 
 export interface Message {
