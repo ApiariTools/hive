@@ -141,6 +141,11 @@ export default function App() {
       setLoadingStatus("Thinking...");
 
       try {
+        const apiAttachments = attachments?.map((a) => ({
+          name: a.name,
+          type: a.type,
+          dataUrl: a.dataUrl,
+        }));
         await api.sendMessageStream(workspace, bot, text, {
           onText: (chunk) => {
             if (!messageCreated) {
@@ -195,7 +200,7 @@ export default function App() {
               },
             ]);
           },
-        });
+        }, apiAttachments);
       } catch {
         setLoading(false);
         setLoadingStatus(undefined);

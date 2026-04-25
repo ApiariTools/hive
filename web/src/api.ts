@@ -39,11 +39,12 @@ export async function sendMessageStream(
   bot: string,
   message: string,
   callbacks: StreamCallbacks,
+  attachments?: Array<{ name: string; type: string; dataUrl: string }>,
 ): Promise<void> {
   const res = await fetch(`${BASE}/workspaces/${workspace}/chat/${bot}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, attachments }),
   });
 
   if (!res.ok || !res.body) {

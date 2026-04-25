@@ -203,6 +203,17 @@ struct ConvQuery {
 #[derive(Deserialize)]
 struct ChatRequest {
     message: String,
+    #[serde(default)]
+    attachments: Option<Vec<ChatAttachment>>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct ChatAttachment {
+    name: String,
+    #[serde(rename = "type")]
+    mime_type: String,
+    #[serde(rename = "dataUrl")]
+    data_url: String,
 }
 
 async fn send_message(
@@ -210,11 +221,18 @@ async fn send_message(
     Path((workspace, bot)): Path<(String, String)>,
     Json(body): Json<ChatRequest>,
 ) -> Response {
-    // Store user message
-    if let Err(e) = state
-        .db
-        .add_message(&workspace, &bot, "user", &body.message, None)
-    {
+    // Store user message with attachments
+    let att_json = body
+        .attachments
+        .as_ref()
+        .and_then(|a| serde_json::to_string(a).ok());
+    if let Err(e) = state.db.add_message(
+        &workspace,
+        &bot,
+        "user",
+        &body.message,
+        att_json.as_deref(),
+    ) {
         return sse_error(&format!("DB error: {e}"));
     }
 
@@ -263,8 +281,34 @@ async fn send_message(
         Err(e) => return sse_error(&format!("Failed to start claude: {e}")),
     };
 
-    // Send the user's message
-    if let Err(e) = session.send_message(&body.message).await {
+    // Send the user's message (with images if attached)
+    let images: Vec<(String, String)> = body
+        .attachments
+        .as_ref()
+        .map(|atts| {
+            atts.iter()
+                .filter(|a| a.mime_type.starts_with("image/"))
+                .filter_map(|a| {
+                    // data_url format: "data:image/png;base64,iVBOR..."
+                    let parts: Vec<&str> = a.data_url.splitn(2, ',').collect();
+                    if parts.len() == 2 {
+                        Some((a.mime_type.clone(), parts[1].to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let send_result = if images.is_empty() {
+        session.send_message(&body.message).await
+    } else {
+        session
+            .send_message_with_images(&body.message, images)
+            .await
+    };
+    if let Err(e) = send_result {
         return sse_error(&format!("Failed to send message: {e}"));
     }
 
