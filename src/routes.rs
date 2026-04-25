@@ -1305,7 +1305,7 @@ async fn list_workers(
     Json(workers)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct WorkerInfo {
     id: String,
     branch: String,
