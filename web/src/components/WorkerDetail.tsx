@@ -16,9 +16,12 @@ function branchName(branch: string): string {
   return branch.replace(/^swarm\//, "");
 }
 
+type InfoTab = "output" | "task";
+
 export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [infoTab, setInfoTab] = useState<InfoTab>("output");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -36,19 +39,14 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
 
   return (
     <div className={styles.layout}>
-      {/* Left: task info */}
+      {/* Left: worker info */}
       <div className={styles.info}>
-        <button className={styles.back} onClick={onBack}>
-          &larr; Back
-        </button>
-
-        <h1 className={styles.title}>{worker.id}</h1>
-        <div className={styles.subtitle}>{branchName(worker.branch)}</div>
-
-        <div className={styles.stats}>
-          <div className={styles.stat}>
-            <div className={styles.statLabel}>Status</div>
-            <div className={styles.statValue}>
+        {/* Header with back, title, status, actions */}
+        <div className={styles.infoHeader}>
+          <button className={styles.back} onClick={onBack}>&larr;</button>
+          <div className={styles.headerMid}>
+            <div className={styles.title}>{worker.id}</div>
+            <div className={styles.subtitle}>
               <span
                 className={`${styles.statusDot} ${worker.status === "running" || worker.status === "active" ? styles.running : ""}`}
                 style={{
@@ -60,64 +58,62 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
                         : "var(--text-faint)",
                 }}
               />
-              {worker.status}
+              {worker.status} &middot; {worker.agent} &middot; {branchName(worker.branch)}
             </div>
           </div>
-          <div className={styles.stat}>
-            <div className={styles.statLabel}>Agent</div>
-            <div className={styles.statValue}>{worker.agent}</div>
-          </div>
-        </div>
-
-        {worker.pr_url && (
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>Pull Request</div>
-            <div className={styles.card}>
-              <div className={styles.cardRow}>
-                <span className={styles.cardValue}>
-                  <a href={worker.pr_url} target="_blank" rel="noopener noreferrer">
-                    {worker.pr_title || "View PR"}
-                  </a>
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {detail?.output && (
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>Output</div>
-            <div className={styles.outputText}>
-              <Markdown remarkPlugins={[remarkGfm]}>{detail.output}</Markdown>
-            </div>
-          </div>
-        )}
-
-        {detail?.prompt && (
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>Task Prompt</div>
-            <div className={styles.taskText}>
-              <Markdown remarkPlugins={[remarkGfm]}>{detail.prompt}</Markdown>
-            </div>
-          </div>
-        )}
-
-        <div className={styles.section}>
-          <div className={styles.actions}>
+          <div className={styles.headerActions}>
             {worker.pr_url && (
               <a
                 href={worker.pr_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className={`${styles.btn} ${styles.btnPrimary}`}
+                className={styles.headerBtn}
               >
-                View PR
+                PR
               </a>
             )}
-            <button className={`${styles.btn} ${styles.btnDanger}`}>
-              Close worker
+            <button className={`${styles.headerBtn} ${styles.headerBtnDanger}`}>
+              Close
             </button>
           </div>
+        </div>
+
+        {/* Tabs */}
+        <div className={styles.tabs}>
+          <button
+            className={`${styles.tab} ${infoTab === "output" ? styles.tabActive : ""}`}
+            onClick={() => setInfoTab("output")}
+          >
+            Output
+          </button>
+          <button
+            className={`${styles.tab} ${infoTab === "task" ? styles.tabActive : ""}`}
+            onClick={() => setInfoTab("task")}
+          >
+            Task
+          </button>
+        </div>
+
+        {/* Tab content */}
+        <div className={styles.tabContent}>
+          {infoTab === "output" && (
+            detail?.output ? (
+              <div className={styles.prose}>
+                <Markdown remarkPlugins={[remarkGfm]}>{detail.output}</Markdown>
+              </div>
+            ) : (
+              <div className={styles.empty}>No output yet</div>
+            )
+          )}
+          {infoTab === "task" && (
+            detail?.prompt ? (
+              <div className={styles.prose}>
+                <Markdown remarkPlugins={[remarkGfm]}>{detail.prompt}</Markdown>
+              </div>
+            ) : (
+              <div className={styles.empty}>No task prompt</div>
+            )
+          )}
         </div>
       </div>
 
@@ -132,13 +128,19 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
             <div className={styles.empty}>No conversation data available</div>
           )}
           {detail?.conversation.map((msg, i) => (
-            <div key={i} className={`${styles.msg} ${msg.role === "user" ? styles.userMsg : ""}`}>
-              <div className={styles.msgMeta}>
-                <strong>{msg.role === "user" ? "You" : worker.id}</strong>
-              </div>
-              <div className={styles.msgText}>
-                <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
-              </div>
+            <div key={i} className={`${styles.msg} ${msg.role === "user" ? styles.userMsg : ""} ${msg.role === "tool" ? styles.toolMsg : ""}`}>
+              {msg.role === "tool" ? (
+                <div className={styles.toolLabel}>{msg.content}</div>
+              ) : (
+                <>
+                  <div className={styles.msgMeta}>
+                    <strong>{msg.role === "user" ? "You" : worker.id}</strong>
+                  </div>
+                  <div className={styles.msgText}>
+                    <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+                  </div>
+                </>
+              )}
             </div>
           ))}
           <div ref={bottomRef} />
