@@ -155,6 +155,15 @@ export default function App() {
     }
   }, [workspace]);
 
+  // Poll worker detail while viewing a worker
+  useEffect(() => {
+    if (!workspace || !workerId) return;
+    const interval = setInterval(() => {
+      api.getWorkerDetail(workspace, workerId).then(setWorkerDetail).catch(() => {});
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [workspace, workerId]);
+
   const handleBackFromWorker = useCallback(() => {
     setWorkerId(null);
   }, []);
