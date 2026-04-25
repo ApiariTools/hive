@@ -136,25 +136,25 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     const freqData = new Uint8Array(analyser.frequencyBinCount);
     analyser.getByteFrequencyData(freqData);
 
-    // Reduce to ~24 bars using log scale so voice fills all bars
-    const barCount = 24;
-    // Only use the lower half of frequency bins (voice range)
+    // 12 unique bars, mirrored for 24 total (symmetric from center)
+    const halfCount = 12;
     const usableBins = Math.floor(freqData.length * 0.4);
 
-    if (smoothedBars.current.length !== barCount) {
-      smoothedBars.current = new Array(barCount).fill(0);
+    if (smoothedBars.current.length !== halfCount) {
+      smoothedBars.current = new Array(halfCount).fill(0);
     }
 
     ctx.clearRect(0, 0, w, h);
 
+    const totalBars = halfCount * 2;
     const gap = 3;
-    const barWidth = (w - gap * (barCount - 1)) / barCount;
+    const barWidth = (w - gap * (totalBars - 1)) / totalBars;
     const centerY = h / 2;
 
-    for (let i = 0; i < barCount; i++) {
-      // Log scale: more resolution in low frequencies where voice lives
-      const startBin = Math.floor(Math.pow(i / barCount, 1.5) * usableBins);
-      const endBin = Math.floor(Math.pow((i + 1) / barCount, 1.5) * usableBins);
+    // Compute the 12 unique values
+    for (let i = 0; i < halfCount; i++) {
+      const startBin = Math.floor(Math.pow(i / halfCount, 1.5) * usableBins);
+      const endBin = Math.floor(Math.pow((i + 1) / halfCount, 1.5) * usableBins);
       const binCount = Math.max(1, endBin - startBin);
 
       let sum = 0;
@@ -163,23 +163,33 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
       }
       const raw = sum / binCount / 255;
 
-      // Gate low noise, let loud sounds peak
-      const gated = Math.max(0, raw - 0.2); // noise gate
-      const scaled = Math.pow(gated / 0.88, 0.9) * 1.4;
+      const gated = Math.max(0, raw - 0.2);
+      const scaled = Math.pow(gated / 0.8, 0.9) * 1.4;
       const target = Math.min(scaled, 1.0);
 
-      // Smooth — rise fast, fall medium
       const prev = smoothedBars.current[i];
       smoothedBars.current[i] = target > prev
         ? prev + (target - prev) * 0.7
         : prev + (target - prev) * 0.25;
+    }
 
+    // Draw mirrored: center out
+    for (let i = 0; i < halfCount; i++) {
       const barH = Math.max(4, 4 + smoothedBars.current[i] * (h - 8));
-      const x = i * (barWidth + gap);
 
+      // Right half (from center)
+      const rightIdx = halfCount + i;
+      const xRight = rightIdx * (barWidth + gap);
       ctx.fillStyle = "#e85555";
       ctx.beginPath();
-      ctx.roundRect(x, centerY - barH / 2, barWidth, barH, 2);
+      ctx.roundRect(xRight, centerY - barH / 2, barWidth, barH, 2);
+      ctx.fill();
+
+      // Left half (mirrored)
+      const leftIdx = halfCount - 1 - i;
+      const xLeft = leftIdx * (barWidth + gap);
+      ctx.beginPath();
+      ctx.roundRect(xLeft, centerY - barH / 2, barWidth, barH, 2);
       ctx.fill();
     }
 
