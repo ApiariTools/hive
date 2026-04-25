@@ -164,7 +164,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
       const raw = sum / binCount / 255;
 
       // Gate low noise, let loud sounds peak
-      const gated = Math.max(0, raw - 0.12); // noise gate
+      const gated = Math.max(0, raw - 0.2); // noise gate
       const scaled = Math.pow(gated / 0.88, 0.9) * 1.4;
       const target = Math.min(scaled, 1.0);
 
