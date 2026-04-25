@@ -55,31 +55,6 @@ export function BotNav({
         </button>
       ))}
 
-      {workers.length > 0 && (
-        <>
-          <div className={`${styles.label} ${styles.labelSpaced}`}>
-            Workers
-          </div>
-          {workers.map((w) => (
-            <button
-              key={w.id}
-              className={`${styles.workerBtn} ${activeWorkerId === w.id ? styles.activeWorker : ""}`}
-              onClick={() => onSelectWorker(w.id)}
-            >
-              <span
-                className={`${styles.workerDot} ${w.status === "running" || w.status === "active" ? styles.running : ""}`}
-                style={{ background: statusColor(w.status) }}
-              />
-              <span className={styles.workerId}>{w.id}</span>
-              {w.pr_url && (
-                <span className={styles.workerPr}>
-                  PR
-                </span>
-              )}
-            </button>
-          ))}
-        </>
-      )}
     </div>
   );
 }
