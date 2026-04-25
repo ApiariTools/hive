@@ -397,6 +397,9 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
         className={`${styles.scrollToBottom} ${showScrollBtn ? styles.scrollToBottomVisible : ""}`}
         onClick={scrollToBottom}
         aria-label="Scroll to bottom"
+        tabIndex={showScrollBtn ? 0 : -1}
+        aria-hidden={!showScrollBtn}
+        disabled={!showScrollBtn}
       >
         <ChevronDown size={20} />
       </button>
