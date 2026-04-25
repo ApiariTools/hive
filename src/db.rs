@@ -147,6 +147,13 @@ impl Db {
                     Ok(Some(id))
                 } else {
                     tracing::info!("[session] prompt changed for {workspace}/{bot}, starting fresh");
+                    let _ = self.add_message(
+                        workspace,
+                        bot,
+                        "system",
+                        "Session reset — bot configuration was updated.",
+                        None,
+                    );
                     Ok(None)
                 }
             }
