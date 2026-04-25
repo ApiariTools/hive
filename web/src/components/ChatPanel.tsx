@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Mic, Square, Paperclip, ArrowUp } from "lucide-react";
+import { Mic, Square, Paperclip, ArrowUp, ChevronDown } from "lucide-react";
 import type { Message } from "../types";
 import styles from "./ChatPanel.module.css";
 
@@ -30,6 +30,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [micState, setMicState] = useState<"idle" | "recording" | "stopping" | "transcribing">("idle");
   const [hasText, setHasText] = useState(false);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didLongPress = useRef(false);
@@ -42,7 +43,18 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    setShowScrollBtn(false);
   }, [messages.length, loading, loadingStatus]);
+
+  function handleMessagesScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowScrollBtn(distanceFromBottom > 40);
+  }
+
+  function scrollToBottom() {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }
 
   // Start/stop waveform drawing when recording state changes
   useEffect(() => {
@@ -314,7 +326,8 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
         )}
       </div>
 
-      <div className={styles.messages}>
+      <div className={styles.messagesWrap}>
+      <div className={styles.messages} onScroll={handleMessagesScroll}>
         {messages.length === 0 && !loading && (
           <div className={styles.empty}>
             Start a conversation with {bot}
@@ -379,6 +392,14 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
           </div>
         )}
         <div ref={bottomRef} />
+      </div>
+      <button
+        className={`${styles.scrollToBottom} ${showScrollBtn ? styles.scrollToBottomVisible : ""}`}
+        onClick={scrollToBottom}
+        aria-label="Scroll to bottom"
+      >
+        <ChevronDown size={20} />
+      </button>
       </div>
 
       <div className={styles.inputArea}>
