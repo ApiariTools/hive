@@ -1,52 +1,31 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
-export function useKeyboardHeight(): number {
-  const [height, setHeight] = useState(0);
-
+/**
+ * Telegram's approach: set --vh CSS custom property from visualViewport.height.
+ * The app root uses `height: calc(var(--vh, 1vh) * 100)` instead of `100dvh`.
+ * When the keyboard opens, --vh shrinks → app shrinks → input stays visible.
+ * When the keyboard closes, --vh grows → app grows back to full height.
+ */
+export function useVH() {
   useEffect(() => {
     const vv = window.visualViewport;
-    if (!vv) return;
 
-    const isIOS =
-      /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    if (!isIOS) return;
-
-    function update() {
-      if (!vv) return;
-      const kbHeight = window.innerHeight - vv.height;
-      // If keyboard height is very small, treat as closed
-      setHeight(kbHeight > 50 ? kbHeight : 0);
+    function setVH() {
+      const h = vv ? vv.height : window.innerHeight;
+      const vh = h * 0.01;
+      document.documentElement.style.setProperty("--vh", `${vh}px`);
     }
 
-    function onViewportChange() {
-      update();
-    }
+    setVH();
 
-    function onFocusIn() {
-      update();
-      setTimeout(update, 100);
-      setTimeout(update, 200);
-      setTimeout(update, 350);
-      setTimeout(update, 500);
+    if (vv) {
+      vv.addEventListener("resize", setVH, { passive: true });
     }
-
-    function onFocusOut() {
-      setHeight(0);
-    }
-
-    vv.addEventListener("resize", onViewportChange, { passive: true });
-    vv.addEventListener("scroll", onViewportChange, { passive: true });
-    window.addEventListener("focusin", onFocusIn, { passive: true });
-    window.addEventListener("focusout", onFocusOut, { passive: true });
+    window.addEventListener("resize", setVH, { passive: true });
 
     return () => {
-      vv.removeEventListener("resize", onViewportChange);
-      vv.removeEventListener("scroll", onViewportChange);
-      window.removeEventListener("focusin", onFocusIn);
-      window.removeEventListener("focusout", onFocusOut);
+      if (vv) vv.removeEventListener("resize", setVH);
+      window.removeEventListener("resize", setVH);
     };
   }, []);
-
-  return height;
 }
