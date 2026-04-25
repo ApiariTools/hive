@@ -163,9 +163,10 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
       }
       const raw = sum / binCount / 255;
 
-      // Exaggerate — boost quiet sounds, cap loud ones
-      const boosted = Math.pow(raw, 0.6) * 1.5;
-      const target = Math.min(boosted, 1.0);
+      // Gate low noise, boost mid-range, let loud sounds peak
+      const gated = Math.max(0, raw - 0.08); // noise gate
+      const scaled = Math.pow(gated / 0.92, 0.8) * 1.2;
+      const target = Math.min(scaled, 1.0);
 
       // Smooth — rise fast, fall medium
       const prev = smoothedBars.current[i];
