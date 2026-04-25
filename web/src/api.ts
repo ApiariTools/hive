@@ -1,4 +1,4 @@
-import type { Workspace, Bot, Worker, WorkerDetail, Message } from "./types";
+import type { Workspace, Bot, Worker, WorkerDetail, Message, Repo } from "./types";
 
 const BASE = "/api";
 
@@ -18,6 +18,10 @@ export function getBots(workspace: string): Promise<Bot[]> {
 
 export function getWorkers(workspace: string): Promise<Worker[]> {
   return get(`/workspaces/${workspace}/workers`);
+}
+
+export function getRepos(workspace: string): Promise<Repo[]> {
+  return get(`/workspaces/${workspace}/repos`);
 }
 
 export function getConversations(

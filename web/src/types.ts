@@ -21,6 +21,16 @@ export interface Worker {
   dispatched_by: string | null;
 }
 
+export interface Repo {
+  name: string;
+  path: string;
+  ahead: number;
+  behind: number;
+  sync_status: string;
+  has_swarm: boolean;
+  workers: Worker[];
+}
+
 export interface Message {
   id: number;
   workspace: string;
