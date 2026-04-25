@@ -1076,11 +1076,8 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
 struct RepoInfo {
     name: String,
     path: String,
-    ahead: i64,
-    behind: i64,
-    sync_status: String, // "synced", "ahead", "behind", "diverged", "unknown"
     has_swarm: bool,
-    workers: Vec<WorkerInfo>,
+    worker_count: usize,
 }
 
 async fn list_repos(
@@ -1110,174 +1107,51 @@ async fn list_repos(
 }
 
 fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
+    // Count workers per repo from swarm state
+    let mut worker_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let state_path = root.join(".swarm/state.json");
-    let all_workers = read_swarm_workers(root);
-
-    // Parse state.json once to build worktree_id -> repo_path map
-    let mut worker_repo_map: std::collections::HashMap<String, PathBuf> =
-        std::collections::HashMap::new();
-    let mut repo_paths: std::collections::HashMap<PathBuf, Vec<WorkerInfo>> =
-        std::collections::HashMap::new();
-
     if let Ok(content) = std::fs::read_to_string(&state_path) {
-        if let Ok(state_val) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(worktrees) = state_val.get("worktrees").and_then(|w| w.as_array()) {
+        if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(worktrees) = state.get("worktrees").and_then(|w| w.as_array()) {
                 for wt in worktrees {
                     if let Some(repo_path) = wt.get("repo_path").and_then(|p| p.as_str()) {
-                        let canon = std::fs::canonicalize(repo_path)
-                            .unwrap_or_else(|_| PathBuf::from(repo_path));
-                        repo_paths.entry(canon.clone()).or_default();
-                        if let Some(id) = wt.get("id").and_then(|i| i.as_str()) {
-                            worker_repo_map.insert(id.to_string(), canon);
-                        }
+                        let name = std::path::Path::new(repo_path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown");
+                        *worker_counts.entry(name.to_string()).or_default() += 1;
                     }
                 }
             }
         }
     }
 
-    // Also check workspace root
-    if root.join(".git").exists() {
-        let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        repo_paths.entry(canon).or_default();
-    }
-
-    // Assign workers to repos using the pre-built map
-    for worker in &all_workers {
-        if let Some(repo_path) = worker_repo_map.get(&worker.id) {
-            repo_paths
-                .entry(repo_path.clone())
-                .or_default()
-                .push(WorkerInfo {
-                    id: worker.id.clone(),
-                    branch: worker.branch.clone(),
-                    status: worker.status.clone(),
-                    agent: worker.agent.clone(),
-                    pr_url: worker.pr_url.clone(),
-                    pr_title: worker.pr_title.clone(),
-                    description: worker.description.clone(),
-                    elapsed_secs: worker.elapsed_secs,
-                    dispatched_by: worker.dispatched_by.clone(),
+    // Scan for git repos in workspace
+    let mut repos = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.join(".git").exists() {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let has_swarm = root.join(".swarm").exists();
+                let worker_count = worker_counts.get(&name).copied().unwrap_or(0);
+                repos.push(RepoInfo {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                    has_swarm,
+                    worker_count,
                 });
+            }
         }
     }
-
-    let mut repos: Vec<RepoInfo> = repo_paths
-        .into_iter()
-        .map(|(path, workers)| {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let (ahead, behind) = get_git_sync_status(&path);
-            let sync_status = match (ahead, behind) {
-                (-1, _) | (_, -1) => "unknown".to_string(),
-                (0, 0) => "synced".to_string(),
-                (a, 0) if a > 0 => "ahead".to_string(),
-                (0, b) if b > 0 => "behind".to_string(),
-                _ => "diverged".to_string(),
-            };
-            let has_swarm = path.join(".swarm").exists();
-            RepoInfo {
-                name,
-                path: path.to_string_lossy().to_string(),
-                ahead,
-                behind,
-                sync_status,
-                has_swarm,
-                workers,
-            }
-        })
-        .collect();
 
     repos.sort_by(|a, b| a.name.cmp(&b.name));
     repos
-}
-
-/// Detect the default remote branch (origin/main, origin/master, etc.)
-fn get_origin_default_ref(repo_path: &std::path::Path) -> Option<String> {
-    // Try symbolic-ref first
-    let output = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let refname = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !refname.is_empty() {
-            return Some(refname);
-        }
-    }
-    // Fallback: try origin/main, then origin/master
-    for branch in &["origin/main", "origin/master"] {
-        let check = std::process::Command::new("git")
-            .args(["-C"])
-            .arg(repo_path)
-            .args(["rev-parse", "--verify", branch])
-            .output();
-        if let Ok(o) = check {
-            if o.status.success() {
-                return Some(branch.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Returns (ahead, behind) counts relative to the origin default branch. (-1, -1) on error.
-fn get_git_sync_status(repo_path: &std::path::Path) -> (i64, i64) {
-    let origin_ref = match get_origin_default_ref(repo_path) {
-        Some(r) => r,
-        None => return (-1, -1),
-    };
-
-    let head = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["rev-parse", "HEAD"])
-        .output();
-    let origin = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["rev-parse", &origin_ref])
-        .output();
-
-    let (head_sha, origin_sha) = match (head, origin) {
-        (Ok(h), Ok(o)) if h.status.success() && o.status.success() => {
-            let h_sha = String::from_utf8_lossy(&h.stdout).trim().to_string();
-            let o_sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            (h_sha, o_sha)
-        }
-        _ => return (-1, -1),
-    };
-
-    if head_sha == origin_sha {
-        return (0, 0);
-    }
-
-    let rev_list_ref = format!("HEAD...{origin_ref}");
-    let output = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(repo_path)
-        .args(["rev-list", "--left-right", "--count", &rev_list_ref])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            let parts: Vec<&str> = text.trim().split('\t').collect();
-            if parts.len() == 2 {
-                let ahead = parts[0].parse().unwrap_or(-1);
-                let behind = parts[1].parse().unwrap_or(-1);
-                (ahead, behind)
-            } else {
-                (-1, -1)
-            }
-        }
-        _ => (-1, -1),
-    }
 }
 
 // ── Workers ──

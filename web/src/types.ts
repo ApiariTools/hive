@@ -24,11 +24,8 @@ export interface Worker {
 export interface Repo {
   name: string;
   path: string;
-  ahead: number;
-  behind: number;
-  sync_status: string;
   has_swarm: boolean;
-  workers: Worker[];
+  worker_count: number;
 }
 
 export interface Message {
