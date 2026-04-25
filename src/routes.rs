@@ -201,25 +201,29 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         }
 
         // Swarm worker dispatch instructions
-        prompt.push_str(&format!(
-            "\n## Swarm Workers\n\
-             You dispatch coding tasks to swarm workers. Workers run in their own git worktrees \
-             with an LLM agent that writes code, commits, and opens PRs.\n\n\
-             IMPORTANT: When the user asks you to implement, fix, build, or code anything, \
-             use `swarm create` to dispatch it. Do NOT write code yourself — \
-             not via Edit/Write tools, and not via Bash (no echo, sed, curl -o, etc.).\n\n\
-             Commands (always use `--dir {root}`):\n\
-             - List workers: `swarm --dir {root} status`\n\
-             - Spawn worker: `swarm --dir {root} create --repo {{repo}} --prompt-file /tmp/task.txt`\n\
-               (Write the task prompt to a file first, then pass --prompt-file. Never inline long prompts.)\n\
-             - Send message: `swarm --dir {root} send {{worktree_id}} \"message\"`\n\
-             - Close worker: `swarm --dir {root} close {{worktree_id}}`\n\n\
-             When dispatching, always include in the task prompt:\n\
-             'Plan and implement this completely in one session — do not pause mid-task \
-             for confirmation. Commit and open a PR when done.'\n\n\
-             When a task spans multiple repos, dispatch separate workers for each.\n\
-             Each worker prompt must be self-contained — workers cannot see other repos.\n"
-        ));
+        let has_swarm = root_path.join(".swarm").exists();
+        if has_swarm {
+            prompt.push_str(&format!(
+                "\n## Swarm Workers\n\
+                 You dispatch coding tasks to swarm workers. Workers run in their own git worktrees \
+                 with an LLM agent that writes code, commits, and opens PRs.\n\n\
+                 RULE: When the user asks you to implement, fix, build, or code anything, \
+                 ALWAYS dispatch a swarm worker. Do NOT write code yourself — never use \
+                 Edit, Write, or Bash to create/modify source code. Your job is to \
+                 coordinate, not code. Just dispatch the worker immediately without asking.\n\n\
+                 Commands (always use `--dir {root}`):\n\
+                 - List workers: `swarm --dir {root} status`\n\
+                 - Spawn worker: `swarm --dir {root} create --repo {{repo}} --prompt-file /tmp/task.txt`\n\
+                   (Write the task prompt to a file first, then pass --prompt-file. Never inline long prompts.)\n\
+                 - Send message: `swarm --dir {root} send {{worktree_id}} \"message\"`\n\
+                 - Close worker: `swarm --dir {root} close {{worktree_id}}`\n\n\
+                 When dispatching, always include in the task prompt:\n\
+                 'Plan and implement this completely in one session — do not pause mid-task \
+                 for confirmation. Commit and open a PR when done.'\n\n\
+                 When a task spans multiple repos, dispatch separate workers for each.\n\
+                 Each worker prompt must be self-contained — workers cannot see other repos.\n"
+            ));
+        }
     }
 
     prompt
