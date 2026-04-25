@@ -31,6 +31,12 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Strip sandbox GH_TOKEN if running inside Claude Code
+    if std::env::var("CLAUDECODE").is_ok() {
+        info!("stripping sandbox GH_TOKEN");
+        unsafe { std::env::remove_var("GH_TOKEN"); }
+    }
+
     let cli = Cli::parse();
 
     let config_dir = cli
