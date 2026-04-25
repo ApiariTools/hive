@@ -442,59 +442,78 @@ async fn send_message(
         status: "thinking".to_string(), tool_name: None,
     });
 
-    // Spawn background task — daemon owns the session
+    // Spawn background task with 5-minute timeout
     tokio::spawn(async move {
-        let result = match provider.as_str() {
-            "codex" => {
-                run_bot_codex(
-                    message,
-                    system_prompt,
-                    working_dir,
-                    resume_id,
-                    &db,
-                    &ws_name,
-                    &bot_name,
-                    &hash,
-                )
-                .await
-            }
-            "gemini" => {
-                run_bot_gemini(
-                    message,
-                    system_prompt,
-                    working_dir,
-                    resume_id,
-                    &db,
-                    &ws_name,
-                    &bot_name,
-                    &hash,
-                )
-                .await
-            }
-            _ => {
-                run_bot_claude(
-                    message,
-                    system_prompt,
-                    working_dir,
-                    resume_id,
-                    images,
-                    &db,
-                    &ws_name,
-                    &bot_name,
-                    &hash,
-                )
-                .await
+        let task = async {
+            match provider.as_str() {
+                "codex" => {
+                    run_bot_codex(
+                        message,
+                        system_prompt,
+                        working_dir,
+                        resume_id,
+                        &db,
+                        &ws_name,
+                        &bot_name,
+                        &hash,
+                    )
+                    .await
+                }
+                "gemini" => {
+                    run_bot_gemini(
+                        message,
+                        system_prompt,
+                        working_dir,
+                        resume_id,
+                        &db,
+                        &ws_name,
+                        &bot_name,
+                        &hash,
+                    )
+                    .await
+                }
+                _ => {
+                    run_bot_claude(
+                        message,
+                        system_prompt,
+                        working_dir,
+                        resume_id,
+                        images,
+                        &db,
+                        &ws_name,
+                        &bot_name,
+                        &hash,
+                    )
+                    .await
+                }
             }
         };
 
-        if let Err(e) = result {
-            let _ = db.add_message(
-                &ws_name,
-                &bot_name,
-                "assistant",
-                &format!("Error: {e}"),
-                None,
-            );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            task,
+        ).await;
+
+        match result {
+            Ok(Err(e)) => {
+                let _ = db.add_message(
+                    &ws_name,
+                    &bot_name,
+                    "assistant",
+                    &format!("Error: {e}"),
+                    None,
+                );
+            }
+            Err(_) => {
+                let _ = db.add_message(
+                    &ws_name,
+                    &bot_name,
+                    "system",
+                    "Response timed out after 5 minutes.",
+                    None,
+                );
+            }
+            Ok(Ok(())) => {}
         }
 
         let _ = db.set_bot_status(&ws_name, &bot_name, "idle", "", None);
@@ -700,7 +719,7 @@ async fn run_bot_claude(
         dangerously_skip_permissions: true,
         include_partial_messages: true,
         working_dir,
-        max_turns: Some(30),
+        max_turns: None,
         resume: resume_id,
         system_prompt,
         ..Default::default()
