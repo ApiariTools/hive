@@ -1,0 +1,87 @@
+.palette [cmdk-overlay] {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+}
+
+.palette [cmdk-dialog] {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1001;
+  width: 90vw;
+  max-width: 500px;
+  max-height: 400px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette [cmdk-input] {
+  width: 100%;
+  border: none;
+  outline: none;
+  background: var(--bg-card);
+  color: var(--text-strong);
+  padding: 12px 16px;
+  font-size: 16px;
+  font-family: var(--font);
+  border-bottom: 1px solid var(--border);
+}
+
+.palette [cmdk-input]::placeholder {
+  color: var(--text-faint);
+}
+
+.palette [cmdk-list] {
+  overflow-y: auto;
+  flex: 1;
+  max-height: 340px;
+}
+
+.palette [cmdk-group-heading] {
+  color: var(--text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 16px;
+  user-select: none;
+}
+
+.palette [cmdk-item] {
+  padding: 10px 16px;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+}
+
+.palette [cmdk-item][data-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--text-strong);
+}
+
+.palette [cmdk-empty] {
+  padding: 24px 16px;
+  color: var(--text-faint);
+  text-align: center;
+  font-size: 14px;
+}
+
+.current {
+  color: var(--accent);
+  font-size: 11px;
+  margin-left: 8px;
+}
+
+.workerStatus {
+  color: var(--text-faint);
+  font-size: 12px;
+  margin-left: auto;
+}
