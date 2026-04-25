@@ -1,0 +1,277 @@
+//! Signal watchers — poll external sources and dispatch to specialty bots.
+//!
+//! Each bot with a `watch` list gets a background loop that checks for new signals.
+//! When a signal fires, the bot processes it autonomously and the result
+//! appears in the bot's chat thread.
+
+use crate::db::Db;
+use std::path::PathBuf;
+use tokio::time::{Duration, interval};
+use tracing::info;
+
+/// Configuration for a watched bot.
+#[derive(Debug, Clone)]
+pub struct WatchedBot {
+    pub workspace: String,
+    pub name: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub role: String,
+    pub watch: Vec<String>,
+    pub working_dir: Option<PathBuf>,
+}
+
+/// Start watcher loops for all bots that have watch sources.
+pub fn start_watchers(bots: Vec<WatchedBot>, db: Db) {
+    for bot in bots {
+        if bot.watch.is_empty() {
+            continue;
+        }
+        info!(
+            "[watcher] starting watchers for {} ({:?})",
+            bot.name, bot.watch
+        );
+        tokio::spawn(run_watcher(bot, db.clone()));
+    }
+}
+
+async fn run_watcher(bot: WatchedBot, db: Db) {
+    let mut tick = interval(Duration::from_secs(60));
+
+    loop {
+        tick.tick().await;
+
+        for source in &bot.watch {
+            match source.as_str() {
+                "github" => {
+                    if let Some(signal) = poll_github(&bot.working_dir).await {
+                        dispatch_signal(&bot, &db, &signal).await;
+                    }
+                }
+                "sentry" => {
+                    // Sentry polling would go here — needs API token from config
+                    // For now, just a placeholder
+                }
+                other => {
+                    tracing::debug!("[watcher] unknown source: {other}");
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Signal {
+    source: String,
+    title: String,
+    body: String,
+}
+
+async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
+    let dir = working_dir.as_ref()?;
+
+    // Check for open PRs that need attention
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "pr", "list", "--state", "open", "--json",
+            "number,title,reviewDecision,statusCheckRollup",
+            "--limit", "5",
+        ])
+        .current_dir(dir)
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let prs: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).ok()?;
+
+    // Find PRs that need review or have failing CI
+    for pr in &prs {
+        let number = pr.get("number")?.as_u64()?;
+        let title = pr.get("title")?.as_str()?;
+
+        // Check for failing CI
+        if let Some(checks) = pr.get("statusCheckRollup").and_then(|c| c.as_array()) {
+            let failing = checks
+                .iter()
+                .filter(|c| {
+                    c.get("conclusion")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s == "FAILURE")
+                })
+                .count();
+
+            if failing > 0 {
+                return Some(Signal {
+                    source: "github".to_string(),
+                    title: format!("CI failing on PR #{number}: {title}"),
+                    body: format!(
+                        "{failing} check(s) failing on PR #{number} \"{title}\". Please investigate."
+                    ),
+                });
+            }
+        }
+    }
+
+    None
+}
+
+async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) {
+    info!(
+        "[watcher] dispatching to {}: {}",
+        bot.name, signal.title
+    );
+
+    // Store the signal as a system message in the bot's chat
+    let _ = db.add_message(
+        &bot.workspace,
+        &bot.name,
+        "system",
+        &format!("**Signal: {}**\n\n{}", signal.title, signal.body),
+        None,
+    );
+
+    // Build prompt for the bot
+    let prompt = format!(
+        "You are {}, a specialty bot. Your role: {}\n\n\
+         A signal just fired:\n\
+         **{}**\n\n{}\n\n\
+         Investigate this and take appropriate action. \
+         Be concise about what you find and what you did.",
+        bot.name, bot.role, signal.title, signal.body
+    );
+
+    // Dispatch to the right provider
+    let response = match bot.provider.as_str() {
+        "codex" => run_codex_autonomous(&prompt, &bot.working_dir).await,
+        "gemini" => run_gemini_autonomous(&prompt, &bot.working_dir).await,
+        _ => run_claude_autonomous(&prompt, &bot.working_dir).await,
+    };
+
+    match response {
+        Ok(text) => {
+            let _ = db.add_message(&bot.workspace, &bot.name, "assistant", &text, None);
+            info!("[watcher] {} responded ({} chars)", bot.name, text.len());
+        }
+        Err(e) => {
+            let _ = db.add_message(
+                &bot.workspace,
+                &bot.name,
+                "assistant",
+                &format!("Error processing signal: {e}"),
+                None,
+            );
+        }
+    }
+}
+
+async fn run_claude_autonomous(
+    prompt: &str,
+    working_dir: &Option<PathBuf>,
+) -> Result<String, String> {
+    use apiari_claude_sdk::{ClaudeClient, Event, SessionOptions, streaming::AssembledEvent, types::ContentBlock};
+
+    let opts = SessionOptions {
+        dangerously_skip_permissions: true,
+        include_partial_messages: true,
+        working_dir: working_dir.clone(),
+        max_turns: Some(10),
+        ..Default::default()
+    };
+
+    let client = ClaudeClient::new();
+    let mut session = client.spawn(opts).await.map_err(|e| e.to_string())?;
+    session
+        .send_message(prompt)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut full_text = String::new();
+    loop {
+        match session.next_event().await {
+            Ok(Some(event)) => match event {
+                Event::Stream { assembled, .. } => {
+                    for asm in assembled {
+                        if let AssembledEvent::TextDelta { text, .. } = asm {
+                            full_text.push_str(&text);
+                        }
+                    }
+                }
+                Event::Assistant { message, .. } => {
+                    for block in &message.message.content {
+                        if let ContentBlock::Text { text } = block {
+                            if full_text.is_empty() {
+                                full_text.push_str(text);
+                            }
+                        }
+                    }
+                }
+                Event::Result(_) => break,
+                _ => {}
+            },
+            Ok(None) => break,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    Ok(full_text)
+}
+
+async fn run_codex_autonomous(
+    prompt: &str,
+    working_dir: &Option<PathBuf>,
+) -> Result<String, String> {
+    let client = apiari_codex_sdk::CodexClient::new();
+    let mut execution = client
+        .exec(
+            prompt,
+            apiari_codex_sdk::ExecOptions {
+                full_auto: true,
+                working_dir: working_dir.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut response = String::new();
+    while let Ok(Some(event)) = execution.next_event().await {
+        if let apiari_codex_sdk::Event::ItemCompleted { item } = &event {
+            if let Some(text) = item.text() {
+                response = text.to_string();
+            }
+        }
+    }
+    Ok(response)
+}
+
+async fn run_gemini_autonomous(
+    prompt: &str,
+    working_dir: &Option<PathBuf>,
+) -> Result<String, String> {
+    let client = apiari_gemini_sdk::GeminiClient::new();
+    let mut execution = client
+        .exec(
+            prompt,
+            apiari_gemini_sdk::GeminiOptions {
+                working_dir: working_dir.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut response = String::new();
+    while let Ok(Some(event)) = execution.next_event().await {
+        if let apiari_gemini_sdk::Event::ItemCompleted { item } = &event {
+            if let Some(text) = item.text() {
+                response = text.to_string();
+            }
+        }
+    }
+    Ok(response)
+}
