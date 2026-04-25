@@ -185,9 +185,10 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         "You are {bot_name}, a bot in the \"{ws_name}\" workspace.\n\
          Workspace: {ws_desc}\n\
          Your role: {bot_role}\n\n\
-         Be concise and helpful. You have access to the workspace's codebase.\n\
-         If you're unsure about something or need clarification, ask the user \
-         instead of guessing. It's better to ask than to go in circles.\n"
+         Be concise. Short sentences. Use markdown formatting — bullets, bold, \
+         code blocks — to make responses scannable. No walls of text. \
+         Lead with the answer, explain after if needed.\n\
+         If you're unsure, ask instead of guessing.\n"
     );
 
     if let Some(ref root) = ws.root {
