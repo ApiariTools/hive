@@ -15,13 +15,14 @@ interface Props {
   messages: Message[];
   loading: boolean;
   loadingStatus?: string;
+  streamingContent?: string;
   workerCount?: number;
   onWorkersToggle?: () => void;
   onCancel?: () => void;
   onSend: (text: string, attachments?: Attachment[]) => void;
 }
 
-export function ChatPanel({ bot, messages, loading, loadingStatus, onSend, workerCount, onWorkersToggle, onCancel }: Props) {
+export function ChatPanel({ bot, messages, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -140,20 +141,26 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend, worke
           <div className={styles.msg}>
             <div className={styles.meta}>
               <strong>{bot}</strong>
-            </div>
-            <div className={styles.thinking}>
-              <span className={styles.thinkingDots}>
-                <span />
-                <span />
-                <span />
-              </span>
-              {loadingStatus && (
-                <span className={styles.thinkingStatus}>{loadingStatus}</span>
-              )}
               {onCancel && (
                 <button className={styles.cancelBtn} onClick={onCancel}>Stop</button>
               )}
             </div>
+            {streamingContent ? (
+              <div className={styles.text}>
+                <Markdown remarkPlugins={[remarkGfm]}>{streamingContent}</Markdown>
+              </div>
+            ) : (
+              <div className={styles.thinking}>
+                <span className={styles.thinkingDots}>
+                  <span />
+                  <span />
+                  <span />
+                </span>
+                {loadingStatus && (
+                  <span className={styles.thinkingStatus}>{loadingStatus}</span>
+                )}
+              </div>
+            )}
           </div>
         )}
         <div ref={bottomRef} />

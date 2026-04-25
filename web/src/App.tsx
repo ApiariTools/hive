@@ -49,6 +49,7 @@ export default function App() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  const [streamingContent, setStreamingContent] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [workerDetail, setWorkerDetail] = useState<WorkerDetailData | null>(null);
   const [workersOpen, setWorkersOpen] = useState(false);
@@ -82,6 +83,7 @@ export default function App() {
       if (s.status !== "idle") {
         setLoading(true);
         setLoadingStatus(s.tool_name ? `Using ${s.tool_name}...` : "Thinking...");
+        setStreamingContent(s.streaming_content || "");
       }
     });
 
@@ -92,9 +94,11 @@ export default function App() {
         if (s.status === "idle") {
           setLoading(false);
           setLoadingStatus(undefined);
+          setStreamingContent("");
         } else {
           setLoading(true);
           setLoadingStatus(s.tool_name ? `Using ${s.tool_name}...` : "Thinking...");
+          setStreamingContent(s.streaming_content || "");
         }
       });
     }, 2000);
@@ -214,6 +218,7 @@ export default function App() {
             messages={messages}
             loading={loading}
             loadingStatus={loadingStatus}
+            streamingContent={streamingContent}
             onSend={handleSend}
             workerCount={workers.length}
             onWorkersToggle={() => setWorkersOpen((v) => !v)}

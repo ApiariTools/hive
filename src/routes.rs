@@ -185,7 +185,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         "You are {bot_name}, a bot in the \"{ws_name}\" workspace.\n\
          Workspace: {ws_desc}\n\
          Your role: {bot_role}\n\n\
-         Be concise and helpful. You have access to the workspace's codebase.\n"
+         Be concise and helpful. You have access to the workspace's codebase.\n\
+         If you're unsure about something or need clarification, ask the user \
+         instead of guessing. It's better to ask than to go in circles.\n"
     );
 
     if let Some(ref root) = ws.root {
@@ -541,7 +543,7 @@ async fn run_bot_claude(
         dangerously_skip_permissions: true,
         include_partial_messages: true,
         working_dir,
-        max_turns: Some(15),
+        max_turns: Some(30),
         resume: resume_id,
         system_prompt,
         ..Default::default()
