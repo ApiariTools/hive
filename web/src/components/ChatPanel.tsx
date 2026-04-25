@@ -162,11 +162,11 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
       const boosted = Math.pow(raw, 0.6) * 1.5;
       const target = Math.min(boosted, 1.0);
 
-      // Smooth — rise fast, fall slow
+      // Smooth — rise fast, fall medium
       const prev = smoothedBars.current[i];
       smoothedBars.current[i] = target > prev
-        ? prev + (target - prev) * 0.4
-        : prev + (target - prev) * 0.08;
+        ? prev + (target - prev) * 0.7
+        : prev + (target - prev) * 0.25;
 
       const barH = Math.max(2, smoothedBars.current[i] * (h - 4));
       const x = i * (barWidth + gap);
