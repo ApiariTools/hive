@@ -17,6 +17,30 @@
   margin-right: 28px;
 }
 
+.hamburger {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 8px;
+  margin-right: 8px;
+  cursor: pointer;
+}
+
+.hamburger span {
+  display: block;
+  width: 18px;
+  height: 2px;
+  background: var(--text-faint);
+  border-radius: 1px;
+}
+
+.hamburger:hover span {
+  background: var(--text);
+}
+
 .tab {
   padding: 12px 18px;
   font-size: 15px;
@@ -45,4 +69,10 @@
   height: 2px;
   background: var(--accent);
   border-radius: 1px;
+}
+
+@media (max-width: 768px) {
+  .hamburger {
+    display: flex;
+  }
 }

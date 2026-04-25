@@ -8,6 +8,7 @@ interface Props {
   activeWorkerId: string | null;
   onSelectBot: (name: string) => void;
   onSelectWorker: (id: string) => void;
+  mobileOpen?: boolean;
 }
 
 const BOT_COLORS: Record<string, string> = {
@@ -35,9 +36,10 @@ export function BotNav({
   activeWorkerId,
   onSelectBot,
   onSelectWorker,
+  mobileOpen,
 }: Props) {
   return (
-    <div className={styles.panel}>
+    <div className={`${styles.panel} ${mobileOpen ? styles.mobileOpen : ""}`}>
       <div className={styles.label}>Bots</div>
       {bots.map((b) => (
         <button

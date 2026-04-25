@@ -49,6 +49,7 @@ export default function App() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
 
   // Load workspaces on mount
@@ -109,10 +110,12 @@ export default function App() {
   const handleSelectBot = useCallback((name: string) => {
     setBot(name);
     setWorkerId(null);
+    setMenuOpen(false);
   }, []);
 
   const handleSelectWorker = useCallback((id: string) => {
     setWorkerId(id);
+    setMenuOpen(false);
   }, []);
 
   const handleBackFromWorker = useCallback(() => {
@@ -198,8 +201,16 @@ export default function App() {
         workspaces={workspaces}
         active={workspace}
         onSelect={handleSelectWorkspace}
+        onMenuToggle={() => setMenuOpen((v) => !v)}
       />
-      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+      <div style={{ flex: 1, display: "flex", overflow: "hidden", position: "relative" }}>
+        {/* Mobile drawer overlay */}
+        {menuOpen && (
+          <div
+            className="drawer-backdrop"
+            onClick={() => setMenuOpen(false)}
+          />
+        )}
         <BotNav
           bots={bots}
           workers={workers}
@@ -207,6 +218,7 @@ export default function App() {
           activeWorkerId={workerId}
           onSelectBot={handleSelectBot}
           onSelectWorker={handleSelectWorker}
+          mobileOpen={menuOpen}
         />
         {workerId && selectedWorker ? (
           <WorkerDetail

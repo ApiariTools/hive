@@ -5,11 +5,15 @@ interface Props {
   workspaces: Workspace[];
   active: string;
   onSelect: (name: string) => void;
+  onMenuToggle?: () => void;
 }
 
-export function TopBar({ workspaces, active, onSelect }: Props) {
+export function TopBar({ workspaces, active, onSelect, onMenuToggle }: Props) {
   return (
     <div className={styles.bar}>
+      <button className={styles.hamburger} onClick={onMenuToggle}>
+        <span /><span /><span />
+      </button>
       <div className={styles.logo}>hive</div>
       {workspaces.map((ws) => (
         <button
