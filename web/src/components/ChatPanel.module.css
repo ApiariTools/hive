@@ -194,6 +194,7 @@
   padding: 12px 20px 32px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+  position: relative;
 }
 
 .inputRow {
@@ -263,11 +264,15 @@
 }
 
 .waveform {
-  width: 100%;
+  position: absolute;
+  bottom: 100%;
+  left: 16px;
+  right: 16px;
   height: 40px;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
   border-radius: 6px;
   background: var(--bg-card);
+  z-index: 10;
 }
 
 @keyframes pulse-border {
