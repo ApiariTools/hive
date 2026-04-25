@@ -802,7 +802,7 @@ fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
         Err(_) => return vec![],
     };
 
-    let workers = match state.get("workers").and_then(|w| w.as_array()) {
+    let workers = match state.get("worktrees").and_then(|w| w.as_array()) {
         Some(w) => w,
         None => return vec![],
     };
@@ -822,7 +822,7 @@ fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
                 .unwrap_or("unknown")
                 .to_string();
             let agent = w
-                .get("agent")
+                .get("agent_kind")
                 .and_then(|a| a.as_str())
                 .unwrap_or("claude")
                 .to_string();
@@ -897,7 +897,7 @@ async fn get_worker_detail(
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .and_then(|s| {
-            s.get("workers")?
+            s.get("worktrees")?
                 .as_array()?
                 .iter()
                 .find(|w| w.get("id").and_then(|i| i.as_str()) == Some(&worker_id))?
