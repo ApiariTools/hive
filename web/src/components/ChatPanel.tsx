@@ -236,9 +236,21 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
               )}
             </div>
             {streamingContent ? (
-              <div className={styles.text}>
-                <Markdown remarkPlugins={[remarkGfm]}>{streamingContent}</Markdown>
-              </div>
+              <>
+                <div className={styles.text}>
+                  <Markdown remarkPlugins={[remarkGfm]}>{streamingContent}</Markdown>
+                </div>
+                <div className={styles.streamingIndicator}>
+                  <span className={styles.thinkingDots}>
+                    <span />
+                    <span />
+                    <span />
+                  </span>
+                  {loadingStatus && (
+                    <span className={styles.thinkingStatus}>{loadingStatus}</span>
+                  )}
+                </div>
+              </>
             ) : (
               <div className={styles.thinking}>
                 <span className={styles.thinkingDots}>
