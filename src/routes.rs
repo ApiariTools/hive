@@ -919,17 +919,8 @@ async fn get_worker_detail(
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p.join(".swarm/output.md")).ok());
 
-    // Get session_id to export conversation from Claude
-    let session_id = worktree_entry
-        .as_ref()
-        .and_then(|w| w.get("session_id")?.as_str().map(String::from));
-
-    let conversation = if let Some(sid) = session_id {
-        export_claude_conversation(&sid, worktree_path.as_deref()).await
-    } else {
-        // Fallback: read inbox messages
-        read_inbox_messages(&root, &worker_id)
-    };
+    // Read conversation from swarm's events.jsonl
+    let conversation = read_agent_events(&root, &worker_id);
 
     Ok(Json(WorkerDetail {
         info,
@@ -939,96 +930,71 @@ async fn get_worker_detail(
     }))
 }
 
-async fn export_claude_conversation(
-    session_id: &str,
-    working_dir: Option<&std::path::Path>,
-) -> Vec<WorkerMessage> {
-    // Use `claude export` to get the conversation
-    let mut cmd = tokio::process::Command::new("claude");
-    cmd.args(["export", "-s", session_id, "--format", "json"]);
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    let output = match cmd.output().await {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return vec![],
-    };
-
-    let conv: serde_json::Value = match serde_json::from_slice(&output) {
-        Ok(v) => v,
+fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessage> {
+    let events_path = root.join(format!(".swarm/agents/{worker_id}/events.jsonl"));
+    let content = match std::fs::read_to_string(&events_path) {
+        Ok(c) => c,
         Err(_) => return vec![],
     };
 
-    // Parse the exported conversation
     let mut messages = Vec::new();
-    if let Some(msgs) = conv.as_array() {
-        for msg in msgs {
-            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            if role != "user" && role != "assistant" {
-                continue;
-            }
+    let mut current_text = String::new();
 
-            // Content can be a string or array of blocks
-            let content = if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
-                text.to_string()
-            } else if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
-                let mut parts = Vec::new();
-                for block in blocks {
-                    let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    match btype {
-                        "text" => {
-                            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                                parts.push(t.to_string());
-                            }
-                        }
-                        "tool_use" => {
-                            let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                            parts.push(format!("*Using {name}...*"));
-                        }
-                        "tool_result" => {
-                            // Skip tool results — too verbose
-                        }
-                        _ => {}
-                    }
+    for line in content.lines() {
+        let event: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match event_type {
+            "assistant_text" => {
+                if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
+                    current_text.push_str(text);
                 }
-                parts.join("\n\n")
-            } else {
-                continue;
-            };
-
-            if !content.is_empty() {
+            }
+            "tool_use" => {
+                // Flush any accumulated text
+                if !current_text.is_empty() {
+                    messages.push(WorkerMessage {
+                        role: "assistant".to_string(),
+                        content: std::mem::take(&mut current_text),
+                    });
+                }
+                let tool = event.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
                 messages.push(WorkerMessage {
-                    role: role.to_string(),
-                    content,
+                    role: "tool".to_string(),
+                    content: format!("*Using {tool}*"),
                 });
             }
-        }
-    }
-
-    messages
-}
-
-fn read_inbox_messages(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessage> {
-    let mut messages = Vec::new();
-    let inbox_file = root.join(format!(".swarm/inbox/{worker_id}.jsonl"));
-    if let Ok(content) = std::fs::read_to_string(&inbox_file) {
-        for line in content.lines() {
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
-                let content = msg
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !content.is_empty() {
+            "user_message" => {
+                // Flush any accumulated text
+                if !current_text.is_empty() {
+                    messages.push(WorkerMessage {
+                        role: "assistant".to_string(),
+                        content: std::mem::take(&mut current_text),
+                    });
+                }
+                if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
                     messages.push(WorkerMessage {
                         role: "user".to_string(),
-                        content,
+                        content: text.to_string(),
                     });
                 }
             }
+            _ => {}
         }
     }
+
+    // Flush remaining text
+    if !current_text.is_empty() {
+        messages.push(WorkerMessage {
+            role: "assistant".to_string(),
+            content: current_text,
+        });
+    }
+
     messages
 }
 
