@@ -102,6 +102,7 @@
 .msg {
   max-width: 720px;
   min-width: 0;
+  overflow-x: auto;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
