@@ -52,7 +52,6 @@
 .messages {
   flex: 1;
   overflow-y: auto;
-  overflow-x: hidden;
   padding: 16px 20px 24px;
   display: flex;
   flex-direction: column;
@@ -103,7 +102,6 @@
 .msg {
   max-width: 720px;
   min-width: 0;
-  overflow: hidden;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
