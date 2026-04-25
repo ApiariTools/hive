@@ -230,12 +230,13 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         }
     }
 
-    // Chat history tool — bot can query its own conversation history
+    // Chat history — bot can query the local DB directly
     prompt.push_str(&format!(
         "\n## Chat History\n\
-         You can look up previous conversations using the hive API:\n\
-         - Recent messages: `curl -s http://localhost:4200/api/workspaces/{ws_name}/conversations/{bot_name}?limit=20`\n\
-         - Search messages: `curl -s 'http://localhost:4200/api/workspaces/{ws_name}/conversations/{bot_name}/search?q=keyword&limit=10'`\n\
+         Your conversation history is stored in a local SQLite database.\n\
+         To look up previous conversations:\n\
+         - Recent messages: `sqlite3 ~/.config/hive/hive.db \"SELECT role, content FROM conversations WHERE workspace='{ws_name}' AND bot='{bot_name}' ORDER BY id DESC LIMIT 20\"`\n\
+         - Search messages: `sqlite3 ~/.config/hive/hive.db \"SELECT role, content FROM conversations WHERE workspace='{ws_name}' AND bot='{bot_name}' AND content LIKE '%keyword%' ORDER BY id DESC LIMIT 10\"`\n\
          \n\
          Use this when the user references something from a previous conversation \
          or when you need context about what was discussed before.\n"
