@@ -118,18 +118,26 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
     const analyser = analyserRef.current;
     if (!canvas || !analyser) return;
 
+    // Match canvas resolution to display size
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    ctx.scale(dpr, dpr);
+
+    const w = rect.width;
+    const h = rect.height;
 
     const data = new Uint8Array(analyser.frequencyBinCount);
     analyser.getByteTimeDomainData(data);
 
-    const w = canvas.width;
-    const h = canvas.height;
     ctx.clearRect(0, 0, w, h);
-
     ctx.strokeStyle = "#e85555";
     ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
     ctx.beginPath();
 
     const sliceWidth = w / data.length;
@@ -141,7 +149,6 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
       else ctx.lineTo(x, y);
       x += sliceWidth;
     }
-    ctx.lineTo(w, h / 2);
     ctx.stroke();
 
     animFrameRef.current = requestAnimationFrame(drawWaveform);
@@ -334,7 +341,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
 
       <div className={styles.inputArea}>
         {micState === "recording" && (
-          <canvas ref={canvasRef} className={styles.waveform} width={300} height={32} />
+          <canvas ref={canvasRef} className={styles.waveform} />
         )}
         {attachments.length > 0 && (
           <div className={styles.attachmentPreview}>
