@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing::info;
 
+mod config_watcher;
 mod db;
 mod routes;
 mod watcher;
@@ -46,6 +47,10 @@ async fn main() -> Result<()> {
         info!("starting {} specialty bot watcher(s)", watched_bots.len());
         watcher::start_watchers(watched_bots, db.clone());
     }
+
+    // Start config watcher for prompt change detection
+    let watched_workspaces = load_watched_workspaces(&config_dir);
+    config_watcher::start_config_watcher(watched_workspaces, db.clone());
 
     let app = routes::router(db, &config_dir);
 
@@ -134,6 +139,62 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                     }
                 }
             }
+        }
+    }
+
+    watched
+}
+
+fn load_watched_workspaces(config_dir: &std::path::Path) -> Vec<config_watcher::WatchedWorkspace> {
+    let workspaces_dir = config_dir.join("workspaces");
+    let mut watched = Vec::new();
+
+    let entries = match std::fs::read_dir(&workspaces_dir) {
+        Ok(e) => e,
+        Err(_) => return watched,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            let ws_name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let config: toml::Value = match toml::from_str(&content) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let root = config
+                .get("workspace")
+                .and_then(|w| w.get("root"))
+                .and_then(|r| r.as_str())
+                .map(PathBuf::from);
+
+            // Collect bot names (always include Main)
+            let mut bots = vec!["Main".to_string()];
+            if let Some(bot_arr) = config.get("bots").and_then(|b| b.as_array()) {
+                for bot in bot_arr {
+                    if let Some(name) = bot.get("name").and_then(|n| n.as_str()) {
+                        bots.push(name.to_string());
+                    }
+                }
+            }
+
+            watched.push(config_watcher::WatchedWorkspace {
+                name: ws_name,
+                config_path: path,
+                root,
+                bots,
+            });
         }
     }
 
