@@ -855,23 +855,28 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
     let audio_path = tmp_dir.path().join("audio.webm");
 
     let mut found_audio = false;
-    while let Ok(Some(field)) = multipart.next_field().await {
+    while let Ok(Some(mut field)) = multipart.next_field().await {
         if field.name() == Some("audio") {
             found_audio = true;
-            let bytes = match field.bytes().await {
-                Ok(b) => b,
+            let mut file = match tokio::fs::File::create(&audio_path).await {
+                Ok(f) => f,
                 Err(_) => {
                     return (
-                        StatusCode::BAD_REQUEST,
-                        transcribe_err("failed to read audio field"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        transcribe_err("failed to create audio file"),
                     );
                 }
             };
-            if tokio::fs::write(&audio_path, &bytes).await.is_err() {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    transcribe_err("failed to write audio file"),
-                );
+            while let Ok(Some(chunk)) = field.chunk().await {
+                if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                    .await
+                    .is_err()
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        transcribe_err("failed to write audio chunk"),
+                    );
+                }
             }
             break;
         }
