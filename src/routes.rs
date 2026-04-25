@@ -188,7 +188,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         if let Ok(custom) = std::fs::read_to_string(&path) {
             // Custom prompt gets workspace context appended
             let mut prompt = custom;
-            if !prompt.ends_with('\n') { prompt.push('\n'); }
+            if !prompt.ends_with('\n') {
+                prompt.push('\n');
+            }
             prompt.push_str(&format!("\nWorkspace: {ws_name} — {ws_desc}\n"));
             if let Some(ref root) = ws.root {
                 prompt.push_str(&format!("Working directory: {root}\n"));
@@ -509,11 +511,15 @@ async fn cancel_bot(
     Path((workspace, bot)): Path<(String, String)>,
 ) -> Json<serde_json::Value> {
     info!("[chat] cancelling {workspace}/{bot}");
-    let _ = state.db.set_bot_status(&workspace, &bot, "cancelled", "", None);
+    let _ = state
+        .db
+        .set_bot_status(&workspace, &bot, "cancelled", "", None);
     // Give the background task a moment to notice
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = state.db.set_bot_status(&workspace, &bot, "idle", "", None);
-    let _ = state.db.add_message(&workspace, &bot, "system", "Response cancelled.", None);
+    let _ = state
+        .db
+        .add_message(&workspace, &bot, "system", "Response cancelled.", None);
     Json(serde_json::json!({"ok": true}))
 }
 
