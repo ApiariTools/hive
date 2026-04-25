@@ -1,10 +1,10 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { TopBar } from "./components/TopBar";
 import { BotNav } from "./components/BotNav";
 import { ChatPanel } from "./components/ChatPanel";
-import { WorkersPanel } from "./components/WorkersPanel";
+import { ReposPanel } from "./components/ReposPanel";
 import { WorkerDetail } from "./components/WorkerDetail";
-import type { Workspace, Bot, Worker, Message, WorkerDetail as WorkerDetailData } from "./types";
+import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData } from "./types";
 import * as api from "./api";
 
 // ── Route parsing ──
@@ -47,6 +47,7 @@ export default function App() {
   const [workerId, setWorkerId] = useState<string | null>(initial.workerId);
   const [bots, setBots] = useState<Bot[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
+  const [repos, setRepos] = useState<Repo[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
@@ -102,6 +103,7 @@ export default function App() {
     if (!workspace) return;
     api.getBots(workspace).then(setBots);
     api.getWorkers(workspace).then(setWorkers);
+    api.getRepos(workspace).then(setRepos);
     api.getUnread(workspace).then(setUnread);
   }, [workspace]);
 
@@ -141,13 +143,19 @@ export default function App() {
     return () => clearInterval(interval);
   }, [workspace, bot]);
 
-  // Poll workers every 5s
+  // Poll workers every 5s, repos every 30s
   useEffect(() => {
     if (!workspace) return;
-    const interval = setInterval(() => {
+    const workerInterval = setInterval(() => {
       api.getWorkers(workspace).then(setWorkers);
     }, 5000);
-    return () => clearInterval(interval);
+    const repoInterval = setInterval(() => {
+      api.getRepos(workspace).then(setRepos);
+    }, 30000);
+    return () => {
+      clearInterval(workerInterval);
+      clearInterval(repoInterval);
+    };
   }, [workspace]);
 
   // Sync hash
@@ -221,6 +229,15 @@ export default function App() {
     [workspace, bot],
   );
 
+  // Merge fresh worker data (5s poll) into repos (30s poll) so worker status stays current
+  const reposWithFreshWorkers = useMemo(() => {
+    const workerMap = new Map(workers.map((w) => [w.id, w]));
+    return repos.map((repo) => ({
+      ...repo,
+      workers: repo.workers.map((rw) => workerMap.get(rw.id) || rw),
+    }));
+  }, [repos, workers]);
+
   const selectedWorker = workerId
     ? workers.find((w) => w.id === workerId) || null
     : null;
@@ -271,8 +288,8 @@ export default function App() {
             onCancel={loading ? () => api.cancelBot(workspace, bot) : undefined}
           />
         )}
-        <WorkersPanel
-          workers={workers}
+        <ReposPanel
+          repos={reposWithFreshWorkers}
           onSelectWorker={(id) => {
             setWorkersOpen(false);
             handleSelectWorker(id);
