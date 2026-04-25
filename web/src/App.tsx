@@ -123,14 +123,15 @@ export default function App() {
   }, []);
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (text: string, attachments?: import("./components/ChatPanel").Attachment[]) => {
+      const attJson = attachments ? JSON.stringify(attachments) : null;
       const userMsg: Message = {
         id: Date.now(),
         workspace,
         bot,
         role: "user",
         content: text,
-        attachments: null,
+        attachments: attJson,
         created_at: new Date().toISOString(),
       };
       const streamId = Date.now() + 1;

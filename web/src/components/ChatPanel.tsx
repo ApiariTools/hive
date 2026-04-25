@@ -1,20 +1,28 @@
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "../types";
 import styles from "./ChatPanel.module.css";
+
+export interface Attachment {
+  name: string;
+  type: string;
+  dataUrl: string;
+}
 
 interface Props {
   bot: string;
   messages: Message[];
   loading: boolean;
   loadingStatus?: string;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments?: Attachment[]) => void;
 }
 
 export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -24,10 +32,11 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
     const el = textareaRef.current;
     if (!el || loading) return;
     const text = el.value.trim();
-    if (!text) return;
+    if (!text && attachments.length === 0) return;
     el.value = "";
     el.style.height = "auto";
-    onSend(text);
+    onSend(text, attachments.length > 0 ? attachments : undefined);
+    setAttachments([]);
   }
 
   function autoGrow() {
@@ -44,9 +53,47 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
     }
   }
 
+  function handleFiles(files: FileList | null) {
+    if (!files) return;
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setAttachments((prev) => [
+          ...prev,
+          { name: file.name, type: file.type, dataUrl: reader.result as string },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function removeAttachment(index: number) {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  }
+
   function formatTime(iso: string): string {
     const d = new Date(iso);
     return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
+  function renderAttachments(json: string | null) {
+    if (!json) return null;
+    try {
+      const atts: Attachment[] = JSON.parse(json);
+      return (
+        <div className={styles.msgAttachments}>
+          {atts.map((a, i) =>
+            a.type.startsWith("image/") ? (
+              <img key={i} src={a.dataUrl} alt={a.name} className={styles.msgImage} />
+            ) : (
+              <div key={i} className={styles.msgFile}>{a.name}</div>
+            ),
+          )}
+        </div>
+      );
+    } catch {
+      return null;
+    }
   }
 
   return (
@@ -71,6 +118,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
               {" · "}
               {formatTime(msg.created_at)}
             </div>
+            {renderAttachments(msg.attachments)}
             <div className={styles.text}>
               {msg.role === "assistant" ? (
                 <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
@@ -101,8 +149,36 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
       </div>
 
       <div className={styles.inputArea}>
+        {attachments.length > 0 && (
+          <div className={styles.attachmentPreview}>
+            {attachments.map((a, i) => (
+              <div key={i} className={styles.attachmentChip}>
+                {a.type.startsWith("image/") ? (
+                  <img src={a.dataUrl} alt={a.name} className={styles.attachmentThumb} />
+                ) : (
+                  <span className={styles.attachmentName}>{a.name}</span>
+                )}
+                <button className={styles.attachmentRemove} onClick={() => removeAttachment(i)}>
+                  &times;
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className={styles.inputRow}>
-          <button type="button" className={styles.attachBtn}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,.pdf,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.rs,.go,.rb,.swift"
+            style={{ display: "none" }}
+            onChange={(e) => handleFiles(e.target.files)}
+          />
+          <button
+            type="button"
+            className={styles.attachBtn}
+            onClick={() => fileInputRef.current?.click()}
+          >
             +
           </button>
           <textarea

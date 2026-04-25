@@ -217,3 +217,76 @@
   font-size: 18px;
   font-weight: 700;
 }
+
+/* ── Attachments ── */
+
+.attachmentPreview {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.attachmentChip {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+
+.attachmentThumb {
+  height: 48px;
+  max-width: 80px;
+  object-fit: cover;
+}
+
+.attachmentName {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachmentRemove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  border: none;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.msgAttachments {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.msgImage {
+  max-width: 240px;
+  max-height: 180px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.msgFile {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}

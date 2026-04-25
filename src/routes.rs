@@ -250,7 +250,7 @@ async fn send_message(
         dangerously_skip_permissions: true,
         include_partial_messages: true,
         working_dir,
-        max_turns: Some(1),
+        max_turns: Some(50),
         resume: resume_id,
         system_prompt,
         ..Default::default()
