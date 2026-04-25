@@ -43,6 +43,10 @@ pub fn router(db: Db, config_dir: &std::path::Path) -> Router {
             post(send_message),
         )
         .route(
+            "/api/workspaces/{workspace}/conversations/{bot}/search",
+            get(search_conversations),
+        )
+        .route(
             "/api/workspaces/{workspace}/bots/{bot}/status",
             get(get_bot_status),
         )
@@ -226,6 +230,17 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         }
     }
 
+    // Chat history tool — bot can query its own conversation history
+    prompt.push_str(&format!(
+        "\n## Chat History\n\
+         You can look up previous conversations using the hive API:\n\
+         - Recent messages: `curl -s http://localhost:4200/api/workspaces/{ws_name}/conversations/{bot_name}?limit=20`\n\
+         - Search messages: `curl -s 'http://localhost:4200/api/workspaces/{ws_name}/conversations/{bot_name}/search?q=keyword&limit=10'`\n\
+         \n\
+         Use this when the user references something from a previous conversation \
+         or when you need context about what was discussed before.\n"
+    ));
+
     prompt
 }
 
@@ -260,6 +275,25 @@ async fn get_bot_conversations(
 #[derive(Deserialize)]
 struct ConvQuery {
     limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    limit: Option<i64>,
+}
+
+async fn search_conversations(
+    State(state): State<AppState>,
+    Path((workspace, bot)): Path<(String, String)>,
+    Query(params): Query<SearchQuery>,
+) -> Json<Vec<crate::db::MessageRow>> {
+    let limit = params.limit.unwrap_or(20);
+    let rows = state
+        .db
+        .search_conversations(&workspace, &bot, &params.q, limit)
+        .unwrap_or_default();
+    Json(rows)
 }
 
 // ── Chat (SSE streaming via apiari-claude-sdk) ──
@@ -332,26 +366,7 @@ async fn send_message(
     }
 
     let system_prompt = if resume_id.is_none() {
-        // Fresh session — include recent chat history for context
-        let mut prompt = full_prompt;
-        let history = state
-            .db
-            .get_conversations(&workspace, &bot, 20)
-            .unwrap_or_default();
-        if !history.is_empty() {
-            prompt.push_str("\n## Recent Conversation History\n");
-            for msg in &history {
-                let role = if msg.role == "user" { "User" } else { &bot };
-                // Truncate long messages to keep prompt manageable
-                let content = if msg.content.len() > 500 {
-                    format!("{}...", &msg.content[..500])
-                } else {
-                    msg.content.clone()
-                };
-                prompt.push_str(&format!("{role}: {content}\n\n"));
-            }
-        }
-        Some(prompt)
+        Some(full_prompt)
     } else {
         None
     };

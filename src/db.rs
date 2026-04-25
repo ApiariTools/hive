@@ -234,6 +234,39 @@ impl Db {
         }
     }
 
+    pub fn search_conversations(
+        &self,
+        workspace: &str,
+        bot: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<MessageRow>> {
+        let conn = self.reader()?;
+        let pattern = format!("%{query}%");
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace, bot, role, content, attachments, created_at
+             FROM conversations
+             WHERE workspace = ?1 AND bot = ?2 AND content LIKE ?3
+             ORDER BY id DESC LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(params![workspace, bot, pattern, limit], |row| {
+                Ok(MessageRow {
+                    id: row.get(0)?,
+                    workspace: row.get(1)?,
+                    bot: row.get(2)?,
+                    role: row.get(3)?,
+                    content: row.get(4)?,
+                    attachments: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut rows = rows;
+        rows.reverse();
+        Ok(rows)
+    }
+
     pub fn get_all_conversations(
         &self,
         workspace: &str,
