@@ -315,14 +315,20 @@ async fn send_message(
         .map(|b| b.provider.clone())
         .unwrap_or_else(|| "claude".to_string());
 
-    // Check for existing session to resume
-    let resume_id = state.db.get_session_id(&workspace, &bot).unwrap_or(None);
+    // Build system prompt and hash it — if prompt changed, start fresh session
+    let full_prompt = build_system_prompt(&ws_config, &bot);
+    let prompt_hash = simple_hash(&full_prompt);
+
+    let resume_id = state
+        .db
+        .get_session_id(&workspace, &bot, &prompt_hash)
+        .unwrap_or(None);
     if let Some(ref id) = resume_id {
         info!("[chat] resuming session {id} (provider={provider})");
     }
 
     let system_prompt = if resume_id.is_none() {
-        Some(build_system_prompt(&ws_config, &bot))
+        Some(full_prompt)
     } else {
         None
     };
@@ -344,6 +350,7 @@ async fn send_message(
     let db = state.db.clone();
     let ws_name = workspace.clone();
     let bot_name = bot.clone();
+    let hash = prompt_hash.clone();
 
     // Set bot status to thinking
     let _ = db.set_bot_status(&ws_name, &bot_name, "thinking", "", None);
@@ -351,9 +358,9 @@ async fn send_message(
     // Spawn background task — daemon owns the session
     tokio::spawn(async move {
         let result = match provider.as_str() {
-            "codex" => run_bot_codex(message, system_prompt, working_dir, resume_id, &db, &ws_name, &bot_name).await,
-            "gemini" => run_bot_gemini(message, system_prompt, working_dir, resume_id, &db, &ws_name, &bot_name).await,
-            _ => run_bot_claude(message, system_prompt, working_dir, resume_id, images, &db, &ws_name, &bot_name).await,
+            "codex" => run_bot_codex(message, system_prompt, working_dir, resume_id, &db, &ws_name, &bot_name, &hash).await,
+            "gemini" => run_bot_gemini(message, system_prompt, working_dir, resume_id, &db, &ws_name, &bot_name, &hash).await,
+            _ => run_bot_claude(message, system_prompt, working_dir, resume_id, images, &db, &ws_name, &bot_name, &hash).await,
         };
 
         if let Err(e) = result {
@@ -385,6 +392,15 @@ async fn get_bot_status(
             "tool_name": null,
         })),
     }
+}
+
+/// Simple hash of a string for change detection. Not cryptographic.
+fn simple_hash(s: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn extract_images(attachments: &Option<Vec<ChatAttachment>>) -> Vec<(String, String)> {
@@ -463,6 +479,7 @@ async fn run_bot_claude(
     db: &Db,
     ws: &str,
     bot: &str,
+    prompt_hash: &str,
 ) -> Result<(), String> {
     let opts = SessionOptions {
         dangerously_skip_permissions: true,
@@ -517,7 +534,7 @@ async fn run_bot_claude(
                     }
                 }
                 Event::Result(result) => {
-                    let _ = db.set_session_id(ws, bot, &result.session_id);
+                    let _ = db.set_session(ws, bot, &result.session_id, prompt_hash);
                     break;
                 }
                 _ => {}
@@ -541,6 +558,7 @@ async fn run_bot_codex(
     db: &Db,
     ws: &str,
     bot: &str,
+    prompt_hash: &str,
 ) -> Result<(), String> {
     let client = apiari_codex_sdk::CodexClient::new();
     let prompt = match system_prompt {
@@ -569,7 +587,7 @@ async fn run_bot_codex(
     while let Ok(Some(event)) = execution.next_event().await {
         match &event {
             apiari_codex_sdk::Event::ThreadStarted { thread_id } => {
-                let _ = db.set_session_id(ws, bot, thread_id);
+                let _ = db.set_session(ws, bot, thread_id, prompt_hash);
             }
             apiari_codex_sdk::Event::ItemCompleted { item } => {
                 if let Some(text) = item.text() {
@@ -604,6 +622,7 @@ async fn run_bot_gemini(
     db: &Db,
     ws: &str,
     bot: &str,
+    prompt_hash: &str,
 ) -> Result<(), String> {
     let client = apiari_gemini_sdk::GeminiClient::new();
     let prompt = match system_prompt {
@@ -630,7 +649,7 @@ async fn run_bot_gemini(
     while let Ok(Some(event)) = execution.next_event().await {
         match &event {
             apiari_gemini_sdk::Event::ThreadStarted { thread_id } => {
-                let _ = db.set_session_id(ws, bot, thread_id);
+                let _ = db.set_session(ws, bot, thread_id, prompt_hash);
             }
             apiari_gemini_sdk::Event::ItemCompleted { item } => {
                 if let Some(text) = item.text() {

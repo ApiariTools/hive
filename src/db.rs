@@ -28,6 +28,7 @@ impl Db {
                 workspace TEXT NOT NULL,
                 bot TEXT NOT NULL,
                 session_id TEXT NOT NULL,
+                prompt_hash TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (workspace, bot)
             );
@@ -112,26 +113,43 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn set_session_id(&self, workspace: &str, bot: &str, session_id: &str) -> Result<()> {
+    pub fn set_session(
+        &self,
+        workspace: &str,
+        bot: &str,
+        session_id: &str,
+        prompt_hash: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (workspace, bot, session_id, updated_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT(workspace, bot) DO UPDATE SET session_id = ?3, updated_at = datetime('now')",
-            params![workspace, bot, session_id],
+            "INSERT INTO sessions (workspace, bot, session_id, prompt_hash, updated_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT(workspace, bot) DO UPDATE SET
+               session_id = ?3, prompt_hash = ?4, updated_at = datetime('now')",
+            params![workspace, bot, session_id, prompt_hash],
         )?;
         Ok(())
     }
 
-    pub fn get_session_id(&self, workspace: &str, bot: &str) -> Result<Option<String>> {
+    /// Get session ID only if the prompt hash matches.
+    /// If the hash changed (config/context/soul updated), returns None
+    /// so a fresh session is started.
+    pub fn get_session_id(&self, workspace: &str, bot: &str, current_hash: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let result = conn.query_row(
-            "SELECT session_id FROM sessions WHERE workspace = ?1 AND bot = ?2",
+            "SELECT session_id, prompt_hash FROM sessions WHERE workspace = ?1 AND bot = ?2",
             params![workspace, bot],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         );
         match result {
-            Ok(id) => Ok(Some(id)),
+            Ok((id, stored_hash)) => {
+                if stored_hash == current_hash {
+                    Ok(Some(id))
+                } else {
+                    tracing::info!("[session] prompt changed for {workspace}/{bot}, starting fresh");
+                    Ok(None)
+                }
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
