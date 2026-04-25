@@ -54,11 +54,45 @@
   font-size: 16px;
   line-height: 1.65;
   color: var(--text-strong);
-  white-space: pre-wrap;
+}
+
+.text p { margin: 0 0 8px; }
+.text p:last-child { margin-bottom: 0; }
+.text ul, .text ol { margin: 4px 0 8px 20px; }
+.text pre {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.text code {
+  background: var(--bg-card);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 14px;
+}
+.text pre code {
+  background: none;
+  padding: 0;
+}
+.text h1, .text h2, .text h3 {
+  color: var(--text-strong);
+  margin: 12px 0 4px;
+  font-size: 15px;
+}
+.text blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+  color: var(--text-faint);
+  margin: 8px 0;
 }
 
 .user .text {
   color: var(--text);
+  white-space: pre-wrap;
 }
 
 /* ── Thinking indicator ── */

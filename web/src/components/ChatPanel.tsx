@@ -1,4 +1,6 @@
 import { useRef, useEffect } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { Message } from "../types";
 import styles from "./ChatPanel.module.css";
 
@@ -69,7 +71,13 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend }: Pro
               {" · "}
               {formatTime(msg.created_at)}
             </div>
-            <div className={styles.text}>{msg.content}</div>
+            <div className={styles.text}>
+              {msg.role === "assistant" ? (
+                <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+              ) : (
+                msg.content
+              )}
+            </div>
           </div>
         ))}
         {loading && (
