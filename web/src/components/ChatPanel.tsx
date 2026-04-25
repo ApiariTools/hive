@@ -31,6 +31,8 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
   const [micState, setMicState] = useState<"idle" | "recording" | "stopping" | "transcribing">("idle");
   const [hasText, setHasText] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const didLongPress = useRef(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -319,7 +321,8 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
             <button
               type="button"
               className={`${styles.actionBtn} ${styles.micRecording}`}
-              onClick={handleMicClick}
+              onClick={stopRecording}
+              onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
             >
               <Square size={16} />
             </button>
@@ -327,23 +330,42 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
             <button type="button" className={styles.actionBtn} disabled>
               ...
             </button>
-          ) : hasText || attachments.length > 0 ? (
-            <button
-              type="button"
-              className={`${styles.actionBtn} ${styles.actionBtnSend}`}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={send}
-            >
-              <ArrowUp size={18} />
-            </button>
           ) : (
             <button
               type="button"
-              className={styles.actionBtn}
-              onClick={handleMicClick}
+              className={`${styles.actionBtn} ${hasText || attachments.length > 0 ? styles.actionBtnSend : ""}`}
               disabled={loading}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                didLongPress.current = false;
+                longPressTimer.current = setTimeout(() => {
+                  didLongPress.current = true;
+                  startRecording();
+                }, 500);
+              }}
+              onMouseUp={() => {
+                if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+                if (didLongPress.current) { stopRecording(); return; }
+                if (hasText || attachments.length > 0) { send(); } else { startRecording(); }
+              }}
+              onMouseLeave={() => {
+                if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+              }}
+              onTouchStart={() => {
+                didLongPress.current = false;
+                longPressTimer.current = setTimeout(() => {
+                  didLongPress.current = true;
+                  startRecording();
+                }, 500);
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+                if (didLongPress.current) { stopRecording(); return; }
+                if (hasText || attachments.length > 0) { send(); } else { startRecording(); }
+              }}
             >
-              <Mic size={16} />
+              {hasText || attachments.length > 0 ? <ArrowUp size={18} /> : <Mic size={16} />}
             </button>
           )}
         </div>
