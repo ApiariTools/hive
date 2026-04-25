@@ -174,7 +174,7 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
         ? prev + (target - prev) * 0.7
         : prev + (target - prev) * 0.25;
 
-      const barH = Math.max(2, smoothedBars.current[i] * (h - 4));
+      const barH = Math.max(4, 4 + smoothedBars.current[i] * (h - 8));
       const x = i * (barWidth + gap);
 
       ctx.fillStyle = "#e85555";
