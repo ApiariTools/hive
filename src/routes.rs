@@ -978,14 +978,17 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
         );
     }
 
-    // Try to run whisper directly — detect NotFound to give a helpful install message
-    let output = match tokio::process::Command::new("whisper")
-        .arg("--model")
-        .arg("base")
+    // Try to run whisper-cli with the local model
+    let home = std::env::var("HOME").unwrap_or_default();
+    let model_path = format!("{home}/.local/share/whisper/ggml-base.en.bin");
+
+    let output = match tokio::process::Command::new("whisper-cli")
+        .arg("-m")
+        .arg(&model_path)
         .arg("--output-txt")
         .arg("--no-timestamps")
-        .arg("--output-dir")
-        .arg(tmp_dir.path())
+        .arg("--output-file")
+        .arg(tmp_dir.path().join("audio"))
         .arg(&audio_path)
         .output()
         .await
@@ -994,7 +997,7 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return (
                 StatusCode::OK,
-                transcribe_err("whisper.cpp not found. Install it with: brew install whisper-cpp"),
+                transcribe_err("whisper-cli not found. Install it with: brew install whisper-cpp"),
             );
         }
         Err(e) => {
