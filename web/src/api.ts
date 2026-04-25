@@ -63,6 +63,16 @@ export function getBotStatus(
   return get(`/workspaces/${workspace}/bots/${bot}/status`);
 }
 
+export async function cancelBot(
+  workspace: string,
+  bot: string,
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/workspaces/${workspace}/bots/${bot}/cancel`, {
+    method: "POST",
+  });
+  return res.json();
+}
+
 export async function sendMessage(
   workspace: string,
   bot: string,

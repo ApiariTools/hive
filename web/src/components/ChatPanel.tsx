@@ -17,10 +17,11 @@ interface Props {
   loadingStatus?: string;
   workerCount?: number;
   onWorkersToggle?: () => void;
+  onCancel?: () => void;
   onSend: (text: string, attachments?: Attachment[]) => void;
 }
 
-export function ChatPanel({ bot, messages, loading, loadingStatus, onSend, workerCount, onWorkersToggle }: Props) {
+export function ChatPanel({ bot, messages, loading, loadingStatus, onSend, workerCount, onWorkersToggle, onCancel }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -148,6 +149,9 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, onSend, worke
               </span>
               {loadingStatus && (
                 <span className={styles.thinkingStatus}>{loadingStatus}</span>
+              )}
+              {onCancel && (
+                <button className={styles.cancelBtn} onClick={onCancel}>Stop</button>
               )}
             </div>
           </div>

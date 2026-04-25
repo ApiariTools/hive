@@ -217,6 +217,7 @@ export default function App() {
             onSend={handleSend}
             workerCount={workers.length}
             onWorkersToggle={() => setWorkersOpen((v) => !v)}
+            onCancel={loading ? () => api.cancelBot(workspace, bot) : undefined}
           />
         )}
         <WorkersPanel

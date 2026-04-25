@@ -50,6 +50,10 @@ pub fn router(db: Db, config_dir: &std::path::Path) -> Router {
             "/api/workspaces/{workspace}/bots/{bot}/status",
             get(get_bot_status),
         )
+        .route(
+            "/api/workspaces/{workspace}/bots/{bot}/cancel",
+            post(cancel_bot),
+        )
         .route("/api/workspaces/{workspace}/workers", get(list_workers))
         .route(
             "/api/workspaces/{workspace}/workers/{worker_id}",
@@ -433,6 +437,19 @@ async fn get_bot_status(
     }
 }
 
+async fn cancel_bot(
+    State(state): State<AppState>,
+    Path((workspace, bot)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    info!("[chat] cancelling {workspace}/{bot}");
+    let _ = state.db.set_bot_status(&workspace, &bot, "cancelled", "", None);
+    // Give the background task a moment to notice
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let _ = state.db.set_bot_status(&workspace, &bot, "idle", "", None);
+    let _ = state.db.add_message(&workspace, &bot, "system", "Response cancelled.", None);
+    Json(serde_json::json!({"ok": true}))
+}
+
 /// Simple hash of a string for change detection. Not cryptographic.
 fn simple_hash(s: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
@@ -524,7 +541,7 @@ async fn run_bot_claude(
         dangerously_skip_permissions: true,
         include_partial_messages: true,
         working_dir,
-        max_turns: Some(50),
+        max_turns: Some(15),
         resume: resume_id,
         system_prompt,
         ..Default::default()
