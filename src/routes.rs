@@ -117,9 +117,52 @@ fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
     bots
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct WorkspaceConfig {
+    workspace: Option<WorkspaceInfo_>,
     bots: Option<Vec<BotInfo>>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct WorkspaceInfo_ {
+    root: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+}
+
+fn load_workspace_config(path: &std::path::Path) -> WorkspaceConfig {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|c| toml::from_str(&c).ok())
+        .unwrap_or_default()
+}
+
+fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
+    let ws = ws_config.workspace.clone().unwrap_or_default();
+    let ws_name = ws.name.as_deref().unwrap_or("unknown");
+    let ws_desc = ws.description.as_deref().unwrap_or("");
+
+    // Find this bot's role
+    let bot_role = ws_config
+        .bots
+        .as_ref()
+        .and_then(|bots| bots.iter().find(|b| b.name == bot_name))
+        .and_then(|b| b.role.as_deref())
+        .unwrap_or("Workspace assistant");
+
+    let mut prompt = format!(
+        "You are {bot_name}, a bot in the \"{ws_name}\" workspace.\n\
+         Workspace: {ws_desc}\n\
+         Your role: {bot_role}\n\n\
+         Be concise and helpful. You have access to the workspace's codebase.\n"
+    );
+
+    // Add workspace root context
+    if let Some(ref root) = ws.root {
+        prompt.push_str(&format!("Working directory: {root}\n"));
+    }
+
+    prompt
 }
 
 // ── Conversations ──
@@ -177,18 +220,30 @@ async fn send_message(
 
     info!("[chat] {workspace}/{bot}: {}", body.message);
 
-    // Resolve workspace root for working directory
+    // Load workspace config
     let config_path = state
         .config_dir
         .join("workspaces")
         .join(format!("{workspace}.toml"));
-    let working_dir = load_workspace_root(&config_path);
+    let ws_config = load_workspace_config(&config_path);
+    let working_dir = ws_config
+        .workspace
+        .as_ref()
+        .and_then(|w| w.root.as_ref())
+        .map(PathBuf::from);
 
     // Check for existing session to resume
     let resume_id = state.db.get_session_id(&workspace, &bot).unwrap_or(None);
     if let Some(ref id) = resume_id {
         info!("[chat] resuming session {id}");
     }
+
+    // Build system prompt from workspace config
+    let system_prompt = if resume_id.is_none() {
+        Some(build_system_prompt(&ws_config, &bot))
+    } else {
+        None // Don't re-send system prompt on resume
+    };
 
     // Build session options
     let opts = SessionOptions {
@@ -197,6 +252,7 @@ async fn send_message(
         working_dir,
         max_turns: Some(1),
         resume: resume_id,
+        system_prompt,
         ..Default::default()
     };
 
@@ -356,7 +412,12 @@ async fn list_workers(
         .join("workspaces")
         .join(format!("{workspace}.toml"));
 
-    let root = load_workspace_root(&config_path);
+    let ws_config = load_workspace_config(&config_path);
+    let root = ws_config
+        .workspace
+        .as_ref()
+        .and_then(|w| w.root.as_ref())
+        .map(PathBuf::from);
     let workers = match root {
         Some(root) => read_swarm_workers(&root),
         None => vec![],
@@ -376,16 +437,6 @@ struct WorkerInfo {
     description: Option<String>,
     elapsed_secs: Option<u64>,
     dispatched_by: Option<String>,
-}
-
-fn load_workspace_root(path: &std::path::Path) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let config: toml::Value = toml::from_str(&content).ok()?;
-    config
-        .get("workspace")?
-        .get("root")?
-        .as_str()
-        .map(PathBuf::from)
 }
 
 fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
