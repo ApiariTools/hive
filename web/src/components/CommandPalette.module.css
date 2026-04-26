@@ -1,15 +1,15 @@
-.palette [cmdk-overlay] {
+.overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
   z-index: 1000;
 }
 
-.palette [cmdk-dialog] {
+.dialog {
   position: fixed;
-  top: 50%;
+  top: 20%;
   left: 50%;
-  transform: translate(-50%, -50%);
+  transform: translateX(-50%);
   z-index: 1001;
   width: 90vw;
   max-width: 500px;
@@ -22,7 +22,7 @@
   flex-direction: column;
 }
 
-.palette [cmdk-input] {
+.dialog [cmdk-input] {
   width: 100%;
   border: none;
   outline: none;
@@ -34,17 +34,17 @@
   border-bottom: 1px solid var(--border);
 }
 
-.palette [cmdk-input]::placeholder {
+.dialog [cmdk-input]::placeholder {
   color: var(--text-faint);
 }
 
-.palette [cmdk-list] {
+.dialog [cmdk-list] {
   overflow-y: auto;
   flex: 1;
   max-height: 340px;
 }
 
-.palette [cmdk-group-heading] {
+.dialog [cmdk-group-heading] {
   color: var(--text-faint);
   font-size: 11px;
   text-transform: uppercase;
@@ -53,7 +53,7 @@
   user-select: none;
 }
 
-.palette [cmdk-item] {
+.dialog [cmdk-item] {
   padding: 10px 16px;
   color: var(--text);
   cursor: pointer;
@@ -62,12 +62,12 @@
   font-size: 14px;
 }
 
-.palette [cmdk-item][data-selected="true"] {
+.dialog [cmdk-item][data-selected="true"] {
   background: var(--accent-soft);
   color: var(--text-strong);
 }
 
-.palette [cmdk-empty] {
+.dialog [cmdk-empty] {
   padding: 24px 16px;
   color: var(--text-faint);
   text-align: center;
