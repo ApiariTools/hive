@@ -59,15 +59,20 @@ export default function App() {
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [tabHidden, setTabHidden] = useState(false);
   const lastMsgId = useRef<number>(0);
+  const nextTempId = useRef<number>(-1);
+  const loadingRef = useRef(false);
+  const tabHiddenRef = useRef(document.hidden);
 
   // Track tab visibility
   useEffect(() => {
-    const handler = () => setTabHidden(document.hidden);
+    const handler = () => { tabHiddenRef.current = document.hidden; };
     document.addEventListener("visibilitychange", handler);
     return () => document.removeEventListener("visibilitychange", handler);
   }, []);
+
+  // Keep loadingRef in sync
+  useEffect(() => { loadingRef.current = loading; }, [loading]);
 
   // Load workspaces on mount
   useEffect(() => {
@@ -102,7 +107,7 @@ export default function App() {
         // Append message directly instead of full refetch
         if (event.workspace === workspace && event.bot === bot) {
           const newMsg: Message = {
-            id: Date.now(),
+            id: nextTempId.current--,
             workspace: event.workspace as string,
             bot: event.bot as string,
             role: event.role as string,
@@ -110,11 +115,7 @@ export default function App() {
             attachments: null,
             created_at: new Date().toISOString(),
           };
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last && last.content === newMsg.content && last.role === newMsg.role) return prev;
-            return [...prev, newMsg];
-          });
+          setMessages((prev) => [...prev, newMsg]);
         }
       }
     });
@@ -130,7 +131,7 @@ export default function App() {
     api.getUnread(workspace).then(setUnread);
   }, [workspace]);
 
-  // Load conversations when workspace or bot changes, poll for updates + bot status
+  // Load conversations + initial status when workspace or bot changes
   useEffect(() => {
     if (!workspace || !bot) return;
     setMessages([]);
@@ -143,10 +144,6 @@ export default function App() {
       setMessagesLoading(false);
       if (msgs.length > 0) lastMsgId.current = msgs[msgs.length - 1].id;
     });
-    // Mark current bot as seen after a brief delay (so badges show first on load)
-    const seenTimer = setTimeout(() => {
-      api.markSeen(workspace, bot);
-    }, 500);
     api.getBotStatus(workspace, bot).then((s) => {
       if (s.status !== "idle") {
         setLoading(true);
@@ -154,24 +151,34 @@ export default function App() {
         setStreamingContent(s.streaming_content || "");
       }
     });
+    // Mark current bot as seen after a brief delay (so badges show first on load)
+    const seenTimer = setTimeout(() => {
+      api.markSeen(workspace, bot);
+    }, 500);
+    return () => clearTimeout(seenTimer);
+  }, [workspace, bot]);
 
-    // Adaptive polling: 2s when active, 10s when idle, 30s when tab hidden
+  // Adaptive polling: 2s when active, 10s when idle, 30s when tab hidden
+  useEffect(() => {
+    if (!workspace || !bot) return;
+
     const getInterval = () => {
-      if (tabHidden) return 30000;
-      if (loading) return 2000;
+      if (tabHiddenRef.current) return 30000;
+      if (loadingRef.current) return 2000;
       return 10000;
     };
 
     let timer: ReturnType<typeof setTimeout>;
+    let cancelled = false;
     function poll() {
-      api.getConversations(workspace, bot, 30).then((msgs) => {
+      const convP = api.getConversations(workspace, bot, 30).then((msgs) => {
         const latestId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
         if (latestId !== lastMsgId.current) {
           lastMsgId.current = latestId;
           setMessages(msgs);
         }
       });
-      api.getBotStatus(workspace, bot).then((s) => {
+      const statusP = api.getBotStatus(workspace, bot).then((s) => {
         if (s.status === "idle") {
           setLoading(false);
           setLoadingStatus(undefined);
@@ -182,14 +189,16 @@ export default function App() {
           setStreamingContent(s.streaming_content || "");
         }
       });
-      timer = setTimeout(poll, getInterval());
+      Promise.all([convP, statusP]).then(() => {
+        if (!cancelled) timer = setTimeout(poll, getInterval());
+      });
     }
     timer = setTimeout(poll, getInterval());
     return () => {
+      cancelled = true;
       clearTimeout(timer);
-      clearTimeout(seenTimer);
     };
-  }, [workspace, bot, loading, tabHidden]);
+  }, [workspace, bot]);
 
   // Poll workers every 5s, repos every 30s
   useEffect(() => {
