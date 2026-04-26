@@ -84,8 +84,34 @@
   margin-left: 8px;
 }
 
+.workerInfo {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.workerName {
+  font-size: 13px;
+}
+
+.workerDesc {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workerMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .workerStatus {
   color: var(--text-faint);
   font-size: 12px;
-  margin-left: auto;
 }

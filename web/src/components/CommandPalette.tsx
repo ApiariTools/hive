@@ -76,14 +76,21 @@ export function CommandPalette({
           {workers.map((w) => (
             <Command.Item
               key={w.id}
-              value={`worker ${w.id} ${w.branch || ""}`}
+              value={`worker ${w.id} ${w.branch || ""} ${w.pr_title || ""}`}
               onSelect={() => {
                 onSelectWorker(w.id);
                 onOpenChange(false);
               }}
             >
-              {w.id}
-              <span className={styles.workerStatus}>{w.status}</span>
+              <span className={styles.workerInfo}>
+                <span className={styles.workerName}>{w.id}</span>
+                <span className={styles.workerDesc}>
+                  {w.pr_title || (w.branch ? w.branch.replace(/^swarm\//, "") : "")}
+                </span>
+              </span>
+              <span className={styles.workerMeta}>
+                <span className={styles.workerStatus}>{w.status}</span>
+              </span>
             </Command.Item>
           ))}
         </Command.Group>
