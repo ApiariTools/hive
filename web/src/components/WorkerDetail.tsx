@@ -16,13 +16,20 @@ function branchName(branch: string): string {
   return branch.replace(/^swarm\//, "");
 }
 
-type InfoTab = "output" | "task";
+type InfoTab = "output" | "task" | "chat";
 
 export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [infoTab, setInfoTab] = useState<InfoTab>("output");
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  const [infoTab, setInfoTab] = useState<InfoTab>(window.innerWidth <= 768 ? "chat" : "output");
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -35,6 +42,55 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
     setInput("");
     await api.sendWorkerMessage(workspace, worker.id, text);
     setSending(false);
+  }
+
+  function renderChat() {
+    return (
+      <>
+        <div className={styles.messages}>
+          {(!detail || detail.conversation.length === 0) && (
+            <div className={styles.empty}>No conversation data available</div>
+          )}
+          {detail?.conversation.map((msg, i) => (
+            <div key={i} className={`${styles.msg} ${msg.role === "user" ? styles.userMsg : ""} ${msg.role === "tool" ? styles.toolMsg : ""}`}>
+              {msg.role === "tool" ? (
+                <div className={styles.toolLabel}>{msg.content}</div>
+              ) : (
+                <>
+                  <div className={styles.msgMeta}>
+                    <strong>{msg.role === "user" ? "You" : worker.id}</strong>
+                  </div>
+                  <div className={styles.msgText}>
+                    <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
+        <div className={styles.inputArea}>
+          <div className={styles.inputRow}>
+            <input
+              className={styles.inputField}
+              placeholder="Message worker..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSend();
+              }}
+            />
+            <button
+              className={styles.sendBtn}
+              onClick={handleSend}
+              disabled={sending}
+            >
+              &uarr;
+            </button>
+          </div>
+        </div>
+      </>
+    );
   }
 
   return (
@@ -117,6 +173,12 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
           >
             Task
           </button>
+          <button
+            className={`${styles.tab} ${styles.tabChat} ${infoTab === "chat" ? styles.tabActive : ""}`}
+            onClick={() => setInfoTab("chat")}
+          >
+            Chat
+          </button>
         </div>
 
         {/* Tab content */}
@@ -139,59 +201,23 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
               <div className={styles.empty}>No task prompt</div>
             )
           )}
-        </div>
-      </div>
-
-      {/* Right: agent conversation */}
-      <div className={styles.chat}>
-        <div className={styles.chatHeader}>
-          <div className={styles.chatTitle}>Conversation</div>
-        </div>
-
-        <div className={styles.messages}>
-          {(!detail || detail.conversation.length === 0) && (
-            <div className={styles.empty}>No conversation data available</div>
-          )}
-          {detail?.conversation.map((msg, i) => (
-            <div key={i} className={`${styles.msg} ${msg.role === "user" ? styles.userMsg : ""} ${msg.role === "tool" ? styles.toolMsg : ""}`}>
-              {msg.role === "tool" ? (
-                <div className={styles.toolLabel}>{msg.content}</div>
-              ) : (
-                <>
-                  <div className={styles.msgMeta}>
-                    <strong>{msg.role === "user" ? "You" : worker.id}</strong>
-                  </div>
-                  <div className={styles.msgText}>
-                    <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
-                  </div>
-                </>
-              )}
+          {isMobile && infoTab === "chat" && (
+            <div className={styles.chatInTab}>
+              {renderChat()}
             </div>
-          ))}
-          <div ref={bottomRef} />
-        </div>
-
-        <div className={styles.inputArea}>
-          <div className={styles.inputRow}>
-            <input
-              className={styles.inputField}
-              placeholder="Message worker..."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSend();
-              }}
-            />
-            <button
-              className={styles.sendBtn}
-              onClick={handleSend}
-              disabled={sending}
-            >
-              &uarr;
-            </button>
-          </div>
+          )}
         </div>
       </div>
+
+      {/* Right: agent conversation (desktop only) */}
+      {!isMobile && (
+        <div className={styles.chat}>
+          <div className={styles.chatHeader}>
+            <div className={styles.chatTitle}>Conversation</div>
+          </div>
+          {renderChat()}
+        </div>
+      )}
     </div>
   );
 }
