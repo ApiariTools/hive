@@ -12,6 +12,14 @@ beforeEach(() => {
   window.location.hash = "";
 });
 
+async function renderAndSelectBot(name = "Main") {
+  const user = userEvent.setup();
+  render(<App />);
+  await waitFor(() => expect(screen.getByText(name)).toBeInTheDocument());
+  await user.click(screen.getByText(name));
+  return user;
+}
+
 describe("App", () => {
   it("renders workspace tabs", async () => {
     render(<App />);
@@ -36,7 +44,7 @@ describe("App", () => {
   });
 
   it("renders chat messages", async () => {
-    render(<App />);
+    await renderAndSelectBot("Main");
     await waitFor(() => {
       expect(screen.getByText("hello")).toBeInTheDocument();
       expect(screen.getByText(/How can I help/)).toBeInTheDocument();
@@ -56,16 +64,20 @@ describe("App", () => {
   });
 
   it("has a text input", async () => {
-    render(<App />);
+    await renderAndSelectBot("Main");
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/Message Main/)).toBeInTheDocument();
     });
   });
 
-  it("calls markSeen on mount", async () => {
+  it("calls markSeen on bot select", async () => {
     render(<App />);
+    await waitFor(() => expect(screen.getByText("Main")).toBeInTheDocument());
+    expect(api.markSeen).not.toHaveBeenCalled();
+    const user = userEvent.setup();
+    await user.click(screen.getByText("Main"));
     await waitFor(() => {
-      expect(api.markSeen).toHaveBeenCalled();
+      expect(api.markSeen).toHaveBeenCalledWith("apiari", "Main");
     });
   });
 
