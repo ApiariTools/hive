@@ -50,8 +50,25 @@
   flex-shrink: 0;
 }
 
-.name {
+.nameGroup {
+  display: flex;
+  flex-direction: column;
   flex: 1;
+  min-width: 0;
+}
+
+.name {
+}
+
+.role {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  line-height: 1.2;
+  font-weight: 400;
 }
 
 .badge {
