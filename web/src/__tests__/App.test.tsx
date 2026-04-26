@@ -36,7 +36,10 @@ describe("App", () => {
   });
 
   it("renders chat messages", async () => {
+    const user = userEvent.setup();
     render(<App />);
+    await waitFor(() => expect(screen.getByText("Main")).toBeInTheDocument());
+    await user.click(screen.getByText("Main"));
     await waitFor(() => {
       expect(screen.getByText("hello")).toBeInTheDocument();
       expect(screen.getByText(/How can I help/)).toBeInTheDocument();
@@ -56,14 +59,20 @@ describe("App", () => {
   });
 
   it("has a text input", async () => {
+    const user = userEvent.setup();
     render(<App />);
+    await waitFor(() => expect(screen.getByText("Main")).toBeInTheDocument());
+    await user.click(screen.getByText("Main"));
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/Message Main/)).toBeInTheDocument();
     });
   });
 
-  it("calls markSeen on mount", async () => {
+  it("calls markSeen on bot select", async () => {
+    const user = userEvent.setup();
     render(<App />);
+    await waitFor(() => expect(screen.getByText("Main")).toBeInTheDocument());
+    await user.click(screen.getByText("Main"));
     await waitFor(() => {
       expect(api.markSeen).toHaveBeenCalled();
     });
