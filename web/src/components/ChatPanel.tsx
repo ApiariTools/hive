@@ -1,7 +1,8 @@
 import { useRef, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Mic, Square, Paperclip, ArrowUp, ChevronDown } from "lucide-react";
+import { Mic, Square, Paperclip, ArrowUp, ChevronDown, Volume2 } from "lucide-react";
+import * as api from "../api";
 import type { Message } from "../types";
 import styles from "./ChatPanel.module.css";
 
@@ -42,6 +43,8 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number>(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [playingId, setPlayingId] = useState<number | null>(null);
+  const ttsSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -74,6 +77,43 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       mediaStreamRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (ttsSourceRef.current) {
+        ttsSourceRef.current.stop();
+        ttsSourceRef.current = null;
+      }
+    };
+  }, []);
+
+  async function playMessage(msg: Message) {
+    if (ttsSourceRef.current) {
+      ttsSourceRef.current.stop();
+      ttsSourceRef.current = null;
+    }
+    if (playingId === msg.id) {
+      setPlayingId(null);
+      return;
+    }
+    setPlayingId(msg.id);
+    const audioData = await api.textToSpeech(msg.content);
+    if (!audioData) {
+      setPlayingId(null);
+      return;
+    }
+    const audioCtx = new AudioContext();
+    const buffer = await audioCtx.decodeAudioData(audioData);
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+    source.onended = () => {
+      setPlayingId(null);
+      ttsSourceRef.current = null;
+    };
+    ttsSourceRef.current = source;
+    source.start();
+  }
 
   function send() {
     const el = textareaRef.current;
@@ -352,6 +392,15 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
               <strong>{msg.role === "user" ? "You" : bot}</strong>
               {" · "}
               {formatTime(msg.created_at)}
+              {msg.role === "assistant" && (
+                <button
+                  className={styles.playBtn}
+                  onClick={() => playMessage(msg)}
+                  aria-label={playingId === msg.id ? "Stop" : "Play"}
+                >
+                  {playingId === msg.id ? <Square size={12} /> : <Volume2 size={12} />}
+                </button>
+              )}
             </div>
             {renderAttachments(msg.attachments)}
             <div className={styles.text}>

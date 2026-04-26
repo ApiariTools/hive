@@ -64,6 +64,7 @@ pub fn router(
             post(cancel_bot),
         )
         .route("/api/transcribe", post(transcribe_audio))
+        .route("/api/tts", post(text_to_speech))
         .route("/api/workspaces/{workspace}/unread", get(get_unread))
         .route("/api/workspaces/{workspace}/seen/{bot}", post(mark_seen))
         .route("/ws", get(ws_handler))
@@ -1270,6 +1271,44 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
                 )),
             )
         }
+    }
+}
+
+// ── TTS ──
+
+async fn text_to_speech(Json(body): Json<serde_json::Value>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let text = body.get("text").and_then(|t| t.as_str()).unwrap_or("");
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing text").into_response();
+    }
+
+    let client = reqwest::Client::new();
+    match client
+        .post("http://127.0.0.1:4201/tts")
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let bytes = resp.bytes().await.unwrap_or_default();
+            (StatusCode::OK, [("content-type", "audio/wav")], bytes).into_response()
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            (
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                "TTS server error",
+            )
+                .into_response()
+        }
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TTS server not running. Run: cd tts && ./setup.sh && source .venv/bin/activate && python server.py",
+        )
+            .into_response(),
     }
 }
 
