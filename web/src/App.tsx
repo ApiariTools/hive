@@ -50,6 +50,7 @@ export default function App() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -113,9 +114,13 @@ export default function App() {
   useEffect(() => {
     if (!workspace || !bot) return;
     setMessages([]);
+    setMessagesLoading(true);
     setLoading(false);
     setLoadingStatus(undefined);
-    api.getConversations(workspace, bot).then(setMessages);
+    api.getConversations(workspace, bot, 30).then((msgs) => {
+      setMessages(msgs);
+      setMessagesLoading(false);
+    });
     api.markSeen(workspace, bot).then(() => {
       api.getUnread(workspace).then(setUnread);
     });
@@ -127,9 +132,8 @@ export default function App() {
       }
     });
 
-    // Poll every 2s for conversations + bot status
+    // Poll every 2s for bot status only — conversations update via WebSocket events
     const interval = setInterval(() => {
-      api.getConversations(workspace, bot).then(setMessages);
       api.getBotStatus(workspace, bot).then((s) => {
         if (s.status === "idle") {
           setLoading(false);
@@ -299,6 +303,7 @@ export default function App() {
           <ChatPanel
             bot={bot}
             messages={messages}
+            messagesLoading={messagesLoading}
             loading={loading}
             loadingStatus={loadingStatus}
             streamingContent={streamingContent}

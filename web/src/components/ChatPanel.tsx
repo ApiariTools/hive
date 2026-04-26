@@ -14,6 +14,7 @@ export interface Attachment {
 interface Props {
   bot: string;
   messages: Message[];
+  messagesLoading?: boolean;
   loading: boolean;
   loadingStatus?: string;
   streamingContent?: string;
@@ -23,7 +24,7 @@ interface Props {
   onSend: (text: string, attachments?: Attachment[]) => void;
 }
 
-export function ChatPanel({ bot, messages, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel }: Props) {
+export function ChatPanel({ bot, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -328,7 +329,10 @@ export function ChatPanel({ bot, messages, loading, loadingStatus, streamingCont
 
       <div className={styles.messagesWrap}>
       <div className={styles.messages} onScroll={handleMessagesScroll}>
-        {messages.length === 0 && !loading && (
+        {messagesLoading && messages.length === 0 && (
+          <div className={styles.empty}>Loading...</div>
+        )}
+        {!messagesLoading && messages.length === 0 && !loading && (
           <div className={styles.empty}>
             Start a conversation with {bot}
           </div>

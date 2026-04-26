@@ -27,8 +27,10 @@ export function getRepos(workspace: string): Promise<Repo[]> {
 export function getConversations(
   workspace: string,
   bot: string,
+  limit?: number,
 ): Promise<Message[]> {
-  return get(`/workspaces/${workspace}/conversations/${bot}`);
+  const params = limit ? `?limit=${limit}` : "";
+  return get(`/workspaces/${workspace}/conversations/${bot}${params}`);
 }
 
 export function getWorkerDetail(

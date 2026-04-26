@@ -289,7 +289,7 @@ async fn get_conversations(
     Path(workspace): Path<String>,
     Query(params): Query<ConvQuery>,
 ) -> Json<Vec<crate::db::MessageRow>> {
-    let limit = params.limit.unwrap_or(100);
+    let limit = params.limit.unwrap_or(30);
     let rows = state
         .db
         .get_all_conversations(&workspace, limit)
@@ -302,7 +302,7 @@ async fn get_bot_conversations(
     Path((workspace, bot)): Path<(String, String)>,
     Query(params): Query<ConvQuery>,
 ) -> Json<Vec<crate::db::MessageRow>> {
-    let limit = params.limit.unwrap_or(100);
+    let limit = params.limit.unwrap_or(30);
     let rows = state
         .db
         .get_conversations(&workspace, &bot, limit)
