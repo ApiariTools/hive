@@ -132,7 +132,7 @@ struct BotInfo {
     color: Option<String>,
     #[serde(default)]
     role: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(default = "default_provider")]
     provider: String,
@@ -1969,6 +1969,41 @@ mod tests {
         let bots = load_bots_from_config(&path);
         assert_eq!(bots.len(), 2);
         assert_eq!(bots[1].name, "Perf");
+    }
+
+    #[test]
+    fn test_load_bots_description_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        std::fs::write(
+            &path,
+            "[[bots]]\nname = \"Customer\"\nrole = \"Error monitor\"\ndescription = \"Monitors user-facing errors via Sentry\"\n",
+        )
+        .unwrap();
+        let bots = load_bots_from_config(&path);
+        assert_eq!(bots.len(), 2);
+        assert_eq!(
+            bots[1].description,
+            Some("Monitors user-facing errors via Sentry".to_string())
+        );
+        // Default Main bot has no description
+        assert_eq!(bots[0].description, None);
+    }
+
+    #[test]
+    fn test_description_omitted_from_json_when_none() {
+        let bot = BotInfo {
+            name: "Main".into(),
+            color: None,
+            role: None,
+            description: None,
+            provider: "claude".into(),
+            model: None,
+            prompt_file: None,
+            watch: vec![],
+        };
+        let json = serde_json::to_string(&bot).unwrap();
+        assert!(!json.contains("description"));
     }
 
     // ── read_agent_events ──
