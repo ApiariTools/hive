@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -7,6 +7,7 @@ use tracing::info;
 mod config_watcher;
 mod db;
 mod events;
+mod publish;
 mod routes;
 mod watcher;
 
@@ -20,6 +21,15 @@ struct Cli {
     /// Config directory (default: ~/.config/hive)
     #[arg(long)]
     config_dir: Option<std::path::PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Publish a report from a specialty bot
+    Publish(publish::PublishArgs),
 }
 
 #[tokio::main]
@@ -44,8 +54,19 @@ async fn main() -> Result<()> {
 
     let config_dir = cli
         .config_dir
+        .clone()
         .unwrap_or_else(|| dirs::home_dir().unwrap().join(".config/hive"));
     std::fs::create_dir_all(&config_dir)?;
+
+    // Handle subcommands before daemon startup
+    if let Some(command) = cli.command {
+        match command {
+            Command::Publish(args) => {
+                let db_path = config_dir.join("hive.db");
+                return publish::run(args, &db_path);
+            }
+        }
+    }
 
     let db_path = config_dir.join("hive.db");
     let db = db::Db::open(&db_path)?;

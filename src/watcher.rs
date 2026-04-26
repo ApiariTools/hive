@@ -112,17 +112,24 @@ async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
          Your role: {}\n\n\
          This is a scheduled proactive check. Do the following:\n\n\
          {}\n\n\
-         IMPORTANT: Do your research silently. When you have your findings, \
-         write your final clean report to this file:\n\
-         {}\n\n\
+         IMPORTANT: Do your research silently using tools. Do NOT narrate your process.\n\
+         When you have your findings, publish your report using this command:\n\
+         ```\n\
+         hive publish --workspace {ws} --bot {bot_name} --file /tmp/hive-report.md\n\
+         ```\n\
+         First write your report to /tmp/hive-report.md, then run the command above.\n\n\
          The report should be:\n\
-         - Clean markdown, no narration of your process\n\
+         - Clean markdown, no narration\n\
          - Lead with the most important finding\n\
          - Use tables for structured data\n\
-         - Short and scannable\n\
-         - No \"Let me check\" or \"Here's what I found\" — just the report\n\n\
-         Write the file and then say DONE.",
-        bot.name, bot.workspace, bot.role, prompt, report_path
+         - Short and scannable\n\n\
+         After publishing, say DONE.",
+        bot.name,
+        bot.workspace,
+        bot.role,
+        prompt,
+        ws = bot.workspace,
+        bot_name = bot.name
     );
 
     let response = match bot.provider.as_str() {
