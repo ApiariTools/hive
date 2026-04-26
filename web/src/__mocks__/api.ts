@@ -1,0 +1,34 @@
+import { vi } from "vitest";
+
+export const getWorkspaces = vi.fn().mockResolvedValue([
+  { name: "apiari" },
+  { name: "mgm" },
+]);
+
+export const getBots = vi.fn().mockResolvedValue([
+  { name: "Main", color: "#f5c542", role: "Assistant", watch: [] },
+  { name: "Customer", color: "#e85555", role: "Customer bot", watch: ["sentry"] },
+]);
+
+export const getWorkers = vi.fn().mockResolvedValue([]);
+
+export const getRepos = vi.fn().mockResolvedValue([]);
+
+export const getConversations = vi.fn().mockResolvedValue([
+  { id: 1, workspace: "apiari", bot: "Main", role: "user", content: "hello", attachments: null, created_at: new Date().toISOString() },
+  { id: 2, workspace: "apiari", bot: "Main", role: "assistant", content: "Hi! How can I help?", attachments: null, created_at: new Date().toISOString() },
+]);
+
+export const getBotStatus = vi.fn().mockResolvedValue({
+  status: "idle",
+  streaming_content: "",
+  tool_name: null,
+});
+
+export const getUnread = vi.fn().mockResolvedValue({ Customer: 2 });
+export const markSeen = vi.fn().mockResolvedValue(undefined);
+export const sendMessage = vi.fn().mockResolvedValue({ ok: true });
+export const cancelBot = vi.fn().mockResolvedValue({ ok: true });
+export const getWorkerDetail = vi.fn().mockResolvedValue(null);
+export const sendWorkerMessage = vi.fn().mockResolvedValue({ ok: true });
+export const connectWebSocket = vi.fn().mockReturnValue({ close: vi.fn() });
