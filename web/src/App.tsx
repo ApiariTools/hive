@@ -121,9 +121,10 @@ export default function App() {
       setMessages(msgs);
       setMessagesLoading(false);
     });
-    api.markSeen(workspace, bot).then(() => {
-      api.getUnread(workspace).then(setUnread);
-    });
+    // Mark current bot as seen after a brief delay (so badges show first on load)
+    const timer = setTimeout(() => {
+      api.markSeen(workspace, bot);
+    }, 500);
     api.getBotStatus(workspace, bot).then((s) => {
       if (s.status !== "idle") {
         setLoading(true);
@@ -147,7 +148,10 @@ export default function App() {
         }
       });
     }, 2000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timer);
+    };
   }, [workspace, bot]);
 
   // Poll workers every 5s, repos every 30s
