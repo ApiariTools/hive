@@ -13,6 +13,7 @@ export interface Attachment {
 
 interface Props {
   bot: string;
+  botDescription?: string;
   messages: Message[];
   messagesLoading: boolean;
   loading: boolean;
@@ -24,7 +25,7 @@ interface Props {
   onSend: (text: string, attachments?: Attachment[]) => void;
 }
 
-export function ChatPanel({ bot, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel }: Props) {
+export function ChatPanel({ bot, botDescription, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -319,7 +320,12 @@ export function ChatPanel({ bot, messages, messagesLoading, loading, loadingStat
   return (
     <div className={styles.panel}>
       <div className={styles.header}>
-        <div className={styles.headerName}>{bot}</div>
+        <div className={styles.headerInfo}>
+          <div className={styles.headerName}>{bot}</div>
+          {botDescription && (
+            <div className={styles.headerDescription}>{botDescription}</div>
+          )}
+        </div>
         {onWorkersToggle && (
           <button className={styles.workersBtn} onClick={onWorkersToggle}>
             {workerCount ? `${workerCount} worker${workerCount !== 1 ? "s" : ""}` : "No workers"}

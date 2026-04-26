@@ -132,6 +132,8 @@ struct BotInfo {
     color: Option<String>,
     #[serde(default)]
     role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     #[serde(default = "default_provider")]
     provider: String,
     #[serde(default)]
@@ -153,6 +155,7 @@ fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
         name: "Main".to_string(),
         color: Some("#f5c542".to_string()),
         role: Some("Workspace assistant".to_string()),
+        description: None,
         provider: default_provider(),
         model: None,
         prompt_file: None,
@@ -1846,6 +1849,7 @@ mod tests {
                 name: "Customer".into(),
                 color: None,
                 role: Some("Handles errors".into()),
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 prompt_file: None,
@@ -1965,6 +1969,42 @@ mod tests {
         let bots = load_bots_from_config(&path);
         assert_eq!(bots.len(), 2);
         assert_eq!(bots[1].name, "Perf");
+    }
+
+    #[test]
+    fn test_load_bots_description_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        std::fs::write(
+            &path,
+            "[[bots]]\nname = \"Customer\"\nrole = \"Error monitor\"\ndescription = \"Monitors user-facing errors via Sentry\"\n",
+        )
+        .unwrap();
+        let bots = load_bots_from_config(&path);
+        assert_eq!(bots.len(), 2);
+        assert_eq!(
+            bots[1].description,
+            Some("Monitors user-facing errors via Sentry".to_string())
+        );
+        // Default Main bot has no description
+        assert_eq!(bots[0].description, None);
+    }
+
+    #[test]
+    fn test_description_omitted_from_json_when_none() {
+        let bot = BotInfo {
+            name: "Main".into(),
+            color: None,
+            role: None,
+            description: None,
+            provider: "claude".into(),
+            model: None,
+            prompt_file: None,
+            watch: vec![],
+            services: vec![],
+        };
+        let json = serde_json::to_string(&bot).unwrap();
+        assert!(!json.contains("description"));
     }
 
     // ── read_agent_events ──
@@ -2208,6 +2248,7 @@ mod tests {
                 name: "Monitor".into(),
                 color: None,
                 role: Some("Monitors errors".into()),
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 prompt_file: None,
@@ -2240,6 +2281,7 @@ mod tests {
                 name: "Plain".into(),
                 color: None,
                 role: Some("Just chatting".into()),
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 prompt_file: None,
@@ -2300,6 +2342,7 @@ services = ["sentry", "grafana"]
                 name: "Custom".into(),
                 color: None,
                 role: None,
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 prompt_file: Some("custom.md".to_string()),

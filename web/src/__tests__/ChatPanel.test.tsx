@@ -122,4 +122,14 @@ describe("ChatPanel", () => {
     expect(screen.queryByText(/Start a conversation/)).not.toBeInTheDocument();
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
   });
+
+  it("renders bot description when provided", () => {
+    render(<ChatPanel {...defaultProps} botDescription="Monitors errors via Sentry" />);
+    expect(screen.getByText("Monitors errors via Sentry")).toBeInTheDocument();
+  });
+
+  it("does not render description element when not provided", () => {
+    const { container } = render(<ChatPanel {...defaultProps} />);
+    expect(container.querySelector('[class*="headerDescription"]')).toBeNull();
+  });
 });

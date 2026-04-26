@@ -6,6 +6,7 @@ export interface Bot {
   name: string;
   color?: string;
   role?: string;
+  description?: string;
   watch: string[];
 }
 
