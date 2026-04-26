@@ -92,6 +92,30 @@ fn compute_prompt_hash(ws: &WatchedWorkspace, _bot: &str) -> String {
         if let Ok(soul) = std::fs::read_to_string(root.join(".apiari/soul.md")) {
             soul.hash(&mut hasher);
         }
+
+        // Hash docs directory: sorted filenames + modification times
+        let docs_dir = root.join(".apiari/docs");
+        if docs_dir.is_dir()
+            && let Ok(read_dir) = std::fs::read_dir(&docs_dir)
+        {
+            let mut doc_entries: Vec<(String, u64)> = read_dir
+                .flatten()
+                .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    let mtime = e
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    (name, mtime)
+                })
+                .collect();
+            doc_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            doc_entries.hash(&mut hasher);
+        }
     }
 
     format!("{:016x}", hasher.finish())
