@@ -9,13 +9,14 @@ Workspace chat hub with multi-bot, multi-provider support. A Rust daemon serves 
 - Rust 1.85+
 - Node 20+
 - At least one provider CLI installed (e.g. `claude`)
+- Optional: `gh` CLI (for GitHub watch bots), `swarm` CLI (for worker integration)
 
 ### Build & Run
 
 ```bash
 cargo build --release
 cd web && npm install && npm run build && cd ..
-cargo run -- --port 4200
+./target/release/hive --port 4200
 ```
 
 Open `http://localhost:4200` in your browser.

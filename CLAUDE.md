@@ -20,7 +20,7 @@ src/
   events.rs         — WebSocket broadcast hub (tokio broadcast, 256-slot buffer)
   watcher.rs        — Signal watchers (GitHub polling) + proactive/scheduled bot runner
   publish.rs        — CLI subcommand for bots to post clean reports to DB
-  config_watcher.rs — Polls every 30s for config/prompt changes, resets sessions
+  config_watcher.rs — Polls every 30s for config/prompt changes, logs session-reset message
   lib.rs            — Re-exports (bot, db, events, publish, routes) for test visibility
 
 web/
@@ -59,7 +59,7 @@ Three-tier bot architecture:
 7. Streaming text deltas written to `bot_status.streaming_content`
 8. On completion: trimmed response stored in `conversations`, session ID saved, status set to idle
 9. WebSocket events broadcast for `bot_status` and `message` updates
-10. Frontend polls `bot_status` every 3s + listens on WebSocket for real-time updates
+10. Frontend polls `bot_status` every 2s + listens on WebSocket for real-time updates
 
 ### Bot Lifecycle (proactive/scheduled)
 
@@ -154,7 +154,7 @@ Body limit: 50MB (for image attachments).
 - If hash matches stored session → resume conversation (no system prompt re-sent)
 - If hash changed (config edit, context.md change) → start fresh session, system message logged
 - `config_watcher.rs` polls every 30s: hashes TOML config + context.md + soul.md content
-- On change detection: logs system message "Session reset — bot configuration was updated."
+- On change detection: logs system message "Session reset — bot configuration was updated." (does not clear sessions table; the next chat message detects the hash mismatch and starts a fresh session)
 
 ## Swarm Integration
 
@@ -215,7 +215,7 @@ Dark theme. CSS variables in `web/src/theme.css`:
 ## Key Patterns
 - Frontend is dumb — all state lives in daemon/DB
 - Bot sessions run in background tasks (fire-and-forget)
-- Frontend polls bot_status every 3s, gets conversations on load + WebSocket events
+- Frontend polls bot_status every 2s, gets conversations on load + WebSocket events
 - `useKeyboardHeight` was removed — don't re-add iOS keyboard hacks
 - Uncontrolled textarea for chat input (no React state for input value)
 - `onMouseDown preventDefault` on send button keeps iOS keyboard open
