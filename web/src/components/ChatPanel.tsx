@@ -14,7 +14,7 @@ export interface Attachment {
 interface Props {
   bot: string;
   messages: Message[];
-  messagesLoading?: boolean;
+  messagesLoading: boolean;
   loading: boolean;
   loadingStatus?: string;
   streamingContent?: string;

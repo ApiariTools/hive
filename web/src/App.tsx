@@ -132,8 +132,9 @@ export default function App() {
       }
     });
 
-    // Poll every 2s for bot status only — conversations update via WebSocket events
+    // Poll every 3s for bot status + conversations
     const interval = setInterval(() => {
+      api.getConversations(workspace, bot, 30).then(setMessages);
       api.getBotStatus(workspace, bot).then((s) => {
         if (s.status === "idle") {
           setLoading(false);
