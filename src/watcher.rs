@@ -91,6 +91,11 @@ async fn run_watcher(bot: WatchedBot, db: Db) {
 async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
     info!("[watcher] running proactive task for {}", bot.name);
 
+    let report_path = format!("/tmp/hive-report-{}-{}.md", bot.workspace, bot.name);
+
+    // Clean up any old report
+    let _ = std::fs::remove_file(&report_path);
+
     let _ = db.add_message(
         &bot.workspace,
         &bot.name,
@@ -107,8 +112,17 @@ async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
          Your role: {}\n\n\
          This is a scheduled proactive check. Do the following:\n\n\
          {}\n\n\
-         Be concise. Use markdown. Lead with findings.",
-        bot.name, bot.workspace, bot.role, prompt
+         IMPORTANT: Do your research silently. When you have your findings, \
+         write your final clean report to this file:\n\
+         {}\n\n\
+         The report should be:\n\
+         - Clean markdown, no narration of your process\n\
+         - Lead with the most important finding\n\
+         - Use tables for structured data\n\
+         - Short and scannable\n\
+         - No \"Let me check\" or \"Here's what I found\" — just the report\n\n\
+         Write the file and then say DONE.",
+        bot.name, bot.workspace, bot.role, prompt, report_path
     );
 
     let response = match bot.provider.as_str() {
@@ -117,30 +131,43 @@ async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
         _ => run_claude_autonomous(&full_prompt, &bot.working_dir).await,
     };
 
-    match response {
-        Ok(text) if !text.trim().is_empty() => {
+    // Read the report file if it exists, otherwise fall back to streaming output
+    let report = std::fs::read_to_string(&report_path).ok();
+    let _ = std::fs::remove_file(&report_path);
+
+    match (report, response) {
+        (Some(text), _) if !text.trim().is_empty() => {
             let _ = db.add_message(&bot.workspace, &bot.name, "assistant", text.trim(), None);
             info!(
-                "[watcher] {} proactive check done ({} chars)",
+                "[watcher] {} report published ({} chars)",
                 bot.name,
                 text.len()
             );
         }
-        Ok(_) => {
-            let _ = db.add_message(
-                &bot.workspace,
-                &bot.name,
-                "assistant",
-                "No notable findings this check.",
-                None,
+        (_, Ok(text)) if !text.trim().is_empty() => {
+            // Fallback: bot didn't write the file, use streaming output
+            let _ = db.add_message(&bot.workspace, &bot.name, "assistant", text.trim(), None);
+            info!(
+                "[watcher] {} fallback output ({} chars)",
+                bot.name,
+                text.len()
             );
         }
-        Err(e) => {
+        (_, Err(e)) => {
             let _ = db.add_message(
                 &bot.workspace,
                 &bot.name,
                 "assistant",
                 &format!("Proactive check failed: {e}"),
+                None,
+            );
+        }
+        _ => {
+            let _ = db.add_message(
+                &bot.workspace,
+                &bot.name,
+                "assistant",
+                "No notable findings this check.",
                 None,
             );
         }
