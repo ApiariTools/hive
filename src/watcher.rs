@@ -20,43 +20,129 @@ pub struct WatchedBot {
     pub role: String,
     pub watch: Vec<String>,
     pub working_dir: Option<PathBuf>,
+    pub schedule_hours: Option<u64>,
+    pub proactive_prompt: Option<String>,
 }
 
-/// Start watcher loops for all bots that have watch sources.
+/// Start watcher loops for all bots that have watch sources or schedules.
 pub fn start_watchers(bots: Vec<WatchedBot>, db: Db) {
     for bot in bots {
-        if bot.watch.is_empty() {
+        let has_watch = !bot.watch.is_empty();
+        let has_schedule = bot.schedule_hours.is_some() && bot.proactive_prompt.is_some();
+
+        if !has_watch && !has_schedule {
             continue;
         }
-        info!(
-            "[watcher] starting watchers for {} ({:?})",
-            bot.name, bot.watch
-        );
+
+        if has_watch {
+            info!(
+                "[watcher] starting signal watchers for {} ({:?})",
+                bot.name, bot.watch
+            );
+        }
+        if has_schedule {
+            info!(
+                "[watcher] starting proactive schedule for {} (every {}h)",
+                bot.name,
+                bot.schedule_hours.unwrap_or(24)
+            );
+        }
+
         tokio::spawn(run_watcher(bot, db.clone()));
     }
 }
 
 async fn run_watcher(bot: WatchedBot, db: Db) {
-    let mut tick = interval(Duration::from_secs(60));
+    let signal_interval = Duration::from_secs(60);
+    let proactive_interval = Duration::from_secs(bot.schedule_hours.unwrap_or(24) * 3600);
+
+    let mut signal_tick = interval(signal_interval);
+    let mut proactive_tick = interval(proactive_interval);
+
+    // Skip the first proactive tick (don't fire on startup)
+    proactive_tick.tick().await;
 
     loop {
-        tick.tick().await;
-
-        for source in &bot.watch {
-            match source.as_str() {
-                "github" => {
-                    if let Some(signal) = poll_github(&bot.working_dir).await {
-                        dispatch_signal(&bot, &db, &signal).await;
+        tokio::select! {
+            _ = signal_tick.tick() => {
+                for source in &bot.watch {
+                    match source.as_str() {
+                        "github" => {
+                            if let Some(signal) = poll_github(&bot.working_dir).await {
+                                dispatch_signal(&bot, &db, &signal).await;
+                            }
+                        }
+                        "sentry" => {
+                            // Sentry polling — placeholder
+                        }
+                        _ => {}
                     }
                 }
-                "sentry" => {
-                    // Sentry polling would go here — needs API token from config
-                    // For now, just a placeholder
-                }
-                other => {
-                    tracing::debug!("[watcher] unknown source: {other}");
+            }
+            _ = proactive_tick.tick() => {
+                if let Some(ref prompt) = bot.proactive_prompt {
+                    run_proactive(&bot, &db, prompt).await;
                 }
             }
+        }
+    }
+}
+
+async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
+    info!("[watcher] running proactive task for {}", bot.name);
+
+    let _ = db.add_message(
+        &bot.workspace,
+        &bot.name,
+        "system",
+        &format!(
+            "**Proactive check** — scheduled every {}h",
+            bot.schedule_hours.unwrap_or(24)
+        ),
+        None,
+    );
+
+    let full_prompt = format!(
+        "You are {}, a specialty bot for the {} workspace.\n\
+         Your role: {}\n\n\
+         This is a scheduled proactive check. Do the following:\n\n\
+         {}\n\n\
+         Be concise. Use markdown. Lead with findings.",
+        bot.name, bot.workspace, bot.role, prompt
+    );
+
+    let response = match bot.provider.as_str() {
+        "codex" => run_codex_autonomous(&full_prompt, &bot.working_dir).await,
+        "gemini" => run_gemini_autonomous(&full_prompt, &bot.working_dir).await,
+        _ => run_claude_autonomous(&full_prompt, &bot.working_dir).await,
+    };
+
+    match response {
+        Ok(text) if !text.trim().is_empty() => {
+            let _ = db.add_message(&bot.workspace, &bot.name, "assistant", text.trim(), None);
+            info!(
+                "[watcher] {} proactive check done ({} chars)",
+                bot.name,
+                text.len()
+            );
+        }
+        Ok(_) => {
+            let _ = db.add_message(
+                &bot.workspace,
+                &bot.name,
+                "assistant",
+                "No notable findings this check.",
+                None,
+            );
+        }
+        Err(e) => {
+            let _ = db.add_message(
+                &bot.workspace,
+                &bot.name,
+                "assistant",
+                &format!("Proactive check failed: {e}"),
+                None,
+            );
         }
     }
 }

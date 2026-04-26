@@ -125,7 +125,19 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                         })
                         .unwrap_or_default();
 
-                    if !watch.is_empty() {
+                    let schedule_hours = bot
+                        .get("schedule_hours")
+                        .and_then(|s| s.as_integer())
+                        .map(|s| s as u64);
+                    let proactive_prompt = bot
+                        .get("proactive_prompt")
+                        .and_then(|p| p.as_str())
+                        .map(String::from);
+
+                    let has_watch = !watch.is_empty();
+                    let has_schedule = schedule_hours.is_some() && proactive_prompt.is_some();
+
+                    if has_watch || has_schedule {
                         watched.push(watcher::WatchedBot {
                             workspace: workspace.clone(),
                             name,
@@ -142,6 +154,8 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                                 .to_string(),
                             watch,
                             working_dir: working_dir.clone(),
+                            schedule_hours,
+                            proactive_prompt,
                         });
                     }
                 }
