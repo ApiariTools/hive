@@ -190,6 +190,7 @@ fn load_workspace_config(path: &std::path::Path) -> WorkspaceConfig {
 }
 
 /// Parse `.apiari/services.toml` and generate prompt sections for the requested services.
+/// Public because `watcher.rs` also uses this for proactive bot prompts.
 pub fn build_services_prompt(root: &std::path::Path, services: &[String]) -> String {
     if services.is_empty() {
         return String::new();
@@ -251,6 +252,15 @@ pub fn build_services_prompt(root: &std::path::Path, services: &[String]) -> Str
         }
     }
 
+    if !prompt.is_empty() {
+        prompt.insert_str(
+            0,
+            "\nIMPORTANT: The credentials below are secrets. \
+             Never print, log, or expose them in responses. \
+             Only use them in curl commands.\n",
+        );
+    }
+
     prompt
 }
 
@@ -267,7 +277,8 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
     // Check for a bot-level prompt file (replaces the default identity section)
     if let Some(ref prompt_file) = bot_config.and_then(|b| b.prompt_file.clone()) {
         let root = ws.root.as_deref().unwrap_or(".");
-        let path = std::path::Path::new(root).join(prompt_file);
+        let root_path = std::path::Path::new(root);
+        let path = root_path.join(prompt_file);
         if let Ok(custom) = std::fs::read_to_string(&path) {
             // Custom prompt gets workspace context appended
             let mut prompt = custom;
@@ -277,6 +288,13 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
             prompt.push_str(&format!("\nWorkspace: {ws_name} — {ws_desc}\n"));
             if let Some(ref root) = ws.root {
                 prompt.push_str(&format!("Working directory: {root}\n"));
+            }
+            // Inject service credentials even for custom prompt bots
+            if let Some(bot) = bot_config {
+                let services_prompt = build_services_prompt(root_path, &bot.services);
+                if !services_prompt.is_empty() {
+                    prompt.push_str(&services_prompt);
+                }
             }
             return prompt;
         }
@@ -2244,6 +2262,54 @@ services = ["sentry", "grafana"]
         let config: WorkspaceConfig = toml::from_str(toml_str).unwrap();
         let bots = config.bots.unwrap();
         assert_eq!(bots[0].services, vec!["sentry", "grafana"]);
+    }
+
+    #[test]
+    fn test_services_prompt_includes_secrecy_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[sentry]\norg = \"o\"\nproject = \"p\"\ntoken = \"t\"\n",
+        )
+        .unwrap();
+
+        let prompt = build_services_prompt(dir.path(), &["sentry".to_string()]);
+        assert!(prompt.contains("credentials below are secrets"));
+        assert!(prompt.contains("Never print, log, or expose"));
+    }
+
+    #[test]
+    fn test_services_injected_with_prompt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[sentry]\norg = \"o\"\nproject = \"p\"\ntoken = \"tok\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("custom.md"), "You are a custom bot.\n").unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: Some(vec![BotInfo {
+                name: "Custom".into(),
+                color: None,
+                role: None,
+                provider: "claude".into(),
+                model: None,
+                prompt_file: Some("custom.md".to_string()),
+                watch: vec![],
+                services: vec!["sentry".to_string()],
+            }]),
+        };
+        let prompt = build_system_prompt(&config, "Custom");
+        assert!(prompt.contains("You are a custom bot."));
+        assert!(prompt.contains("Sentry Access"));
     }
 
     #[test]

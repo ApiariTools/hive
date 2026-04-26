@@ -128,9 +128,9 @@ async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
          IMPORTANT: Do your research silently using tools. Do NOT narrate your process.\n\
          When you have your findings, publish your report using this command:\n\
          ```\n\
-         hive publish --workspace {ws} --bot {bot_name} --file /tmp/hive-report.md\n\
+         hive publish --workspace {ws} --bot {bot_name} --file /tmp/hive-report-{ws}-{bot_name}.md\n\
          ```\n\
-         First write your report to /tmp/hive-report.md, then run the command above.\n\n\
+         First write your report to /tmp/hive-report-{ws}-{bot_name}.md, then run the command above.\n\n\
          The report should be:\n\
          - Clean markdown, no narration\n\
          - Lead with the most important finding\n\
