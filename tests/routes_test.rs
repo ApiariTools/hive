@@ -13,7 +13,7 @@ fn test_app_with_workspace(workspace_toml: &str) -> (axum::Router, tempfile::Tem
 
     let db = Db::open(&config_dir.join("hive.db")).unwrap();
     let events = EventHub::new();
-    let app = hive::routes::router(db, &config_dir, events);
+    let app = hive::routes::router(db, &config_dir, events, Default::default());
     (app, dir)
 }
 
@@ -65,7 +65,7 @@ async fn test_multiple_workspaces() {
 
     let db = Db::open(&config_dir.join("hive.db")).unwrap();
     let events = EventHub::new();
-    let app = hive::routes::router(db, &config_dir, events);
+    let app = hive::routes::router(db, &config_dir, events, Default::default());
 
     let (_, body) = get(&app, "/api/workspaces").await;
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
@@ -145,7 +145,7 @@ async fn test_unread_per_bot() {
     .unwrap();
 
     let events = EventHub::new();
-    let app = hive::routes::router(db, &config_dir, events);
+    let app = hive::routes::router(db, &config_dir, events, Default::default());
 
     let (_, body) = get(&app, "/api/workspaces/test/unread").await;
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -185,7 +185,7 @@ async fn test_cancel_resets_status() {
     .unwrap();
 
     let events = EventHub::new();
-    let app = hive::routes::router(db, &config_dir, events);
+    let app = hive::routes::router(db, &config_dir, events, Default::default());
 
     // Cancel
     post_json(&app, "/api/workspaces/test/bots/Main/cancel", "").await;
@@ -243,7 +243,7 @@ async fn test_search_endpoint() {
         .unwrap();
 
     let events = EventHub::new();
-    let app = hive::routes::router(db, &config_dir, events);
+    let app = hive::routes::router(db, &config_dir, events, Default::default());
 
     let (_, body) = get(
         &app,
@@ -270,7 +270,7 @@ async fn test_non_toml_files_ignored() {
 
     let db = Db::open(&config_dir.join("hive.db")).unwrap();
     let events = EventHub::new();
-    let app = hive::routes::router(db, &config_dir, events);
+    let app = hive::routes::router(db, &config_dir, events, Default::default());
 
     let (_, body) = get(&app, "/api/workspaces").await;
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();

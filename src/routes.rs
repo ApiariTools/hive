@@ -16,19 +16,27 @@ use tracing::info;
 
 use crate::db::Db;
 use crate::events::{EventHub, HiveEvent};
+use crate::pr_review::PrReviewCache;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
     pub config_dir: PathBuf,
     pub events: EventHub,
+    pub pr_review_cache: PrReviewCache,
 }
 
-pub fn router(db: Db, config_dir: &std::path::Path, events: EventHub) -> Router {
+pub fn router(
+    db: Db,
+    config_dir: &std::path::Path,
+    events: EventHub,
+    pr_review_cache: PrReviewCache,
+) -> Router {
     let state = AppState {
         db,
         config_dir: config_dir.to_path_buf(),
         events,
+        pr_review_cache,
     };
 
     Router::new()
@@ -1138,9 +1146,14 @@ async fn list_repos(
         None => return Json(vec![]),
     };
 
-    let repos = tokio::task::spawn_blocking(move || build_repos_list(&root))
+    let mut repos = tokio::task::spawn_blocking(move || build_repos_list(&root))
         .await
         .unwrap_or_default();
+
+    let cache = &state.pr_review_cache;
+    for repo in &mut repos {
+        enrich_workers_with_reviews(&mut repo.workers, cache);
+    }
 
     Json(repos)
 }
@@ -1241,10 +1254,12 @@ async fn list_workers(
         .as_ref()
         .and_then(|w| w.root.as_ref())
         .map(PathBuf::from);
-    let workers = match root {
+    let mut workers = match root {
         Some(root) => read_swarm_workers(&root),
         None => vec![],
     };
+
+    enrich_workers_with_reviews(&mut workers, &state.pr_review_cache);
 
     Json(workers)
 }
@@ -1260,6 +1275,16 @@ struct WorkerInfo {
     description: Option<String>,
     elapsed_secs: Option<u64>,
     dispatched_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ci_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_comments: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_comments: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_comments: Option<u32>,
 }
 
 fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
@@ -1319,9 +1344,45 @@ fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
                 description: None,
                 elapsed_secs: None,
                 dispatched_by: None,
+                review_state: None,
+                ci_status: None,
+                total_comments: None,
+                open_comments: None,
+                resolved_comments: None,
             })
         })
         .collect()
+}
+
+/// Enrich workers with PR review data from the cache.
+fn enrich_workers_with_reviews(workers: &mut [WorkerInfo], cache: &PrReviewCache) {
+    let guard = match cache.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    for worker in workers.iter_mut() {
+        if let Some(ref url) = worker.pr_url {
+            // Extract PR number from URL
+            let number = url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .and_then(|n| n.parse::<i64>().ok());
+
+            if let Some(num) = number
+                && let Some(review) = guard.get(&num)
+            {
+                worker.review_state.clone_from(&review.review_state);
+                worker.ci_status.clone_from(&review.ci_status);
+                if review.total_comments > 0 {
+                    worker.total_comments = Some(review.total_comments);
+                    worker.open_comments = Some(review.open_comments);
+                    worker.resolved_comments = Some(review.resolved_comments);
+                }
+            }
+        }
+    }
 }
 
 // ── Worker detail + messaging ──
@@ -1357,7 +1418,8 @@ async fn get_worker_detail(
         .map(PathBuf::from)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let workers = read_swarm_workers(&root);
+    let mut workers = read_swarm_workers(&root);
+    enrich_workers_with_reviews(&mut workers, &state.pr_review_cache);
     let info = workers
         .into_iter()
         .find(|w| w.id == worker_id)

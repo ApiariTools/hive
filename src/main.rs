@@ -7,6 +7,7 @@ use tracing::info;
 mod config_watcher;
 mod db;
 mod events;
+mod pr_review;
 mod publish;
 mod routes;
 mod watcher;
@@ -82,8 +83,16 @@ async fn main() -> Result<()> {
     let watched_workspaces = load_watched_workspaces(&config_dir);
     config_watcher::start_config_watcher(watched_workspaces, db.clone());
 
+    // Start PR review poller for each workspace with a root
+    let pr_review_cache: pr_review::PrReviewCache =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    for root in load_workspace_roots(&config_dir) {
+        info!("starting PR review poller for {}", root.display());
+        pr_review::start_pr_review_poller(pr_review_cache.clone(), root);
+    }
+
     let event_hub = events::EventHub::new();
-    let app = routes::router(db, &config_dir, event_hub);
+    let app = routes::router(db, &config_dir, event_hub, pr_review_cache);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
     info!("hive listening on http://{addr}");
@@ -241,6 +250,35 @@ fn load_watched_workspaces(config_dir: &std::path::Path) -> Vec<config_watcher::
     }
 
     watched
+}
+
+fn load_workspace_roots(config_dir: &std::path::Path) -> Vec<PathBuf> {
+    let workspaces_dir = config_dir.join("workspaces");
+    let mut roots = Vec::new();
+
+    let entries = match std::fs::read_dir(&workspaces_dir) {
+        Ok(e) => e,
+        Err(_) => return roots,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "toml")
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(config) = toml::from_str::<toml::Value>(&content)
+            && let Some(root) = config
+                .get("workspace")
+                .and_then(|w| w.get("root"))
+                .and_then(|r| r.as_str())
+        {
+            let root_path = PathBuf::from(root);
+            if root_path.join(".swarm").exists() && !roots.contains(&root_path) {
+                roots.push(root_path);
+            }
+        }
+    }
+
+    roots
 }
 
 fn dirs_home_dir() -> Option<std::path::PathBuf> {
