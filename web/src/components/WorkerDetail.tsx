@@ -78,6 +78,31 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
           </div>
         </div>
 
+        {/* PR review summary */}
+        {(worker.review_state || worker.ci_status || (worker.open_comments != null && worker.open_comments > 0)) && (
+          <div className={styles.reviewSummary}>
+            {worker.review_state && (
+              <span className={styles.reviewBadge} data-state={worker.review_state.toLowerCase()}>
+                {worker.review_state === "APPROVED" ? "Approved" :
+                 worker.review_state === "CHANGES_REQUESTED" ? "Changes requested" :
+                 "Review pending"}
+              </span>
+            )}
+            {worker.ci_status && (
+              <span className={styles.ciBadge} data-status={worker.ci_status.toLowerCase()}>
+                {worker.ci_status === "SUCCESS" ? "CI passing" :
+                 worker.ci_status === "FAILURE" ? "CI failing" :
+                 "CI pending"}
+              </span>
+            )}
+            {worker.open_comments != null && worker.open_comments > 0 && (
+              <span className={styles.commentCount}>
+                {worker.open_comments} open / {worker.resolved_comments ?? 0} resolved comments
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Tabs */}
         <div className={styles.tabs}>
           <button

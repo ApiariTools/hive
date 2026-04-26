@@ -20,7 +20,7 @@ fn test_app() -> (axum::Router, tempfile::TempDir) {
 
     let db = Db::open(&config_dir.join("hive.db")).unwrap();
     let events = EventHub::new();
-    let app = hive::routes::router(db, &config_dir, events);
+    let app = hive::routes::router(db, &config_dir, events, Default::default());
     (app, dir)
 }
 

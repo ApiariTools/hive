@@ -94,6 +94,66 @@
   color: var(--red);
 }
 
+/* ── PR Review ── */
+.reviewSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.reviewBadge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.reviewBadge[data-state="approved"] {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.reviewBadge[data-state="changes_requested"] {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.reviewBadge[data-state="commented"],
+.reviewBadge[data-state="pending"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.ciBadge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.ciBadge[data-status="success"] {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.ciBadge[data-status="failure"] {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.ciBadge[data-status="pending"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.commentCount {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 /* ── Tabs ── */
 .tabs {
   display: flex;
