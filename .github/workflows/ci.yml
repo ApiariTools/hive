@@ -35,4 +35,5 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      - run: npx vitest run
       - run: npx vite build
