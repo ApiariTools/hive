@@ -46,7 +46,10 @@ export function BotNav({
               className={styles.dot}
               style={{ background: botColor(b) }}
             />
-            <span className={styles.name}>{b.name}</span>
+            <span className={styles.nameGroup}>
+              <span className={styles.name}>{b.name}</span>
+              {b.role && <span className={styles.role}>{b.role}</span>}
+            </span>
             {count > 0 && activeBot !== b.name && (
               <span className={styles.badge}>{count}</span>
             )}
