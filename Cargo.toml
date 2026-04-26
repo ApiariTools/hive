@@ -18,6 +18,7 @@ apiari-claude-sdk = "0.2"
 apiari-codex-sdk = "0.1"
 apiari-gemini-sdk = "0.1"
 async-stream = "0.3"
+async-trait = "0.1"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["io-util"] }
