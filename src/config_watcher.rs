@@ -93,12 +93,17 @@ fn compute_prompt_hash(ws: &WatchedWorkspace, _bot: &str) -> String {
             soul.hash(&mut hasher);
         }
 
-        // Hash docs directory: sorted filenames + modification times
+        // Hash docs directory: sorted filenames + modification times.
+        // This supplements the prompt-based hash: the built system prompt
+        // includes the docs index (filenames + descriptions), so adding/removing
+        // files or changing first lines already changes the prompt hash. The mtime
+        // tracking here catches edits deeper in the file that don't change the
+        // first line, ensuring a session reset even then.
         let docs_dir = root.join(".apiari/docs");
         if docs_dir.is_dir()
             && let Ok(read_dir) = std::fs::read_dir(&docs_dir)
         {
-            let mut doc_entries: Vec<(String, u64)> = read_dir
+            let mut doc_entries: Vec<(String, u128)> = read_dir
                 .flatten()
                 .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
                 .map(|e| {
@@ -108,7 +113,7 @@ fn compute_prompt_hash(ws: &WatchedWorkspace, _bot: &str) -> String {
                         .ok()
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
+                        .map(|d| d.as_nanos())
                         .unwrap_or(0);
                     (name, mtime)
                 })

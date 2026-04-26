@@ -281,17 +281,19 @@ fn build_docs_index(root: &std::path::Path) -> Option<String> {
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
                 continue;
             }
-            let filename = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
 
-            let description = std::fs::read_to_string(&path)
+            // Read only the first non-empty line for the description
+            let description = std::fs::File::open(&path)
                 .ok()
-                .and_then(|content| {
-                    content
+                .and_then(|f| {
+                    use std::io::BufRead;
+                    std::io::BufReader::new(f)
                         .lines()
+                        .map_while(Result::ok)
                         .find(|line| !line.trim().is_empty())
                         .map(|line| line.trim_start_matches('#').trim().to_string())
                 })
@@ -308,7 +310,7 @@ fn build_docs_index(root: &std::path::Path) -> Option<String> {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut index = String::from(
-        "\n## Workspace Docs (.apiari/docs/)\nReference docs available in this workspace. Read with `cat .apiari/docs/<filename>` when relevant to the conversation.\n",
+        "\n## Workspace Docs (.apiari/docs/)\nReference docs available in this workspace. Read with `cat \".apiari/docs/<filename>\"` when relevant to the conversation.\n",
     );
     for (filename, desc) in &entries {
         if desc.is_empty() {
