@@ -19,11 +19,11 @@ export interface Worker {
   description: string | null;
   elapsed_secs: number | null;
   dispatched_by: string | null;
-  review_state: string | null;
-  ci_status: string | null;
-  total_comments: number | null;
-  open_comments: number | null;
-  resolved_comments: number | null;
+  review_state?: string;
+  ci_status?: string;
+  total_comments?: number;
+  open_comments?: number;
+  resolved_comments?: number;
 }
 
 export interface Repo {

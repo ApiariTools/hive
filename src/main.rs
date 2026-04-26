@@ -83,12 +83,15 @@ async fn main() -> Result<()> {
     let watched_workspaces = load_watched_workspaces(&config_dir);
     config_watcher::start_config_watcher(watched_workspaces, db.clone());
 
-    // Start PR review poller for each workspace with a root
-    let pr_review_cache: pr_review::PrReviewCache =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    for root in load_workspace_roots(&config_dir) {
-        info!("starting PR review poller for {}", root.display());
-        pr_review::start_pr_review_poller(pr_review_cache.clone(), root);
+    // Start PR review poller
+    let pr_review_cache: pr_review::PrReviewCache = Default::default();
+    let ws_roots = load_workspace_roots(&config_dir);
+    if !ws_roots.is_empty() {
+        info!(
+            "starting PR review poller for {} workspace(s)",
+            ws_roots.len()
+        );
+        pr_review::start_pr_review_poller(pr_review_cache.clone(), ws_roots);
     }
 
     let event_hub = events::EventHub::new();

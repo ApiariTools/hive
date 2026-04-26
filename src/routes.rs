@@ -1152,7 +1152,7 @@ async fn list_repos(
 
     let cache = &state.pr_review_cache;
     for repo in &mut repos {
-        enrich_workers_with_reviews(&mut repo.workers, cache);
+        enrich_workers_with_reviews(&mut repo.workers, cache).await;
     }
 
     Json(repos)
@@ -1259,7 +1259,7 @@ async fn list_workers(
         None => vec![],
     };
 
-    enrich_workers_with_reviews(&mut workers, &state.pr_review_cache);
+    enrich_workers_with_reviews(&mut workers, &state.pr_review_cache).await;
 
     Json(workers)
 }
@@ -1355,34 +1355,40 @@ fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
 }
 
 /// Enrich workers with PR review data from the cache.
-fn enrich_workers_with_reviews(workers: &mut [WorkerInfo], cache: &PrReviewCache) {
-    let guard = match cache.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
+async fn enrich_workers_with_reviews(workers: &mut [WorkerInfo], cache: &PrReviewCache) {
+    let guard = cache.lock().await;
 
     for worker in workers.iter_mut() {
-        if let Some(ref url) = worker.pr_url {
-            // Extract PR number from URL
-            let number = url
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .and_then(|n| n.parse::<i64>().ok());
-
-            if let Some(num) = number
-                && let Some(review) = guard.get(&num)
-            {
-                worker.review_state.clone_from(&review.review_state);
-                worker.ci_status.clone_from(&review.ci_status);
-                if review.total_comments > 0 {
-                    worker.total_comments = Some(review.total_comments);
-                    worker.open_comments = Some(review.open_comments);
-                    worker.resolved_comments = Some(review.resolved_comments);
-                }
+        if let Some(ref url) = worker.pr_url
+            && let Some(info) = parse_pr_url_for_cache_key(url)
+            && let Some(review) = guard.get(&info)
+        {
+            worker.review_state.clone_from(&review.review_state);
+            worker.ci_status.clone_from(&review.ci_status);
+            if review.total_comments > 0 {
+                worker.total_comments = Some(review.total_comments);
+                worker.open_comments = Some(review.open_comments);
+                worker.resolved_comments = Some(review.resolved_comments);
             }
         }
     }
+}
+
+/// Extract a cache key from a PR URL (owner/repo/number).
+fn parse_pr_url_for_cache_key(url: &str) -> Option<String> {
+    let url = url.trim_end_matches('/');
+    let parts: Vec<&str> = url.split('/').collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    let len = parts.len();
+    if parts[len - 2] != "pull" {
+        return None;
+    }
+    let number = parts[len - 1].parse::<i64>().ok()?;
+    let repo = parts[len - 3];
+    let owner = parts[len - 4];
+    Some(crate::pr_review::cache_key(owner, repo, number))
 }
 
 // ── Worker detail + messaging ──
@@ -1419,7 +1425,7 @@ async fn get_worker_detail(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let mut workers = read_swarm_workers(&root);
-    enrich_workers_with_reviews(&mut workers, &state.pr_review_cache);
+    enrich_workers_with_reviews(&mut workers, &state.pr_review_cache).await;
     let info = workers
         .into_iter()
         .find(|w| w.id == worker_id)
