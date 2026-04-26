@@ -91,8 +91,7 @@ async fn run_watcher(bot: WatchedBot, db: Db) {
     }
 }
 
-#[allow(dead_code)]
-async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
+pub(crate) async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
     info!("[watcher] running proactive task for {}", bot.name);
 
     let report_path = format!("/tmp/hive-report-{}-{}.md", bot.workspace, bot.name);
@@ -200,13 +199,13 @@ async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct Signal {
+pub(crate) struct Signal {
     pub source: String,
     pub title: String,
     pub body: String,
 }
 
-pub async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
+pub(crate) async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
     let dir = working_dir.as_ref()?;
 
     // Check for open PRs that need attention
@@ -263,7 +262,7 @@ pub async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
     None
 }
 
-pub async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) {
+pub(crate) async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) {
     info!("[watcher] dispatching to {}: {}", bot.name, signal.title);
 
     // Store the signal as a system message in the bot's chat
@@ -309,7 +308,7 @@ pub async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) {
     }
 }
 
-pub async fn run_claude_autonomous(
+pub(crate) async fn run_claude_autonomous(
     prompt: &str,
     working_dir: &Option<PathBuf>,
 ) -> Result<String, String> {
@@ -363,7 +362,7 @@ pub async fn run_claude_autonomous(
     Ok(full_text)
 }
 
-pub async fn run_codex_autonomous(
+pub(crate) async fn run_codex_autonomous(
     prompt: &str,
     working_dir: &Option<PathBuf>,
 ) -> Result<String, String> {
@@ -391,7 +390,7 @@ pub async fn run_codex_autonomous(
     Ok(response)
 }
 
-pub async fn run_gemini_autonomous(
+pub(crate) async fn run_gemini_autonomous(
     prompt: &str,
     working_dir: &Option<PathBuf>,
 ) -> Result<String, String> {

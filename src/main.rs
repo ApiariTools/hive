@@ -83,10 +83,7 @@ async fn main() -> Result<()> {
 
     if !watched_bots.is_empty() {
         info!("starting {} specialty bot watcher(s)", watched_bots.len());
-        engine.add_watcher(Box::new(tick::SignalWatcher::new(
-            watched_bots.clone(),
-            db.clone(),
-        )));
+        engine.add_watcher(Box::new(tick::SignalWatcher::new(watched_bots.clone())));
         engine.add_watcher(Box::new(tick::ScheduleWatcher::new(watched_bots)));
     }
 

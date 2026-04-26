@@ -75,7 +75,7 @@ async fn run_watcher(workspaces: Vec<WatchedWorkspace>, db: Db) {
     }
 }
 
-pub fn compute_prompt_hash(ws: &WatchedWorkspace, _bot: &str) -> String {
+pub(crate) fn compute_prompt_hash(ws: &WatchedWorkspace, _bot: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 

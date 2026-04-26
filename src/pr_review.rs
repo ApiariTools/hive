@@ -189,7 +189,7 @@ fn read_open_prs(workspace_root: &std::path::Path) -> Vec<(String, PrInfo)> {
 }
 
 /// Poll GitHub for PR review data and update the cache.
-pub async fn poll_once(cache: &PrReviewCache, workspace_roots: &[PathBuf]) {
+pub(crate) async fn poll_once(cache: &PrReviewCache, workspace_roots: &[PathBuf]) {
     // Collect all open PRs across all workspace roots
     let mut all_prs: Vec<(String, PrInfo)> = Vec::new();
     for root in workspace_roots {
