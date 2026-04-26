@@ -308,6 +308,7 @@ export default function App() {
         ) : bot ? (
           <ChatPanel
             bot={bot}
+            botDescription={bots.find(b => b.name === bot)?.description}
             messages={messages}
             messagesLoading={messagesLoading}
             loading={loading}

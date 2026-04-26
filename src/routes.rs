@@ -132,6 +132,8 @@ struct BotInfo {
     color: Option<String>,
     #[serde(default)]
     role: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
     #[serde(default = "default_provider")]
     provider: String,
     #[serde(default)]
@@ -153,6 +155,7 @@ fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
         name: "Main".to_string(),
         color: Some("#f5c542".to_string()),
         role: Some("Workspace assistant".to_string()),
+        description: None,
         provider: default_provider(),
         model: None,
         prompt_file: None,
@@ -1846,6 +1849,7 @@ mod tests {
                 name: "Customer".into(),
                 color: None,
                 role: Some("Handles errors".into()),
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 prompt_file: None,
