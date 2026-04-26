@@ -140,6 +140,8 @@ struct BotInfo {
     prompt_file: Option<String>,
     #[serde(default)]
     watch: Vec<String>,
+    #[serde(default)]
+    services: Vec<String>,
 }
 
 fn default_provider() -> String {
@@ -155,6 +157,7 @@ fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
         model: None,
         prompt_file: None,
         watch: vec![],
+        services: vec![],
     }];
 
     if let Ok(content) = std::fs::read_to_string(path)
@@ -184,6 +187,71 @@ fn load_workspace_config(path: &std::path::Path) -> WorkspaceConfig {
         .ok()
         .and_then(|c| toml::from_str(&c).ok())
         .unwrap_or_default()
+}
+
+/// Parse `.apiari/services.toml` and generate prompt sections for the requested services.
+pub fn build_services_prompt(root: &std::path::Path, services: &[String]) -> String {
+    if services.is_empty() {
+        return String::new();
+    }
+
+    let services_path = root.join(".apiari/services.toml");
+    let content = match std::fs::read_to_string(&services_path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    let config: toml::Value = match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    let mut prompt = String::new();
+
+    for service_name in services {
+        let section = match config.get(service_name).and_then(|v| v.as_table()) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        match service_name.as_str() {
+            "sentry" => {
+                let token = section.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                let org = section.get("org").and_then(|v| v.as_str()).unwrap_or("");
+                let project = section
+                    .get("project")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !token.is_empty() && !org.is_empty() && !project.is_empty() {
+                    prompt.push_str(&format!(
+                        "\n## Sentry Access\n\
+                         Query unresolved issues:\n\
+                         curl -s -H \"Authorization: Bearer {token}\" \
+                         \"https://sentry.io/api/0/projects/{org}/{project}/issues/?query=is:unresolved&sort=date&per_page=20\"\n"
+                    ));
+                }
+            }
+            "grafana" => {
+                let token = section.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                let url = section
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim_end_matches('/');
+                if !token.is_empty() && !url.is_empty() {
+                    prompt.push_str(&format!(
+                        "\n## Grafana Access\n\
+                         List dashboards: curl -s -H \"Authorization: Bearer {token}\" \"{url}/api/search?type=dash-db\"\n\
+                         Get dashboard: curl -s -H \"Authorization: Bearer {token}\" \"{url}/api/dashboards/uid/{{uid}}\"\n\
+                         Check alerts: curl -s -H \"Authorization: Bearer {token}\" \"{url}/api/v1/provisioning/alert-rules\"\n"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    prompt
 }
 
 fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
@@ -272,6 +340,14 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
                  When a task spans multiple repos, dispatch separate workers for each.\n\
                  Each worker prompt must be self-contained — workers cannot see other repos.\n"
             ));
+        }
+
+        // Inject service credentials from .apiari/services.toml
+        if let Some(bot) = bot_config {
+            let services_prompt = build_services_prompt(root_path, &bot.services);
+            if !services_prompt.is_empty() {
+                prompt.push_str(&services_prompt);
+            }
         }
     }
 
@@ -1756,6 +1832,7 @@ mod tests {
                 model: None,
                 prompt_file: None,
                 watch: vec![],
+                services: vec![],
             }]),
         };
         let prompt = build_system_prompt(&config, "Customer");
@@ -1994,5 +2071,190 @@ mod tests {
     #[test]
     fn test_default_provider_is_claude() {
         assert_eq!(default_provider(), "claude");
+    }
+
+    // ── build_services_prompt ──
+
+    #[test]
+    fn test_services_prompt_empty_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt = build_services_prompt(dir.path(), &[]);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn test_services_prompt_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt = build_services_prompt(dir.path(), &["sentry".to_string()]);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn test_services_prompt_sentry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[sentry]\norg = \"my-org\"\nproject = \"my-proj\"\ntoken = \"sntryu_abc\"\n",
+        )
+        .unwrap();
+
+        let prompt = build_services_prompt(dir.path(), &["sentry".to_string()]);
+        assert!(prompt.contains("Sentry Access"));
+        assert!(prompt.contains("sntryu_abc"));
+        assert!(prompt.contains("my-org"));
+        assert!(prompt.contains("my-proj"));
+        assert!(prompt.contains("is:unresolved"));
+    }
+
+    #[test]
+    fn test_services_prompt_grafana() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[grafana]\nurl = \"https://grafana.example.com\"\ntoken = \"glsa_xyz\"\n",
+        )
+        .unwrap();
+
+        let prompt = build_services_prompt(dir.path(), &["grafana".to_string()]);
+        assert!(prompt.contains("Grafana Access"));
+        assert!(prompt.contains("glsa_xyz"));
+        assert!(prompt.contains("grafana.example.com"));
+        assert!(prompt.contains("dash-db"));
+        assert!(prompt.contains("alert-rules"));
+    }
+
+    #[test]
+    fn test_services_prompt_multiple() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[sentry]\norg = \"o\"\nproject = \"p\"\ntoken = \"t1\"\n\n[grafana]\nurl = \"https://g.io\"\ntoken = \"t2\"\n",
+        )
+        .unwrap();
+
+        let prompt =
+            build_services_prompt(dir.path(), &["sentry".to_string(), "grafana".to_string()]);
+        assert!(prompt.contains("Sentry Access"));
+        assert!(prompt.contains("Grafana Access"));
+    }
+
+    #[test]
+    fn test_services_prompt_unknown_service_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[sentry]\norg = \"o\"\nproject = \"p\"\ntoken = \"t\"\n",
+        )
+        .unwrap();
+
+        let prompt = build_services_prompt(dir.path(), &["unknown_service".to_string()]);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn test_services_prompt_missing_fields_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        // Missing token
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[sentry]\norg = \"o\"\nproject = \"p\"\n",
+        )
+        .unwrap();
+
+        let prompt = build_services_prompt(dir.path(), &["sentry".to_string()]);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn test_services_in_system_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[sentry]\norg = \"o\"\nproject = \"p\"\ntoken = \"tok\"\n",
+        )
+        .unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: Some(vec![BotInfo {
+                name: "Monitor".into(),
+                color: None,
+                role: Some("Monitors errors".into()),
+                provider: "claude".into(),
+                model: None,
+                prompt_file: None,
+                watch: vec![],
+                services: vec!["sentry".to_string()],
+            }]),
+        };
+        let prompt = build_system_prompt(&config, "Monitor");
+        assert!(prompt.contains("Sentry Access"));
+        assert!(prompt.contains("tok"));
+    }
+
+    #[test]
+    fn test_services_not_injected_for_bot_without_services() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[sentry]\norg = \"o\"\nproject = \"p\"\ntoken = \"tok\"\n",
+        )
+        .unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: Some(vec![BotInfo {
+                name: "Plain".into(),
+                color: None,
+                role: Some("Just chatting".into()),
+                provider: "claude".into(),
+                model: None,
+                prompt_file: None,
+                watch: vec![],
+                services: vec![],
+            }]),
+        };
+        let prompt = build_system_prompt(&config, "Plain");
+        assert!(!prompt.contains("Sentry Access"));
+    }
+
+    #[test]
+    fn test_bot_config_deserializes_services() {
+        let toml_str = r#"
+[[bots]]
+name = "Perf"
+role = "Monitor"
+services = ["sentry", "grafana"]
+"#;
+        let config: WorkspaceConfig = toml::from_str(toml_str).unwrap();
+        let bots = config.bots.unwrap();
+        assert_eq!(bots[0].services, vec!["sentry", "grafana"]);
+    }
+
+    #[test]
+    fn test_bot_config_deserializes_without_services() {
+        let toml_str = r#"
+[[bots]]
+name = "Plain"
+role = "Chat"
+"#;
+        let config: WorkspaceConfig = toml::from_str(toml_str).unwrap();
+        let bots = config.bots.unwrap();
+        assert!(bots[0].services.is_empty());
     }
 }
