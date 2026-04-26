@@ -8,6 +8,7 @@ Workspace chat hub — Rust daemon + React SPA.
 3. Do NOT run `cargo install` or modify system state.
 4. Run ALL checks before committing: `cargo fmt && cargo clippy -- -D warnings -A clippy::too_many_arguments && cargo test`
 5. For frontend changes, also run: `cd web && npx tsc --noEmit && npx vitest run`
+6. A `pre-push` git hook runs all checks automatically. If push is rejected, fix the issues before retrying.
 
 ## Architecture
 
