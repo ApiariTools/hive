@@ -22,6 +22,7 @@ pub struct WatchedBot {
     pub working_dir: Option<PathBuf>,
     pub schedule_hours: Option<u64>,
     pub proactive_prompt: Option<String>,
+    pub services: Vec<String>,
 }
 
 /// Start watcher loops for all bots that have watch sources or schedules.
@@ -107,17 +108,29 @@ async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
         None,
     );
 
+    // Build service credentials section if the bot has services configured
+    let services_section = if !bot.services.is_empty() {
+        if let Some(ref dir) = bot.working_dir {
+            crate::routes::build_services_prompt(dir, &bot.services)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let full_prompt = format!(
         "You are {}, a specialty bot for the {} workspace.\n\
-         Your role: {}\n\n\
+         Your role: {}\n\
+         {services}\n\
          This is a scheduled proactive check. Do the following:\n\n\
          {}\n\n\
          IMPORTANT: Do your research silently using tools. Do NOT narrate your process.\n\
          When you have your findings, publish your report using this command:\n\
          ```\n\
-         hive publish --workspace {ws} --bot {bot_name} --file /tmp/hive-report.md\n\
+         hive publish --workspace {ws} --bot {bot_name} --file /tmp/hive-report-{ws}-{bot_name}.md\n\
          ```\n\
-         First write your report to /tmp/hive-report.md, then run the command above.\n\n\
+         First write your report to /tmp/hive-report-{ws}-{bot_name}.md, then run the command above.\n\n\
          The report should be:\n\
          - Clean markdown, no narration\n\
          - Lead with the most important finding\n\
@@ -128,6 +141,7 @@ async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
         bot.workspace,
         bot.role,
         prompt,
+        services = services_section,
         ws = bot.workspace,
         bot_name = bot.name
     );

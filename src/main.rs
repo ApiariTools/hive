@@ -167,6 +167,16 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                         .and_then(|p| p.as_str())
                         .map(String::from);
 
+                    let services: Vec<String> = bot
+                        .get("services")
+                        .and_then(|s| s.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
                     let has_watch = !watch.is_empty();
                     let has_schedule = schedule_hours.is_some() && proactive_prompt.is_some();
 
@@ -189,6 +199,7 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                             working_dir: working_dir.clone(),
                             schedule_hours,
                             proactive_prompt,
+                            services,
                         });
                     }
                 }
