@@ -32,6 +32,12 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
   }, []);
 
   useEffect(() => {
+    if (!isMobile && infoTab === "chat") {
+      setInfoTab("output");
+    }
+  }, [isMobile]);
+
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [detail?.conversation.length]);
 
