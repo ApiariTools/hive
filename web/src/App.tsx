@@ -21,14 +21,14 @@ function parseHash(): Route {
   const parts = raw.split("/").filter(Boolean);
   return {
     workspace: parts[0] || "",
-    bot: parts[1] || "Main",
+    bot: parts[1] || "",
     workerId: parts[2] === "worker" ? parts[3] || null : null,
   };
 }
 
 function buildHash(r: Route): string {
   if (!r.workspace) return "";
-  let h = `#/${r.workspace}/${r.bot}`;
+  let h = r.bot ? `#/${r.workspace}/${r.bot}` : `#/${r.workspace}`;
   if (r.workerId) h += `/worker/${r.workerId}`;
   return h;
 }
@@ -206,7 +206,7 @@ export default function App() {
 
   const handleSelectWorkspace = useCallback((ws: string) => {
     setWorkspace(ws);
-    setBot("Main");
+    setBot("");
     setWorkerId(null);
     setLoading(false);
     setLoadingStatus(undefined);
@@ -304,7 +304,7 @@ export default function App() {
             workspace={workspace}
             onBack={handleBackFromWorker}
           />
-        ) : (
+        ) : bot ? (
           <ChatPanel
             bot={bot}
             messages={messages}
@@ -317,6 +317,10 @@ export default function App() {
             onWorkersToggle={() => setWorkersOpen((v) => !v)}
             onCancel={loading ? () => api.cancelBot(workspace, bot) : undefined}
           />
+        ) : (
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontSize: 14, color: "var(--text-faint)" }}>Select a bot to start chatting</div>
+          </div>
         )}
         <ReposPanel
           repos={reposWithFreshWorkers}
