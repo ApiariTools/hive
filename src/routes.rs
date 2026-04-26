@@ -2001,6 +2001,7 @@ mod tests {
             model: None,
             prompt_file: None,
             watch: vec![],
+            services: vec![],
         };
         let json = serde_json::to_string(&bot).unwrap();
         assert!(!json.contains("description"));
@@ -2247,6 +2248,7 @@ mod tests {
                 name: "Monitor".into(),
                 color: None,
                 role: Some("Monitors errors".into()),
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 prompt_file: None,
@@ -2279,6 +2281,7 @@ mod tests {
                 name: "Plain".into(),
                 color: None,
                 role: Some("Just chatting".into()),
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 prompt_file: None,
@@ -2339,6 +2342,7 @@ services = ["sentry", "grafana"]
                 name: "Custom".into(),
                 color: None,
                 role: None,
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 prompt_file: Some("custom.md".to_string()),
