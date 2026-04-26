@@ -74,6 +74,14 @@ proactive_prompt = "Review recent PRs and summarize code quality trends"
 
 ## Development
 
+### Setup hooks
+
+```bash
+git config core.hooksPath hooks
+```
+
+This configures git to use the `hooks/` directory for git hooks, including a `pre-push` hook that runs all checks (fmt, clippy, test, tsc, vitest, vite build) before allowing pushes.
+
 ```bash
 # Run checks
 cargo fmt && cargo clippy -- -D warnings -A clippy::too_many_arguments && cargo test
