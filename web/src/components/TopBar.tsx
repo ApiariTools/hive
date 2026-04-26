@@ -28,7 +28,7 @@ export function TopBar({ workspaces, active, onSelect, onMenuToggle, onOpenPalet
       ))}
       <button
         className={styles.searchBtn}
-        onClick={onOpenPalette}
+        onClick={() => onOpenPalette?.()}
         aria-label="Open command palette"
       >
         <Search size={16} />

@@ -37,6 +37,14 @@ describe("TopBar", () => {
     expect(onToggle).toHaveBeenCalled();
   });
 
+  it("calls onOpenPalette when search button clicked", async () => {
+    const user = userEvent.setup();
+    const onOpenPalette = vi.fn();
+    render(<TopBar workspaces={workspaces} active="apiari" onSelect={vi.fn()} onOpenPalette={onOpenPalette} />);
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    expect(onOpenPalette).toHaveBeenCalled();
+  });
+
   it("renders with no workspaces", () => {
     render(<TopBar workspaces={[]} active="" onSelect={vi.fn()} />);
     expect(screen.getByText("hive")).toBeInTheDocument();
