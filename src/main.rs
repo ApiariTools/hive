@@ -10,6 +10,7 @@ mod events;
 mod pr_review;
 mod publish;
 mod routes;
+mod tick;
 mod watcher;
 
 #[derive(Parser)]
@@ -72,27 +73,43 @@ async fn main() -> Result<()> {
     let db_path = config_dir.join("hive.db");
     let db = db::Db::open(&db_path)?;
 
-    // Start signal watchers for specialty bots
+    // Build unified tick engine
     let watched_bots = load_watched_bots(&config_dir);
-    if !watched_bots.is_empty() {
-        info!("starting {} specialty bot watcher(s)", watched_bots.len());
-        watcher::start_watchers(watched_bots, db.clone());
-    }
-
-    // Start config watcher for prompt change detection
     let watched_workspaces = load_watched_workspaces(&config_dir);
-    config_watcher::start_config_watcher(watched_workspaces, db.clone());
-
-    // Start PR review poller
     let pr_review_cache: pr_review::PrReviewCache = Default::default();
     let ws_roots = load_workspace_roots(&config_dir);
+
+    let mut engine = tick::TickEngine::new(15);
+
+    if !watched_bots.is_empty() {
+        info!("starting {} specialty bot watcher(s)", watched_bots.len());
+        engine.add_watcher(Box::new(tick::SignalWatcher::new(
+            watched_bots.clone(),
+            db.clone(),
+        )));
+        engine.add_watcher(Box::new(tick::ScheduleWatcher::new(watched_bots)));
+    }
+
+    if !watched_workspaces.is_empty() {
+        info!(
+            "[config-watcher] watching {} workspace(s) for prompt changes",
+            watched_workspaces.len()
+        );
+        engine.add_watcher(Box::new(tick::ConfigChangeWatcher::new(watched_workspaces)));
+    }
+
     if !ws_roots.is_empty() {
         info!(
             "starting PR review poller for {} workspace(s)",
             ws_roots.len()
         );
-        pr_review::start_pr_review_poller(pr_review_cache.clone(), ws_roots);
+        engine.add_watcher(Box::new(tick::PrReviewWatcher::new(
+            pr_review_cache.clone(),
+            ws_roots,
+        )));
     }
+
+    tokio::spawn(engine.run(db.clone()));
 
     let event_hub = events::EventHub::new();
     let app = routes::router(db, &config_dir, event_hub, pr_review_cache);

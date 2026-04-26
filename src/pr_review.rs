@@ -189,7 +189,7 @@ fn read_open_prs(workspace_root: &std::path::Path) -> Vec<(String, PrInfo)> {
 }
 
 /// Poll GitHub for PR review data and update the cache.
-async fn poll_once(cache: &PrReviewCache, workspace_roots: &[PathBuf]) {
+pub async fn poll_once(cache: &PrReviewCache, workspace_roots: &[PathBuf]) {
     // Collect all open PRs across all workspace roots
     let mut all_prs: Vec<(String, PrInfo)> = Vec::new();
     for root in workspace_roots {
@@ -285,6 +285,7 @@ async fn poll_once(cache: &PrReviewCache, workspace_roots: &[PathBuf]) {
 }
 
 /// Start a single background PR review poller for all workspace roots.
+#[allow(dead_code)]
 pub fn start_pr_review_poller(cache: PrReviewCache, workspace_roots: Vec<PathBuf>) {
     tokio::spawn(async move {
         loop {
