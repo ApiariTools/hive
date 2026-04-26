@@ -278,6 +278,7 @@ export default function App() {
         active={workspace}
         onSelect={handleSelectWorkspace}
         onMenuToggle={() => setMenuOpen((v) => !v)}
+        onOpenPalette={() => setPaletteOpen(true)}
       />
       <div style={{ flex: 1, display: "flex", overflow: "hidden", position: "relative" }}>
         {/* Mobile drawer overlay */}
