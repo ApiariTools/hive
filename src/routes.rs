@@ -1520,3 +1520,411 @@ async fn serve_frontend(_uri: axum::http::Uri) -> Result<axum::response::Html<St
     let html = include_str!("../web/index.html");
     Ok(axum::response::Html(html.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── simple_hash ──
+
+    #[test]
+    fn test_hash_deterministic() {
+        assert_eq!(simple_hash("hello"), simple_hash("hello"));
+    }
+
+    #[test]
+    fn test_hash_different_inputs() {
+        assert_ne!(simple_hash("hello"), simple_hash("world"));
+    }
+
+    #[test]
+    fn test_hash_empty() {
+        let h = simple_hash("");
+        assert!(!h.is_empty());
+    }
+
+    // ── base64_decode ──
+
+    #[test]
+    fn test_base64_decode_hello() {
+        let decoded = base64_decode("SGVsbG8=").unwrap();
+        assert_eq!(decoded, b"Hello");
+    }
+
+    #[test]
+    fn test_base64_decode_empty() {
+        let decoded = base64_decode("").unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_base64_decode_with_newlines() {
+        let decoded = base64_decode("SGVs\nbG8=").unwrap();
+        assert_eq!(decoded, b"Hello");
+    }
+
+    #[test]
+    fn test_base64_decode_invalid() {
+        // Invalid chars should return None
+        assert!(base64_decode("!!!").is_none());
+    }
+
+    // ── extract_images ──
+
+    #[test]
+    fn test_extract_images_none() {
+        let images = extract_images(&None);
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn test_extract_images_empty() {
+        let images = extract_images(&Some(vec![]));
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn test_extract_images_filters_non_images() {
+        let atts = vec![
+            ChatAttachment {
+                name: "doc.txt".into(),
+                mime_type: "text/plain".into(),
+                data_url: "data:text/plain;base64,SGVsbG8=".into(),
+            },
+            ChatAttachment {
+                name: "photo.jpg".into(),
+                mime_type: "image/jpeg".into(),
+                data_url: "data:image/jpeg;base64,abc123".into(),
+            },
+        ];
+        let images = extract_images(&Some(atts));
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].0, "image/jpeg");
+        assert_eq!(images[0].1, "abc123");
+    }
+
+    #[test]
+    fn test_extract_images_multiple() {
+        let atts = vec![
+            ChatAttachment {
+                name: "a.png".into(),
+                mime_type: "image/png".into(),
+                data_url: "data:image/png;base64,AAA".into(),
+            },
+            ChatAttachment {
+                name: "b.jpg".into(),
+                mime_type: "image/jpeg".into(),
+                data_url: "data:image/jpeg;base64,BBB".into(),
+            },
+        ];
+        let images = extract_images(&Some(atts));
+        assert_eq!(images.len(), 2);
+    }
+
+    // ── extract_text_attachments ──
+
+    #[test]
+    fn test_extract_text_none() {
+        let texts = extract_text_attachments(&None);
+        assert!(texts.is_empty());
+    }
+
+    #[test]
+    fn test_extract_text_decodes_base64() {
+        let atts = vec![ChatAttachment {
+            name: "readme.md".into(),
+            mime_type: "text/markdown".into(),
+            data_url: "data:text/markdown;base64,SGVsbG8gV29ybGQ=".into(),
+        }];
+        let texts = extract_text_attachments(&Some(atts));
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].0, "readme.md");
+        assert_eq!(texts[0].1, "Hello World");
+    }
+
+    #[test]
+    fn test_extract_text_skips_images() {
+        let atts = vec![ChatAttachment {
+            name: "photo.jpg".into(),
+            mime_type: "image/jpeg".into(),
+            data_url: "data:image/jpeg;base64,abc".into(),
+        }];
+        let texts = extract_text_attachments(&Some(atts));
+        assert!(texts.is_empty());
+    }
+
+    // ── build_system_prompt ──
+
+    #[test]
+    fn test_build_prompt_basic() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: Some("A test workspace".into()),
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main");
+        assert!(prompt.contains("Main"));
+        assert!(prompt.contains("test"));
+        assert!(prompt.contains("A test workspace"));
+        assert!(prompt.contains("Workspace assistant")); // default role
+    }
+
+    #[test]
+    fn test_build_prompt_with_bot_role() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: Some(vec![BotInfo {
+                name: "Customer".into(),
+                color: None,
+                role: Some("Handles errors".into()),
+                provider: "claude".into(),
+                model: None,
+                prompt_file: None,
+                watch: vec![],
+            }]),
+        };
+        let prompt = build_system_prompt(&config, "Customer");
+        assert!(prompt.contains("Handles errors"));
+    }
+
+    #[test]
+    fn test_build_prompt_includes_swarm_when_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main");
+        assert!(prompt.contains("Swarm Workers"));
+        assert!(prompt.contains("swarm"));
+    }
+
+    #[test]
+    fn test_build_prompt_no_swarm_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main");
+        assert!(!prompt.contains("Swarm Workers"));
+    }
+
+    #[test]
+    fn test_build_prompt_loads_context_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/context.md"),
+            "This is a Rust project",
+        )
+        .unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main");
+        assert!(prompt.contains("This is a Rust project"));
+    }
+
+    #[test]
+    fn test_build_prompt_loads_soul_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(dir.path().join(".apiari/soul.md"), "Be concise. No filler.").unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main");
+        assert!(prompt.contains("Be concise"));
+    }
+
+    #[test]
+    fn test_build_prompt_includes_chat_history_tool() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some("/tmp".into()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main");
+        assert!(prompt.contains("sqlite3"));
+        assert!(prompt.contains("Chat History"));
+    }
+
+    // ── load_bots_from_config ──
+
+    #[test]
+    fn test_load_bots_always_has_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.toml");
+        let bots = load_bots_from_config(&path);
+        assert_eq!(bots.len(), 1);
+        assert_eq!(bots[0].name, "Main");
+    }
+
+    #[test]
+    fn test_load_bots_from_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        std::fs::write(&path, "[[bots]]\nname = \"Perf\"\nrole = \"Monitor\"\n").unwrap();
+        let bots = load_bots_from_config(&path);
+        assert_eq!(bots.len(), 2);
+        assert_eq!(bots[1].name, "Perf");
+    }
+
+    // ── read_agent_events ──
+
+    #[test]
+    fn test_read_agent_events_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = read_agent_events(dir.path(), "worker-1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_read_agent_events_parses_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let events_dir = dir.path().join(".swarm/agents/worker-1");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        std::fs::write(
+            events_dir.join("events.jsonl"),
+            r#"{"type":"assistant_text","text":"Hello "}
+{"type":"assistant_text","text":"world"}
+{"type":"tool_use","tool":"Read"}
+{"type":"assistant_text","text":"Done"}
+"#,
+        )
+        .unwrap();
+
+        let msgs = read_agent_events(dir.path(), "worker-1");
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].role, "assistant");
+        assert_eq!(msgs[0].content, "Hello world");
+        assert_eq!(msgs[1].role, "tool");
+        assert_eq!(msgs[1].content, "*Using Read*");
+        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[2].content, "Done");
+    }
+
+    #[test]
+    fn test_read_agent_events_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let events_dir = dir.path().join(".swarm/agents/w1");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        std::fs::write(
+            events_dir.join("events.jsonl"),
+            r#"{"type":"user_message","text":"fix the bug"}
+{"type":"assistant_text","text":"On it"}
+"#,
+        )
+        .unwrap();
+
+        let msgs = read_agent_events(dir.path(), "w1");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content, "fix the bug");
+    }
+
+    // ── read_swarm_workers ──
+
+    #[test]
+    fn test_read_workers_no_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let workers = read_swarm_workers(dir.path());
+        assert!(workers.is_empty());
+    }
+
+    #[test]
+    fn test_read_workers_from_state_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
+        std::fs::write(
+            dir.path().join(".swarm/state.json"),
+            r#"{"worktrees":[{"id":"cli-3","branch":"swarm/fix","phase":"running","agent_kind":"claude","pr":{"url":"https://github.com/test/pull/1","title":"Fix stuff"}}]}"#,
+        ).unwrap();
+
+        let workers = read_swarm_workers(dir.path());
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].id, "cli-3");
+        assert_eq!(workers[0].branch, "swarm/fix");
+        assert_eq!(workers[0].status, "running");
+        assert_eq!(workers[0].agent, "claude");
+        assert_eq!(
+            workers[0].pr_url,
+            Some("https://github.com/test/pull/1".to_string())
+        );
+        assert_eq!(workers[0].pr_title, Some("Fix stuff".to_string()));
+    }
+
+    #[test]
+    fn test_read_workers_empty_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
+        std::fs::write(dir.path().join(".swarm/state.json"), r#"{"worktrees":[]}"#).unwrap();
+
+        let workers = read_swarm_workers(dir.path());
+        assert!(workers.is_empty());
+    }
+
+    // ── build_repos_list ──
+
+    #[test]
+    fn test_build_repos_no_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let repos = build_repos_list(dir.path());
+        assert!(repos.is_empty());
+    }
+
+    #[test]
+    fn test_build_repos_finds_git_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("repo-a/.git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("repo-b/.git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("not-a-repo")).unwrap();
+
+        let repos = build_repos_list(dir.path());
+        assert_eq!(repos.len(), 2);
+        let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"repo-a"));
+        assert!(names.contains(&"repo-b"));
+    }
+
+    // ── default_provider ──
+
+    #[test]
+    fn test_default_provider_is_claude() {
+        assert_eq!(default_provider(), "claude");
+    }
+}
