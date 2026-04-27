@@ -2,7 +2,7 @@
 name = "hive"
 version = "0.1.0"
 edition = "2024"
-include = ["src/**/*", "web/dist/**/*", "build.rs", "Cargo.toml", "README.md", "LICENSE"]
+exclude = ["web/node_modules", "web/src", "web/public", "web/.gitignore", "node_modules"]
 
 [workspace]
 
