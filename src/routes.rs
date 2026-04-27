@@ -267,6 +267,62 @@ pub fn build_services_prompt(root: &std::path::Path, services: &[String]) -> Str
     prompt
 }
 
+fn build_docs_index(root: &std::path::Path) -> Option<String> {
+    let docs_dir = root.join(".apiari/docs");
+    if !docs_dir.is_dir() {
+        return None;
+    }
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+
+    if let Ok(read_dir) = std::fs::read_dir(&docs_dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+
+            // Read only the first non-empty line for the description
+            let description = std::fs::File::open(&path)
+                .ok()
+                .and_then(|f| {
+                    use std::io::BufRead;
+                    std::io::BufReader::new(f)
+                        .lines()
+                        .map_while(Result::ok)
+                        .find(|line| !line.trim().is_empty())
+                        .map(|line| line.trim_start_matches('#').trim().to_string())
+                })
+                .unwrap_or_default();
+
+            entries.push((filename, description));
+        }
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut index = String::from(
+        "\n## Workspace Docs (.apiari/docs/)\nReference docs available in this workspace. Read with `cat \".apiari/docs/<filename>\"` when relevant to the conversation.\n",
+    );
+    for (filename, desc) in &entries {
+        if desc.is_empty() {
+            index.push_str(&format!("- {filename}\n"));
+        } else {
+            index.push_str(&format!("- {filename} — {desc}\n"));
+        }
+    }
+
+    Some(index)
+}
+
 fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
     let ws = ws_config.workspace.clone().unwrap_or_default();
     let ws_name = ws.name.as_deref().unwrap_or("unknown");
@@ -336,6 +392,11 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
             if !soul.ends_with('\n') {
                 prompt.push('\n');
             }
+        }
+
+        // Docs index from .apiari/docs/
+        if let Some(docs_index) = build_docs_index(root_path) {
+            prompt.push_str(&docs_index);
         }
 
         // Swarm worker dispatch instructions
@@ -2365,5 +2426,100 @@ role = "Chat"
         let config: WorkspaceConfig = toml::from_str(toml_str).unwrap();
         let bots = config.bots.unwrap();
         assert!(bots[0].services.is_empty());
+    }
+
+    // ── build_docs_index ──
+
+    #[test]
+    fn test_docs_index_no_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(build_docs_index(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_docs_index_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari/docs")).unwrap();
+        assert!(build_docs_index(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_docs_index_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("architecture.md"),
+            "# System Architecture\nDetails here.",
+        )
+        .unwrap();
+        std::fs::write(
+            docs.join("direction.md"),
+            "Product direction and Q2 priorities",
+        )
+        .unwrap();
+
+        let index = build_docs_index(dir.path()).unwrap();
+        assert!(index.contains("architecture.md — System Architecture"));
+        assert!(index.contains("direction.md — Product direction and Q2 priorities"));
+        // Should be sorted alphabetically
+        let arch_pos = index.find("architecture.md").unwrap();
+        let dir_pos = index.find("direction.md").unwrap();
+        assert!(arch_pos < dir_pos);
+    }
+
+    #[test]
+    fn test_docs_index_description_from_heading() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), "# My Guide\nContent").unwrap();
+
+        let index = build_docs_index(dir.path()).unwrap();
+        assert!(index.contains("guide.md — My Guide"));
+    }
+
+    #[test]
+    fn test_docs_index_description_from_plain_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("notes.md"), "Plain text first line\nMore content").unwrap();
+
+        let index = build_docs_index(dir.path()).unwrap();
+        assert!(index.contains("notes.md — Plain text first line"));
+    }
+
+    #[test]
+    fn test_docs_index_skips_non_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("readme.txt"), "Not a markdown file").unwrap();
+        std::fs::write(docs.join("actual.md"), "# Real Doc").unwrap();
+
+        let index = build_docs_index(dir.path()).unwrap();
+        assert!(!index.contains("readme.txt"));
+        assert!(index.contains("actual.md"));
+    }
+
+    #[test]
+    fn test_docs_in_system_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("overview.md"), "# Project Overview").unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main");
+        assert!(prompt.contains("Workspace Docs (.apiari/docs/)"));
+        assert!(prompt.contains("overview.md — Project Overview"));
     }
 }

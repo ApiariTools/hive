@@ -97,6 +97,7 @@ A default "Main" bot (gold, claude provider) is always injected even if not in t
 
 - `.apiari/context.md` — Project context appended to all bot system prompts
 - `.apiari/soul.md` — Communication style appended to all bot system prompts
+- `.apiari/docs/` — Folder of reference docs. Contents are NOT injected — only filenames and first-line descriptions are indexed in the prompt. Bots read full contents on demand with `cat`.
 - `.swarm/` directory — If present, swarm worker dispatch instructions are injected into bot prompt (bots become coordinators, not coders)
 
 ### Custom Prompt Files
