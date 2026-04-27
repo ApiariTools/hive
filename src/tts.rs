@@ -34,6 +34,11 @@ pub async fn start_tts_server() -> Option<Child> {
         }
     };
 
+    // Canonicalize paths so they work regardless of CWD
+    let tts_dir = match std::fs::canonicalize(&tts_dir) {
+        Ok(d) => d,
+        Err(_) => return None,
+    };
     let venv_python = tts_dir.join(".venv/bin/python");
     if !venv_python.exists() {
         info!("TTS server not set up (run tts/setup.sh to enable)");
@@ -90,10 +95,13 @@ pub async fn start_tts_server() -> Option<Child> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_start_tts_server_skips_when_missing() {
-        // When run from the test directory, tts/.venv won't exist
-        let result = start_tts_server().await;
+    #[test]
+    fn test_find_tts_dir_returns_none_in_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let result = find_tts_dir();
+        std::env::set_current_dir(orig).unwrap();
         assert!(result.is_none());
     }
 
