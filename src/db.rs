@@ -19,7 +19,7 @@ const SCHEMA: &str = "
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         attachments TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );
 
     CREATE TABLE IF NOT EXISTS sessions (
@@ -27,7 +27,7 @@ const SCHEMA: &str = "
         bot TEXT NOT NULL,
         session_id TEXT NOT NULL,
         prompt_hash TEXT NOT NULL DEFAULT '',
-        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (workspace, bot)
     );
 
@@ -37,7 +37,7 @@ const SCHEMA: &str = "
         status TEXT NOT NULL DEFAULT 'idle',
         streaming_content TEXT NOT NULL DEFAULT '',
         tool_name TEXT,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (workspace, bot)
     );
 
@@ -52,8 +52,8 @@ const SCHEMA: &str = "
         status TEXT NOT NULL DEFAULT 'open',
         url TEXT,
         metadata TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         UNIQUE(workspace, source, external_id)
     );
 
@@ -119,9 +119,9 @@ impl Db {
         let conn = self.writer.lock().unwrap();
         conn.execute(
             "INSERT INTO sessions (workspace, bot, session_id, prompt_hash, updated_at)
-             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
              ON CONFLICT(workspace, bot) DO UPDATE SET
-               session_id = ?3, prompt_hash = ?4, updated_at = datetime('now')",
+               session_id = ?3, prompt_hash = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
             params![workspace, bot, session_id, prompt_hash],
         )?;
         Ok(())
@@ -138,9 +138,9 @@ impl Db {
         let conn = self.writer.lock().unwrap();
         conn.execute(
             "INSERT INTO bot_status (workspace, bot, status, streaming_content, tool_name, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
              ON CONFLICT(workspace, bot) DO UPDATE SET
-               status = ?3, streaming_content = ?4, tool_name = ?5, updated_at = datetime('now')",
+               status = ?3, streaming_content = ?4, tool_name = ?5, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
             params![workspace, bot, status, streaming_content, tool_name],
         )?;
         Ok(())
@@ -149,7 +149,7 @@ impl Db {
     pub fn append_streaming(&self, workspace: &str, bot: &str, text: &str) -> Result<()> {
         let conn = self.writer.lock().unwrap();
         conn.execute(
-            "UPDATE bot_status SET streaming_content = streaming_content || ?1, updated_at = datetime('now')
+            "UPDATE bot_status SET streaming_content = streaming_content || ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
              WHERE workspace = ?2 AND bot = ?3",
             params![text, workspace, bot],
         )?;
@@ -352,4 +352,24 @@ pub struct BotStatus {
     pub status: String,
     pub streaming_content: String,
     pub tool_name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timestamps_are_iso8601_with_z_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("test.db")).unwrap();
+        db.add_message("ws", "bot", "user", "hello", None).unwrap();
+        let msgs = db.get_conversations("ws", "bot", 10).unwrap();
+        assert_eq!(msgs.len(), 1);
+        let ts = &msgs[0].created_at;
+        assert!(ts.ends_with('Z'), "Timestamp should end with Z: {ts}");
+        assert!(
+            ts.contains('T'),
+            "Timestamp should contain T separator: {ts}"
+        );
+    }
 }
