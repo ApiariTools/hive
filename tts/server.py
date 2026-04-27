@@ -16,7 +16,11 @@ class TTSHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length))
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, ValueError):
+            self.send_error(400, "Invalid JSON")
+            return
         text = body.get("text", "")
         voice = body.get("voice", "af_heart")
         if not text:

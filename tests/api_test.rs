@@ -166,3 +166,38 @@ async fn test_send_message_stores_user_msg() {
             .any(|m| m["content"] == "hello" && m["role"] == "user")
     );
 }
+
+#[tokio::test]
+async fn test_tts_missing_text() {
+    let (app, _dir) = test_app();
+    let (status, body) = post_json(&app, "/api/tts", r#"{"text":""}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Missing text"));
+}
+
+#[tokio::test]
+async fn test_tts_no_text_field() {
+    let (app, _dir) = test_app();
+    let (status, body) = post_json(&app, "/api/tts", r#"{}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Missing text"));
+}
+
+#[tokio::test]
+async fn test_tts_text_too_long() {
+    let (app, _dir) = test_app();
+    let long_text = "a".repeat(5001);
+    let payload = format!(r#"{{"text":"{}"}}"#, long_text);
+    let (status, body) = post_json(&app, "/api/tts", &payload).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("too long"));
+}
+
+#[tokio::test]
+async fn test_tts_server_unavailable() {
+    let (app, _dir) = test_app();
+    // TTS server is not running, so we expect SERVICE_UNAVAILABLE
+    let (status, body) = post_json(&app, "/api/tts", r#"{"text":"hello"}"#).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.contains("TTS server not running"));
+}

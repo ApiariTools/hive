@@ -132,4 +132,11 @@ describe("ChatPanel", () => {
     const { container } = render(<ChatPanel {...defaultProps} />);
     expect(container.querySelector('[class*="headerDescription"]')).toBeNull();
   });
+
+  it("shows play button on assistant messages but not user messages", () => {
+    render(<ChatPanel {...defaultProps} />);
+    // Only the assistant message should have a play button
+    const playButtons = screen.getAllByLabelText("Play");
+    expect(playButtons).toHaveLength(1);
+  });
 });

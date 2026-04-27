@@ -24,6 +24,7 @@ pub struct AppState {
     pub config_dir: PathBuf,
     pub events: EventHub,
     pub pr_review_cache: PrReviewCache,
+    pub http_client: reqwest::Client,
 }
 
 pub fn router(
@@ -37,6 +38,7 @@ pub fn router(
         config_dir: config_dir.to_path_buf(),
         events,
         pr_review_cache,
+        http_client: reqwest::Client::new(),
     };
 
     Router::new()
@@ -1276,26 +1278,36 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
 
 // ── TTS ──
 
-async fn text_to_speech(Json(body): Json<serde_json::Value>) -> axum::response::Response {
+const TTS_MAX_TEXT_LENGTH: usize = 5000;
+
+async fn text_to_speech(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
     use axum::response::IntoResponse;
 
     let text = body.get("text").and_then(|t| t.as_str()).unwrap_or("");
     if text.is_empty() {
         return (StatusCode::BAD_REQUEST, "Missing text").into_response();
     }
+    if text.len() > TTS_MAX_TEXT_LENGTH {
+        return (StatusCode::BAD_REQUEST, "Text too long (max 5000 chars)").into_response();
+    }
 
-    let client = reqwest::Client::new();
-    match client
+    match state
+        .http_client
         .post("http://127.0.0.1:4201/tts")
         .json(&body)
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => {
-            let bytes = resp.bytes().await.unwrap_or_default();
-            (StatusCode::OK, [("content-type", "audio/wav")], bytes).into_response()
-        }
+        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+            Ok(bytes) => {
+                (StatusCode::OK, [("content-type", "audio/wav")], bytes).into_response()
+            }
+            Err(_) => (StatusCode::BAD_GATEWAY, "Failed to read TTS response").into_response(),
+        },
         Ok(resp) => {
             let status = resp.status().as_u16();
             (

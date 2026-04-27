@@ -45,6 +45,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [playingId, setPlayingId] = useState<number | null>(null);
   const ttsSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const ttsAudioCtxRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -84,6 +85,10 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
         ttsSourceRef.current.stop();
         ttsSourceRef.current = null;
       }
+      if (ttsAudioCtxRef.current) {
+        ttsAudioCtxRef.current.close();
+        ttsAudioCtxRef.current = null;
+      }
     };
   }, []);
 
@@ -96,13 +101,12 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       setPlayingId(null);
       return;
     }
-    setPlayingId(msg.id);
     const audioData = await api.textToSpeech(msg.content);
-    if (!audioData) {
-      setPlayingId(null);
-      return;
+    if (!audioData) return;
+    if (!ttsAudioCtxRef.current) {
+      ttsAudioCtxRef.current = new AudioContext();
     }
-    const audioCtx = new AudioContext();
+    const audioCtx = ttsAudioCtxRef.current;
     const buffer = await audioCtx.decodeAudioData(audioData);
     const source = audioCtx.createBufferSource();
     source.buffer = buffer;
@@ -112,6 +116,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       ttsSourceRef.current = null;
     };
     ttsSourceRef.current = source;
+    setPlayingId(msg.id);
     source.start();
   }
 
