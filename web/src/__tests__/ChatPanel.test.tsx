@@ -13,6 +13,7 @@ const mockMessages: Message[] = [
 const defaultProps = {
   bot: "Main",
   messages: mockMessages,
+  messagesLoading: false,
   loading: false,
   loadingStatus: undefined,
   streamingContent: "",

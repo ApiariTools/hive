@@ -106,8 +106,6 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "apiari-claude-sdk"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d994c17738dc2c1f089e4bbb142787b8cd9d2572ff955483cc26030913289bb"
 dependencies = [
  "chrono",
  "libc",
@@ -122,8 +120,6 @@ dependencies = [
 [[package]]
 name = "apiari-codex-sdk"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "563341b4c9bb15f2dd74665e947591a0105812d152571a791d2d2a9a83331e54"
 dependencies = [
  "libc",
  "serde",
@@ -136,8 +132,6 @@ dependencies = [
 [[package]]
 name = "apiari-gemini-sdk"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63489ff45634612cbf5bfa1b2e5271257c49cdbec0427c18479fe9fa2a470987"
 dependencies = [
  "libc",
  "serde",

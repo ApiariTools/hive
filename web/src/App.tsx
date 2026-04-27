@@ -118,12 +118,17 @@ export default function App() {
         if (workspace) api.getUnread(workspace).then(setUnread);
         // Append message directly instead of full refetch
         if (event.workspace === workspace && event.bot === bot) {
+          const role = event.role as string;
+          const content = event.content as string;
+          if (role === "assistant" && !content.trim()) {
+            return;
+          }
           const newMsg: Message = {
             id: nextTempId.current--,
             workspace: event.workspace as string,
             bot: event.bot as string,
-            role: event.role as string,
-            content: event.content as string,
+            role,
+            content,
             attachments: null,
             created_at: new Date().toISOString(),
           };

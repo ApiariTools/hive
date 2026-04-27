@@ -610,6 +610,12 @@ async fn send_message(
         .db
         .add_message(&workspace, &bot, "user", &body.message, att_json.as_deref())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.events.send(HiveEvent::Message {
+        workspace: workspace.clone(),
+        bot: bot.clone(),
+        role: "user".to_string(),
+        content: body.message.clone(),
+    });
 
     info!("[chat] {workspace}/{bot}: {}", body.message);
 
@@ -634,6 +640,7 @@ async fn send_message(
         .as_ref()
         .map(|b| b.provider.clone())
         .unwrap_or_else(|| "claude".to_string());
+    let model = bot_config.as_ref().and_then(|b| b.model.clone());
 
     // Build system prompt and hash it — if prompt changed, start fresh session
     let full_prompt = build_system_prompt(&ws_config, &bot);
@@ -693,8 +700,10 @@ async fn send_message(
                         system_prompt,
                         working_dir,
                         resume_id,
+                        model,
                         images,
                         &db,
+                        &events,
                         &ws_name,
                         &bot_name,
                         &hash,
@@ -707,7 +716,9 @@ async fn send_message(
                         system_prompt,
                         working_dir,
                         resume_id,
+                        model,
                         &db,
+                        &events,
                         &ws_name,
                         &bot_name,
                         &hash,
@@ -722,6 +733,7 @@ async fn send_message(
                         resume_id,
                         images,
                         &db,
+                        &events,
                         &ws_name,
                         &bot_name,
                         &hash,
@@ -735,21 +747,23 @@ async fn send_message(
 
         match result {
             Ok(Err(e)) => {
-                let _ = db.add_message(
+                add_message_and_emit(
+                    &db,
+                    &events,
                     &ws_name,
                     &bot_name,
                     "assistant",
                     &format!("Error: {e}"),
-                    None,
                 );
             }
             Err(_) => {
-                let _ = db.add_message(
+                add_message_and_emit(
+                    &db,
+                    &events,
                     &ws_name,
                     &bot_name,
                     "system",
                     "Response timed out after 5 minutes.",
-                    None,
                 );
             }
             Ok(Ok(())) => {}
@@ -761,12 +775,6 @@ async fn send_message(
             bot: bot_name.clone(),
             status: "idle".to_string(),
             tool_name: None,
-        });
-        events.send(HiveEvent::Message {
-            workspace: ws_name,
-            bot: bot_name,
-            role: "assistant".to_string(),
-            content: "".to_string(),
         });
     });
 
@@ -805,9 +813,14 @@ async fn cancel_bot(
     // Give the background task a moment to notice
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let _ = state.db.set_bot_status(&workspace, &bot, "idle", "", None);
-    let _ = state
-        .db
-        .add_message(&workspace, &bot, "system", "Response cancelled.", None);
+    add_message_and_emit(
+        &state.db,
+        &state.events,
+        &workspace,
+        &bot,
+        "system",
+        "Response cancelled.",
+    );
     Json(serde_json::json!({"ok": true}))
 }
 
@@ -945,6 +958,23 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+fn add_message_and_emit(
+    db: &Db,
+    events: &EventHub,
+    workspace: &str,
+    bot: &str,
+    role: &str,
+    content: &str,
+) {
+    let _ = db.add_message(workspace, bot, role, content, None);
+    events.send(HiveEvent::Message {
+        workspace: workspace.to_string(),
+        bot: bot.to_string(),
+        role: role.to_string(),
+        content: content.to_string(),
+    });
+}
+
 // ── Background bot runners (write to DB, not SSE) ──
 
 async fn run_bot_claude(
@@ -954,6 +984,7 @@ async fn run_bot_claude(
     resume_id: Option<String>,
     images: Vec<(String, String)>,
     db: &Db,
+    events: &EventHub,
     ws: &str,
     bot: &str,
     prompt_hash: &str,
@@ -1030,7 +1061,7 @@ async fn run_bot_claude(
     }
 
     if !full_text.is_empty() {
-        let _ = db.add_message(ws, bot, "assistant", full_text.trim(), None);
+        add_message_and_emit(db, events, ws, bot, "assistant", full_text.trim());
     }
     Ok(())
 }
@@ -1040,8 +1071,10 @@ async fn run_bot_codex(
     system_prompt: Option<String>,
     working_dir: Option<PathBuf>,
     resume_id: Option<String>,
+    model: Option<String>,
     images: Vec<(String, String)>,
     db: &Db,
+    events: &EventHub,
     ws: &str,
     bot: &str,
     prompt_hash: &str,
@@ -1072,6 +1105,7 @@ async fn run_bot_codex(
                 &prompt,
                 apiari_codex_sdk::ResumeOptions {
                     session_id: Some(sid.clone()),
+                    model: model.clone(),
                     full_auto: true,
                     working_dir,
                     ..Default::default()
@@ -1084,6 +1118,7 @@ async fn run_bot_codex(
             .exec(
                 &prompt,
                 apiari_codex_sdk::ExecOptions {
+                    model: model.clone(),
                     full_auto: true,
                     working_dir,
                     images: image_paths,
@@ -1097,35 +1132,44 @@ async fn run_bot_codex(
     let _ = db.set_bot_status(ws, bot, "streaming", "", None);
     let mut full_text = String::new();
 
-    while let Ok(Some(event)) = execution.next_event().await {
-        match &event {
-            apiari_codex_sdk::Event::ThreadStarted { thread_id } => {
-                let _ = db.set_session(ws, bot, thread_id, prompt_hash);
-            }
-            apiari_codex_sdk::Event::ItemCompleted { item } => {
-                if let Some(text) = item.text()
-                    && !text.is_empty()
-                {
-                    full_text = text.to_string();
-                    let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
+    let mut update_text = |text: &str| {
+        if !text.is_empty() {
+            full_text = text.to_string();
+            let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
+        }
+    };
+
+    loop {
+        match execution.next_event().await {
+            Ok(Some(event)) => match &event {
+                apiari_codex_sdk::Event::ThreadStarted { thread_id } => {
+                    let _ = db.set_session(ws, bot, thread_id, prompt_hash);
                 }
-            }
-            apiari_codex_sdk::Event::TurnFailed { error, .. } => {
-                let msg = error
-                    .as_ref()
-                    .and_then(|e| e.message.as_deref())
-                    .unwrap_or("codex failed");
-                return Err(msg.to_string());
-            }
-            apiari_codex_sdk::Event::Error { message } => {
-                return Err(message.as_deref().unwrap_or("codex error").to_string());
-            }
-            _ => {}
+                apiari_codex_sdk::Event::ItemUpdated { item }
+                | apiari_codex_sdk::Event::ItemCompleted { item } => {
+                    if let Some(text) = item.text() {
+                        update_text(text);
+                    }
+                }
+                apiari_codex_sdk::Event::TurnFailed { error, .. } => {
+                    let msg = error
+                        .as_ref()
+                        .and_then(|e| e.message.as_deref())
+                        .unwrap_or("codex failed");
+                    return Err(msg.to_string());
+                }
+                apiari_codex_sdk::Event::Error { message } => {
+                    return Err(message.as_deref().unwrap_or("codex error").to_string());
+                }
+                _ => {}
+            },
+            Ok(None) => break,
+            Err(e) => return Err(e.to_string()),
         }
     }
 
     if !full_text.is_empty() {
-        let _ = db.add_message(ws, bot, "assistant", full_text.trim(), None);
+        add_message_and_emit(db, events, ws, bot, "assistant", full_text.trim());
     }
     Ok(())
 }
@@ -1135,7 +1179,9 @@ async fn run_bot_gemini(
     system_prompt: Option<String>,
     working_dir: Option<PathBuf>,
     resume_id: Option<String>,
+    model: Option<String>,
     db: &Db,
+    events: &EventHub,
     ws: &str,
     bot: &str,
     prompt_hash: &str,
@@ -1152,6 +1198,7 @@ async fn run_bot_gemini(
                 &prompt,
                 apiari_gemini_sdk::SessionOptions {
                     session_id: Some(sid.clone()),
+                    model: model.clone(),
                     working_dir,
                     ..Default::default()
                 },
@@ -1163,6 +1210,7 @@ async fn run_bot_gemini(
             .exec(
                 &prompt,
                 apiari_gemini_sdk::GeminiOptions {
+                    model: model.clone(),
                     working_dir,
                     ..Default::default()
                 },
@@ -1173,36 +1221,82 @@ async fn run_bot_gemini(
 
     let _ = db.set_bot_status(ws, bot, "streaming", "", None);
     let mut full_text = String::new();
+    let mut recent_events: Vec<String> = Vec::new();
 
-    while let Ok(Some(event)) = execution.next_event().await {
-        match &event {
-            apiari_gemini_sdk::Event::ThreadStarted { thread_id } => {
-                let _ = db.set_session(ws, bot, thread_id, prompt_hash);
-            }
-            apiari_gemini_sdk::Event::ItemCompleted { item } => {
-                if let Some(text) = item.text()
-                    && !text.is_empty()
-                {
-                    full_text = text.to_string();
-                    let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
+    let mut update_text = |text: &str| {
+        if !text.is_empty() {
+            full_text = text.to_string();
+            let _ = db.set_bot_status(ws, bot, "streaming", &full_text, None);
+        }
+    };
+
+    loop {
+        match execution.next_event().await {
+            Ok(Some(event)) => {
+                recent_events.push(format!("{event:?}"));
+                if recent_events.len() > 6 {
+                    recent_events.remove(0);
+                }
+
+                match &event {
+                    apiari_gemini_sdk::Event::JsonOutput { session_id, .. } => {
+                        if let Some(session_id) = session_id.as_deref() {
+                            let _ = db.set_session(ws, bot, session_id, prompt_hash);
+                        }
+                        if let Some(text) = event.text() {
+                            update_text(&text);
+                        }
+                    }
+                    apiari_gemini_sdk::Event::Init { session_id, .. } => {
+                        let _ = db.set_session(ws, bot, session_id, prompt_hash);
+                    }
+                    apiari_gemini_sdk::Event::ThreadStarted { thread_id } => {
+                        let _ = db.set_session(ws, bot, thread_id, prompt_hash);
+                    }
+                    apiari_gemini_sdk::Event::Message { .. }
+                    | apiari_gemini_sdk::Event::ToolResponse { .. }
+                    | apiari_gemini_sdk::Event::AgentEnd { .. }
+                    | apiari_gemini_sdk::Event::ItemUpdated { .. }
+                    | apiari_gemini_sdk::Event::ItemCompleted { .. } => {
+                        if let Some(text) = event.text() {
+                            update_text(&text);
+                        }
+                    }
+                    apiari_gemini_sdk::Event::TurnFailed { error, .. } => {
+                        let msg = error
+                            .as_ref()
+                            .and_then(|e| e.message.as_deref())
+                            .unwrap_or("gemini failed");
+                        return Err(msg.to_string());
+                    }
+                    apiari_gemini_sdk::Event::Error {
+                        message, status, ..
+                    } => {
+                        let msg = message.as_deref().unwrap_or("gemini error");
+                        if let Some(status) = status.as_deref() {
+                            return Err(format!("{status}: {msg}"));
+                        }
+                        return Err(msg.to_string());
+                    }
+                    _ => {}
                 }
             }
-            apiari_gemini_sdk::Event::TurnFailed { error, .. } => {
-                let msg = error
-                    .as_ref()
-                    .and_then(|e| e.message.as_deref())
-                    .unwrap_or("gemini failed");
-                return Err(msg.to_string());
-            }
-            apiari_gemini_sdk::Event::Error { message } => {
-                return Err(message.as_deref().unwrap_or("gemini error").to_string());
-            }
-            _ => {}
+            Ok(None) => break,
+            Err(e) => return Err(e.to_string()),
         }
     }
 
     if !full_text.is_empty() {
-        let _ = db.add_message(ws, bot, "assistant", full_text.trim(), None);
+        add_message_and_emit(db, events, ws, bot, "assistant", full_text.trim());
+    } else {
+        let summary = if recent_events.is_empty() {
+            "no events captured".to_string()
+        } else {
+            recent_events.join(" | ")
+        };
+        return Err(format!(
+            "gemini returned no assistant text; recent events: {summary}"
+        ));
     }
     Ok(())
 }
