@@ -6,4 +6,5 @@ pub mod pr_review;
 pub mod publish;
 pub mod routes;
 pub mod tick;
+pub mod tts;
 pub mod watcher;
