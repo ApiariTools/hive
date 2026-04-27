@@ -120,6 +120,24 @@ export async function textToSpeech(text: string): Promise<ArrayBuffer | null> {
   }
 }
 
+export interface ProviderUsage {
+  name: string;
+  status: string;
+  usage_percent: number | null;
+  remaining: string | null;
+  limit: string | null;
+  resets_at: string | null;
+}
+
+export interface UsageData {
+  providers: ProviderUsage[];
+  updated_at: string | null;
+}
+
+export function getUsage(): Promise<UsageData> {
+  return get("/usage");
+}
+
 export async function sendMessage(
   workspace: string,
   bot: string,

@@ -13,6 +13,7 @@ mod publish;
 mod routes;
 mod tick;
 mod tts;
+mod usage;
 mod watcher;
 
 #[derive(Parser)]
@@ -79,6 +80,7 @@ async fn main() -> Result<()> {
     let watched_bots = load_watched_bots(&config_dir);
     let watched_workspaces = load_watched_workspaces(&config_dir);
     let pr_review_cache: pr_review::PrReviewCache = Default::default();
+    let usage_cache: usage::UsageCache = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let ws_roots = load_workspace_roots(&config_dir);
 
     let mut engine = tick::TickEngine::new(15);
@@ -117,13 +119,15 @@ async fn main() -> Result<()> {
         )));
     }
 
+    engine.add_watcher(Box::new(usage::UsageWatcher::new(usage_cache.clone())));
+
     tokio::spawn(engine.run(db.clone()));
 
     // Auto-start TTS server if set up
     let _tts_child = tts::start_tts_server().await;
 
     let event_hub = events::EventHub::new();
-    let app = routes::router(db, &config_dir, event_hub, pr_review_cache);
+    let app = routes::router(db, &config_dir, event_hub, pr_review_cache, usage_cache);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
     info!("hive listening on http://{addr}");

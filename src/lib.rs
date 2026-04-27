@@ -8,4 +8,5 @@ pub mod publish;
 pub mod routes;
 pub mod tick;
 pub mod tts;
+pub mod usage;
 pub mod watcher;

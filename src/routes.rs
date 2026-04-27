@@ -17,6 +17,7 @@ use tracing::info;
 use crate::db::Db;
 use crate::events::{EventHub, HiveEvent};
 use crate::pr_review::PrReviewCache;
+use crate::usage::UsageCache;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +25,7 @@ pub struct AppState {
     pub config_dir: PathBuf,
     pub events: EventHub,
     pub pr_review_cache: PrReviewCache,
+    pub usage_cache: UsageCache,
     pub http_client: reqwest::Client,
 }
 
@@ -32,12 +34,14 @@ pub fn router(
     config_dir: &std::path::Path,
     events: EventHub,
     pr_review_cache: PrReviewCache,
+    usage_cache: UsageCache,
 ) -> Router {
     let state = AppState {
         db,
         config_dir: config_dir.to_path_buf(),
         events,
         pr_review_cache,
+        usage_cache,
         http_client: reqwest::Client::new(),
     };
 
@@ -69,6 +73,7 @@ pub fn router(
         .route("/api/tts", post(text_to_speech))
         .route("/api/workspaces/{workspace}/unread", get(get_unread))
         .route("/api/workspaces/{workspace}/seen/{bot}", post(mark_seen))
+        .route("/api/usage", get(get_usage))
         .route("/ws", get(ws_handler))
         .route("/api/workspaces/{workspace}/repos", get(list_repos))
         .route("/api/workspaces/{workspace}/workers", get(list_workers))
@@ -1788,6 +1793,16 @@ async fn send_worker_message(
         Ok(Json(
             serde_json::json!({"ok": false, "error": stderr.to_string()}),
         ))
+    }
+}
+
+// ── Usage ──
+
+async fn get_usage(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let cache = state.usage_cache.lock().await;
+    match &*cache {
+        Some(data) => Json(serde_json::to_value(data).unwrap_or_default()),
+        None => Json(serde_json::json!({ "providers": [], "updated_at": null })),
     }
 }
 
