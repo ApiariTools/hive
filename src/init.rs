@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 pub struct InitArgs {
@@ -6,24 +6,50 @@ pub struct InitArgs {
     pub root: Option<String>,
 }
 
+fn is_valid_workspace_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && name != "."
+}
+
 pub fn run(args: InitArgs, config_dir: &Path) -> color_eyre::Result<()> {
+    if !is_valid_workspace_name(&args.name) {
+        color_eyre::eyre::bail!(
+            "Invalid workspace name {:?}. Name must not contain path separators or '..'.",
+            args.name
+        );
+    }
+
     let root = match args.root {
         Some(r) => PathBuf::from(r),
         None => {
             let cwd = std::env::current_dir()?;
-            print!("Workspace root [{}]: ", cwd.display());
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim();
-            if input.is_empty() {
-                cwd
+            if io::stdin().is_terminal() {
+                print!("Workspace root [{}]: ", cwd.display());
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                let input = input.trim();
+                if input.is_empty() {
+                    cwd
+                } else {
+                    PathBuf::from(input)
+                }
             } else {
-                PathBuf::from(input)
+                cwd
             }
         }
     };
 
+    // Ensure root is absolute
+    let root = if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir()?.join(root)
+    };
+    // Resolve symlinks if possible, but keep the absolute path either way
     let root = std::fs::canonicalize(&root).unwrap_or(root);
 
     // Create workspace TOML config
@@ -34,6 +60,9 @@ pub fn run(args: InitArgs, config_dir: &Path) -> color_eyre::Result<()> {
     if config_path.exists() {
         println!("Skipping {} (already exists)", config_path.display());
     } else {
+        // Escape backslashes for valid TOML strings (e.g. Windows paths)
+        let root_escaped = root.display().to_string().replace('\\', "\\\\");
+        let name_escaped = args.name.replace('\\', "\\\\").replace('"', "\\\"");
         let toml_content = format!(
             r##"[workspace]
 root = "{root}"
@@ -59,8 +88,8 @@ description = ""
 # Voice (optional):
 # tts_voice = "am_echo"
 "##,
-            root = root.display(),
-            name = args.name,
+            root = root_escaped,
+            name = name_escaped,
         );
         std::fs::write(&config_path, toml_content)?;
     }
@@ -209,6 +238,23 @@ mod tests {
             std::fs::read_to_string(&context_path).unwrap(),
             "custom context"
         );
+    }
+
+    #[test]
+    fn test_init_rejects_invalid_name() {
+        let config_dir = TempDir::new().unwrap();
+        let root_dir = TempDir::new().unwrap();
+
+        for bad_name in &["../escape", "foo/bar", "foo\\bar", "..", "."] {
+            let args = InitArgs {
+                name: bad_name.to_string(),
+                root: Some(root_dir.path().to_string_lossy().to_string()),
+            };
+            assert!(
+                run(args, config_dir.path()).is_err(),
+                "should reject name: {bad_name}"
+            );
+        }
     }
 
     #[test]
