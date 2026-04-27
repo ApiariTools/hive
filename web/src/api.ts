@@ -111,7 +111,7 @@ export async function textToSpeech(text: string, voice?: string): Promise<ArrayB
     const res = await fetch(`${BASE}/tts`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice: voice || "am_echo" }),
+      body: JSON.stringify({ text, ...(voice ? { voice } : {}) }),
     });
     if (!res.ok) return null;
     return await res.arrayBuffer();

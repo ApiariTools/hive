@@ -98,11 +98,8 @@ async fn list_workspaces(State(state): State<AppState>) -> Json<Vec<WorkspaceInf
             if path.extension().is_some_and(|e| e == "toml")
                 && let Some(name) = path.file_stem().and_then(|s| s.to_str())
             {
-                let tts_voice = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|s| toml::from_str::<WorkspaceConfig>(&s).ok())
-                    .and_then(|c| c.workspace)
-                    .and_then(|w| w.tts_voice);
+                let config = load_workspace_config(&path);
+                let tts_voice = config.workspace.and_then(|w| w.tts_voice);
                 workspaces.push(WorkspaceInfo {
                     name: name.to_string(),
                     tts_voice,
