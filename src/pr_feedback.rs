@@ -2,7 +2,7 @@ use crate::pr_review::PrReviewCache;
 use crate::tick::{Action, TickContext, Watcher};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{info, warn};
 
@@ -66,17 +66,54 @@ impl PrFeedbackWatcher {
 
 fn load_store(path: &std::path::Path) -> FeedbackStore {
     match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => FeedbackStore::default(),
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(store) => store,
+            Err(err) => {
+                warn!(
+                    "[pr-feedback] failed to parse store at {}: {}; using default",
+                    path.display(),
+                    err
+                );
+                FeedbackStore::default()
+            }
+        },
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    "[pr-feedback] failed to read store at {}: {}; using default",
+                    path.display(),
+                    err
+                );
+            }
+            FeedbackStore::default()
+        }
     }
 }
 
 fn save_store(path: &std::path::Path, store: &FeedbackStore) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        warn!(
+            "[pr-feedback] failed to create store directory {}: {}",
+            parent.display(),
+            err
+        );
+        return;
     }
-    if let Ok(json) = serde_json::to_string_pretty(store) {
-        let _ = std::fs::write(path, json);
+    match serde_json::to_string_pretty(store) {
+        Ok(json) => {
+            if let Err(err) = std::fs::write(path, json) {
+                warn!(
+                    "[pr-feedback] failed to write store to {}: {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+        Err(err) => {
+            warn!("[pr-feedback] failed to serialize store: {}", err);
+        }
     }
 }
 
@@ -195,22 +232,11 @@ async fn fetch_pr_comments(owner: &str, repo: &str, number: i64) -> Vec<ReviewCo
 
 /// Fetch CI failure log for a PR.
 async fn fetch_ci_failure_log(owner: &str, repo: &str, pr_number: i64) -> Option<String> {
-    // Get the last commit SHA from the PR
-    let commits_endpoint = format!("repos/{owner}/{repo}/pulls/{pr_number}/commits");
-    let mut cmd = tokio::process::Command::new("gh");
-    cmd.args(["api", &commits_endpoint]);
-    if std::env::var("CLAUDECODE").is_ok() {
-        cmd.env_remove("GH_TOKEN");
-    }
-    let output = cmd.output().await.ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let commits: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
-    let sha = commits.last()?.get("sha")?.as_str()?;
+    // Use the PR head SHA directly (avoids pagination issues with commits endpoint)
+    let sha = get_pr_head_sha(owner, repo, pr_number).await?;
 
     // Get check runs for that commit
-    let runs_endpoint = format!("repos/{owner}/{repo}/commits/{sha}/check-runs");
+    let runs_endpoint = format!("repos/{owner}/{repo}/commits/{}/check-runs", sha);
     let mut cmd = tokio::process::Command::new("gh");
     cmd.args(["api", &runs_endpoint]);
     if std::env::var("CLAUDECODE").is_ok() {
@@ -290,10 +316,14 @@ pub(crate) fn format_review_message(
             (Some(p), None) => p.clone(),
             _ => "general".to_string(),
         };
-        let body = if c.body.len() > 200 {
-            format!("{}...", &c.body[..200])
-        } else {
-            c.body.clone()
+        let body = {
+            let mut chars = c.body.chars();
+            let truncated: String = chars.by_ref().take(200).collect();
+            if chars.next().is_some() {
+                format!("{truncated}...")
+            } else {
+                truncated
+            }
         };
         msg.push_str(&format!(
             "{}. {} ({}):\n   {}\n\n",
@@ -348,14 +378,14 @@ impl Watcher for PrFeedbackWatcher {
 
     async fn tick(&mut self, _ctx: &TickContext) -> Vec<Action> {
         let mut actions = Vec::new();
-        let mut active_pr_keys: Vec<String> = Vec::new();
+        let mut active_pr_keys: HashSet<String> = HashSet::new();
 
         for root in &self.workspace_roots {
             let worker_prs = read_worker_prs(root);
 
             for wp in &worker_prs {
                 let pr_key = format!("{}/{}/{}", wp.owner, wp.repo, wp.number);
-                active_pr_keys.push(pr_key.clone());
+                active_pr_keys.insert(pr_key.clone());
 
                 let state =
                     self.store
@@ -430,6 +460,7 @@ impl Watcher for PrFeedbackWatcher {
                             message,
                         });
                         state.last_worker_sha = head_sha;
+                        state.rounds += 1;
                         info!(
                             "[pr-feedback] Forwarded CI failure for PR #{} to worker {}",
                             wp.number, wp.worker_id
@@ -437,12 +468,7 @@ impl Watcher for PrFeedbackWatcher {
                     }
                 }
 
-                // Check merge conflicts from review cache
-                let is_mergeable = {
-                    let guard = self.pr_review_cache.lock().await;
-                    guard.get(&cache_key).and_then(|s| s.review_state.clone())
-                };
-                // We detect conflicts via the PR API — check mergeable state
+                // Check merge conflicts via the PR API
                 if !state.conflict_notified {
                     let mergeable = check_pr_mergeable(&wp.owner, &wp.repo, wp.number).await;
                     if mergeable == Some(false) {
@@ -452,15 +478,13 @@ impl Watcher for PrFeedbackWatcher {
                             message: format_conflict_message(wp.number),
                         });
                         state.conflict_notified = true;
+                        state.rounds += 1;
                         info!(
                             "[pr-feedback] Notified worker {} about merge conflicts on PR #{}",
                             wp.worker_id, wp.number
                         );
                     }
                 }
-
-                // Suppress unused variable warning
-                let _ = is_mergeable;
             }
         }
 
@@ -659,7 +683,7 @@ mod tests {
         );
 
         // Only "org/repo/1" is still active
-        let active_keys = vec!["org/repo/1".to_string()];
+        let active_keys: HashSet<String> = ["org/repo/1".to_string()].into();
         store.prs.retain(|key, _| active_keys.contains(key));
 
         assert_eq!(store.prs.len(), 1);

@@ -169,13 +169,11 @@ fn execute_action(action: Action, db: &Db) {
             let root = workspace_root.clone();
             tokio::spawn(async move {
                 let output = tokio::process::Command::new("swarm")
-                    .args([
-                        "--dir",
-                        &root.to_string_lossy(),
-                        "send",
-                        &worker_id,
-                        &message,
-                    ])
+                    .arg("--dir")
+                    .arg(&root)
+                    .arg("send")
+                    .arg(&worker_id)
+                    .arg(&message)
                     .output()
                     .await;
                 match output {
