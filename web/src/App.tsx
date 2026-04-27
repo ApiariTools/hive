@@ -59,10 +59,18 @@ export default function App() {
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const lastMsgId = useRef<number>(0);
   const nextTempId = useRef<number>(-1);
   const loadingRef = useRef(false);
   const tabHiddenRef = useRef(document.hidden);
+
+  // Track mobile state
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth <= 768);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
 
   // Track tab visibility
   useEffect(() => {
@@ -82,6 +90,9 @@ export default function App() {
         setWorkspace(ws[0].name);
       }
     });
+    if (isMobile && !initial.bot) {
+      setBot("Main");
+    }
   }, []);
 
   // WebSocket for real-time updates
@@ -252,11 +263,11 @@ export default function App() {
 
   const handleSelectWorkspace = useCallback((ws: string) => {
     setWorkspace(ws);
-    setBot("");
+    setBot(isMobile ? "Main" : "");
     setWorkerId(null);
     setLoading(false);
     setLoadingStatus(undefined);
-  }, []);
+  }, [isMobile]);
 
   const handleSelectBot = useCallback((name: string) => {
     setBot(name);
