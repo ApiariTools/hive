@@ -114,6 +114,11 @@ pub fn router_with_http_client(
             "/api/workspaces/{workspace}/workers/{worker_id}/send",
             post(send_worker_message),
         )
+        .route("/api/workspaces/{workspace}/docs", get(list_docs))
+        .route(
+            "/api/workspaces/{workspace}/docs/{filename}",
+            get(get_doc).put(put_doc).delete(delete_doc),
+        )
         .fallback(get(serve_frontend))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB for image attachments
         .layer(CorsLayer::permissive())
@@ -1628,6 +1633,177 @@ async fn tts_for_message(
     }
 }
 
+// ── Docs ──
+
+#[derive(Serialize, Debug)]
+struct DocInfo {
+    name: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    updated_at: String,
+}
+
+fn resolve_workspace_root(state: &AppState, workspace: &str) -> Option<PathBuf> {
+    let config_path = state
+        .config_dir
+        .join("workspaces")
+        .join(format!("{workspace}.toml"));
+    let ws_config = load_workspace_config(&config_path);
+    ws_config
+        .workspace
+        .as_ref()
+        .and_then(|w| w.root.as_ref())
+        .map(PathBuf::from)
+}
+
+fn validate_doc_filename(filename: &str) -> Result<(), StatusCode> {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !filename.ends_with(".md") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+fn extract_doc_title(content: &str, filename: &str) -> String {
+    content
+        .lines()
+        .find(|l| l.starts_with("# "))
+        .map(|l| l.trim_start_matches("# ").trim().to_string())
+        .unwrap_or_else(|| filename.trim_end_matches(".md").to_string())
+}
+
+fn extract_title_from_file(path: &std::path::Path, filename: &str) -> String {
+    use std::io::BufRead;
+    if let Ok(file) = std::fs::File::open(path) {
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines().map_while(Result::ok).take(20) {
+            if line.starts_with("# ") {
+                return line.trim_start_matches("# ").trim().to_string();
+            }
+        }
+    }
+    filename.trim_end_matches(".md").to_string()
+}
+
+async fn list_docs(
+    State(state): State<AppState>,
+    Path(workspace): Path<String>,
+) -> Json<Vec<DocInfo>> {
+    let root = match resolve_workspace_root(&state, &workspace) {
+        Some(r) => r,
+        None => return Json(vec![]),
+    };
+
+    let docs = tokio::task::spawn_blocking(move || {
+        let docs_dir = root.join(".apiari/docs");
+        let mut docs = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&docs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "md")
+                    && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                {
+                    let title = extract_title_from_file(&path, name);
+                    let updated_at = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .map(|t| {
+                            chrono::DateTime::<chrono::Utc>::from(t)
+                                .format("%Y-%m-%dT%H:%M:%SZ")
+                                .to_string()
+                        })
+                        .unwrap_or_default();
+                    docs.push(DocInfo {
+                        name: name.to_string(),
+                        title,
+                        content: None,
+                        updated_at,
+                    });
+                }
+            }
+        }
+
+        docs.sort_by(|a, b| a.name.cmp(&b.name));
+        docs
+    })
+    .await
+    .unwrap_or_default();
+
+    Json(docs)
+}
+
+async fn get_doc(
+    State(state): State<AppState>,
+    Path((workspace, filename)): Path<(String, String)>,
+) -> Result<Json<DocInfo>, StatusCode> {
+    validate_doc_filename(&filename)?;
+
+    let root = resolve_workspace_root(&state, &workspace).ok_or(StatusCode::NOT_FOUND)?;
+    let path = root.join(".apiari/docs").join(&filename);
+
+    let content = std::fs::read_to_string(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    let title = extract_doc_title(&content, &filename);
+    let updated_at = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| {
+            chrono::DateTime::<chrono::Utc>::from(t)
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(DocInfo {
+        name: filename,
+        title,
+        content: Some(content),
+        updated_at,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PutDocBody {
+    content: String,
+}
+
+async fn put_doc(
+    State(state): State<AppState>,
+    Path((workspace, filename)): Path<(String, String)>,
+    Json(body): Json<PutDocBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    validate_doc_filename(&filename)?;
+
+    let root = resolve_workspace_root(&state, &workspace).ok_or(StatusCode::NOT_FOUND)?;
+    let docs_dir = root.join(".apiari/docs");
+
+    std::fs::create_dir_all(&docs_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    std::fs::write(docs_dir.join(&filename), &body.content)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn delete_doc(
+    State(state): State<AppState>,
+    Path((workspace, filename)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    validate_doc_filename(&filename)?;
+
+    let root = resolve_workspace_root(&state, &workspace).ok_or(StatusCode::NOT_FOUND)?;
+    let path = root.join(".apiari/docs").join(&filename);
+
+    if !path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    std::fs::remove_file(&path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 // ── Repos ──
 
 #[derive(Serialize, Clone)]
@@ -2990,6 +3166,299 @@ role = "Chat"
         let uri: Uri = "/assets/nonexistent.js".parse().unwrap();
         let resp = serve_frontend(uri).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── docs endpoints ──
+
+    #[test]
+    fn test_validate_doc_filename_valid() {
+        assert!(validate_doc_filename("architecture.md").is_ok());
+        assert!(validate_doc_filename("my-doc.md").is_ok());
+    }
+
+    #[test]
+    fn test_validate_doc_filename_rejects_traversal() {
+        assert!(validate_doc_filename("../etc/passwd").is_err());
+        assert!(validate_doc_filename("foo/bar.md").is_err());
+        assert!(validate_doc_filename("foo\\bar.md").is_err());
+    }
+
+    #[test]
+    fn test_validate_doc_filename_rejects_non_md() {
+        assert!(validate_doc_filename("readme.txt").is_err());
+        assert!(validate_doc_filename("script.js").is_err());
+    }
+
+    #[test]
+    fn test_extract_doc_title_from_heading() {
+        assert_eq!(
+            extract_doc_title("# My Title\n\nSome content", "file.md"),
+            "My Title"
+        );
+    }
+
+    #[test]
+    fn test_extract_doc_title_fallback_to_filename() {
+        assert_eq!(
+            extract_doc_title("No heading here", "architecture.md"),
+            "architecture"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_docs_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let ws_dir = config_dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("test.toml"),
+            format!(
+                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
+                dir.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let state = AppState {
+            db: crate::db::Db::open(&config_dir.path().join("test.db")).unwrap(),
+            config_dir: config_dir.path().to_path_buf(),
+            events: crate::events::EventHub::new(),
+            pr_review_cache: Default::default(),
+            usage_cache: Default::default(),
+            http_client: reqwest::Client::new(),
+            tts_base_url: "http://localhost".to_string(),
+        };
+
+        let result = list_docs(State(state), Path("test".to_string())).await;
+        assert!(result.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_docs_returns_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs_dir = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("arch.md"), "# Architecture\nDetails").unwrap();
+        std::fs::write(docs_dir.join("setup.md"), "Setup guide").unwrap();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        let ws_dir = config_dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("test.toml"),
+            format!(
+                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
+                dir.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let state = AppState {
+            db: crate::db::Db::open(&config_dir.path().join("test.db")).unwrap(),
+            config_dir: config_dir.path().to_path_buf(),
+            events: crate::events::EventHub::new(),
+            pr_review_cache: Default::default(),
+            usage_cache: Default::default(),
+            http_client: reqwest::Client::new(),
+            tts_base_url: "http://localhost".to_string(),
+        };
+
+        let result = list_docs(State(state), Path("test".to_string())).await;
+        assert_eq!(result.0.len(), 2);
+        assert_eq!(result.0[0].name, "arch.md");
+        assert_eq!(result.0[0].title, "Architecture");
+        assert!(result.0[0].content.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_doc_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs_dir = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("arch.md"), "# Architecture\nDetails here").unwrap();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        let ws_dir = config_dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("test.toml"),
+            format!(
+                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
+                dir.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let state = AppState {
+            db: crate::db::Db::open(&config_dir.path().join("test.db")).unwrap(),
+            config_dir: config_dir.path().to_path_buf(),
+            events: crate::events::EventHub::new(),
+            pr_review_cache: Default::default(),
+            usage_cache: Default::default(),
+            http_client: reqwest::Client::new(),
+            tts_base_url: "http://localhost".to_string(),
+        };
+
+        let result = get_doc(
+            State(state),
+            Path(("test".to_string(), "arch.md".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0.name, "arch.md");
+        assert_eq!(result.0.title, "Architecture");
+        assert_eq!(
+            result.0.content.as_deref(),
+            Some("# Architecture\nDetails here")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_doc_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let ws_dir = config_dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("test.toml"),
+            format!(
+                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
+                dir.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let state = AppState {
+            db: crate::db::Db::open(&config_dir.path().join("test.db")).unwrap(),
+            config_dir: config_dir.path().to_path_buf(),
+            events: crate::events::EventHub::new(),
+            pr_review_cache: Default::default(),
+            usage_cache: Default::default(),
+            http_client: reqwest::Client::new(),
+            tts_base_url: "http://localhost".to_string(),
+        };
+
+        let result = get_doc(
+            State(state),
+            Path(("test".to_string(), "nonexistent.md".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_put_doc_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let ws_dir = config_dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("test.toml"),
+            format!(
+                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
+                dir.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let state = AppState {
+            db: crate::db::Db::open(&config_dir.path().join("test.db")).unwrap(),
+            config_dir: config_dir.path().to_path_buf(),
+            events: crate::events::EventHub::new(),
+            pr_review_cache: Default::default(),
+            usage_cache: Default::default(),
+            http_client: reqwest::Client::new(),
+            tts_base_url: "http://localhost".to_string(),
+        };
+
+        let result = put_doc(
+            State(state),
+            Path(("test".to_string(), "new.md".to_string())),
+            Json(PutDocBody {
+                content: "# New Doc\nHello".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0["ok"], true);
+
+        let written = std::fs::read_to_string(dir.path().join(".apiari/docs/new.md")).unwrap();
+        assert_eq!(written, "# New Doc\nHello");
+    }
+
+    #[tokio::test]
+    async fn test_delete_doc_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs_dir = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+        std::fs::write(docs_dir.join("todelete.md"), "content").unwrap();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        let ws_dir = config_dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("test.toml"),
+            format!(
+                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
+                dir.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let state = AppState {
+            db: crate::db::Db::open(&config_dir.path().join("test.db")).unwrap(),
+            config_dir: config_dir.path().to_path_buf(),
+            events: crate::events::EventHub::new(),
+            pr_review_cache: Default::default(),
+            usage_cache: Default::default(),
+            http_client: reqwest::Client::new(),
+            tts_base_url: "http://localhost".to_string(),
+        };
+
+        let result = delete_doc(
+            State(state),
+            Path(("test".to_string(), "todelete.md".to_string())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0["ok"], true);
+        assert!(!docs_dir.join("todelete.md").exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_doc_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let ws_dir = config_dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("test.toml"),
+            format!(
+                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
+                dir.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let state = AppState {
+            db: crate::db::Db::open(&config_dir.path().join("test.db")).unwrap(),
+            config_dir: config_dir.path().to_path_buf(),
+            events: crate::events::EventHub::new(),
+            pr_review_cache: Default::default(),
+            usage_cache: Default::default(),
+            http_client: reqwest::Client::new(),
+            tts_base_url: "http://localhost".to_string(),
+        };
+
+        let result = delete_doc(
+            State(state),
+            Path(("test".to_string(), "nonexistent.md".to_string())),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
     }
 
     #[test]

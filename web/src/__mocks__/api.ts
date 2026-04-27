@@ -32,4 +32,16 @@ export const cancelBot = vi.fn().mockResolvedValue({ ok: true });
 export const getWorkerDetail = vi.fn().mockResolvedValue(null);
 export const sendWorkerMessage = vi.fn().mockResolvedValue({ ok: true });
 export const getUsage = vi.fn().mockResolvedValue({ installed: false, providers: [], updated_at: null });
+export const getDocs = vi.fn().mockResolvedValue([
+  { name: "architecture.md", title: "Architecture", updated_at: "2026-01-01T00:00:00Z" },
+  { name: "setup.md", title: "Setup Guide", updated_at: "2026-01-01T00:00:00Z" },
+]);
+export const getDoc = vi.fn().mockResolvedValue({
+  name: "architecture.md",
+  title: "Architecture",
+  content: "# Architecture\n\nDetails here",
+  updated_at: "2026-01-01T00:00:00Z",
+});
+export const saveDoc = vi.fn().mockResolvedValue({ ok: true });
+export const deleteDoc = vi.fn().mockResolvedValue({ ok: true });
 export const connectWebSocket = vi.fn().mockReturnValue({ close: vi.fn() });
