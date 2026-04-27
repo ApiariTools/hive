@@ -442,6 +442,38 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         }
     }
 
+    // Hive configuration reference — helps bots answer config questions
+    prompt.push_str(&format!(
+        "\n## Hive Configuration Reference\n\
+         You are running inside Hive, a workspace chat hub. The user may ask about configuring their workspace.\n\n\
+         Workspace config: ~/.config/hive/workspaces/{ws_name}.toml\n\n\
+         [workspace]\n\
+         root = \"/path/to/project\"    # workspace root directory\n\
+         name = \"my-workspace\"        # display name\n\
+         description = \"...\"          # optional description\n\
+         tts_voice = \"am_echo\"        # TTS voice (optional)\n\n\
+         [[bots]]\n\
+         name = \"BotName\"             # bot display name\n\
+         color = \"#f5c542\"            # hex color for UI\n\
+         role = \"Description\"         # short role (shown in sidebar)\n\
+         description = \"...\"          # longer description (shown in chat header)\n\
+         provider = \"claude\"           # claude | codex | gemini\n\
+         model = \"...\"                # optional model override\n\
+         prompt_file = \"path.md\"      # custom system prompt file\n\
+         watch = [\"github\"]            # signal sources: github, sentry\n\
+         schedule_hours = 24           # proactive run interval\n\
+         proactive_prompt = \"...\"     # task for scheduled runs\n\
+         services = [\"sentry\"]        # inject service credentials from .apiari/services.toml\n\n\
+         Context files in workspace root:\n\
+         - .apiari/context.md — project context (appended to all bot prompts)\n\
+         - .apiari/soul.md — communication style (appended to all bot prompts)\n\
+         - .apiari/docs/ — reference docs (indexed, read on demand)\n\
+         - .apiari/services.toml — service credentials (sentry, grafana)\n\n\
+         To initialize a new workspace: `hive init <name> [--root /path]`\n\
+         The user can edit these files directly. If they ask you to help configure, \
+         explain the options and suggest what to add to their TOML or context files.\n"
+    ));
+
     // Chat history — bot can query the local DB directly
     prompt.push_str(&format!(
         "\n## Chat History\n\
