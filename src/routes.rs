@@ -993,7 +993,7 @@ async fn run_bot_claude(
         dangerously_skip_permissions: true,
         include_partial_messages: true,
         working_dir,
-        max_turns: None,
+        max_turns: Some(25),
         resume: resume_id,
         system_prompt,
         ..Default::default()
@@ -1666,7 +1666,7 @@ struct WorkerInfo {
 
 fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
     let state_path = root.join(".swarm/state.json");
-    let content = match std::fs::read_to_string(&state_path) {
+    let content = match std::fs::read_to_string(state_path) {
         Ok(c) => c,
         Err(_) => return vec![],
     };

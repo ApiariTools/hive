@@ -1,0 +1,5 @@
+{"event":"worktree_created","worktree":"hive-c9a6","branch":"swarm/task--token-efficiency-optimizations-for-c9a6","agent":"claude","pane_id":"daemon","timestamp":"2026-04-27T14:14:53.915950-05:00"}
+{"event":"phase_changed","worktree":"hive-c9a6","from":"starting","to":"running","timestamp":"2026-04-27T14:14:53.919101-05:00"}
+{"event":"phase_changed","worktree":"hive-c9a6","from":"running","to":"waiting","timestamp":"2026-04-27T14:23:13.735082-05:00"}
+{"event":"pr_detected","worktree":"hive-c9a6","pr_url":"https://github.com/ApiariTools/hive/pull/31","pr_title":"Token efficiency optimizations","pr_number":31,"timestamp":"2026-04-27T14:23:17.730408-05:00"}
+{"event":"worktree_closed","worktree":"hive-c9a6","timestamp":"2026-04-27T14:34:14.920502-05:00"}
