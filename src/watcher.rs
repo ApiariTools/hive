@@ -148,17 +148,42 @@ pub(crate) async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
         bot_name = bot.name
     );
 
+    // Resume session if we have one — saves tokens by not re-sending system prompt
+    let proactive_session_key = format!("proactive_{}", bot.name);
+    let resume_id = db
+        .get_session_id(&bot.workspace, &proactive_session_key, "proactive")
+        .unwrap_or(None);
+
     let response = match bot.provider.as_str() {
-        "codex" => run_codex_autonomous(&full_prompt, &bot.working_dir).await,
-        "gemini" => run_gemini_autonomous(&full_prompt, &bot.working_dir).await,
-        _ => run_claude_autonomous(&full_prompt, &bot.working_dir).await,
+        "codex" => run_codex_autonomous(&full_prompt, &bot.working_dir)
+            .await
+            .map(|text| AutonomousResult {
+                text,
+                session_id: None,
+            }),
+        "gemini" => run_gemini_autonomous(&full_prompt, &bot.working_dir)
+            .await
+            .map(|text| AutonomousResult {
+                text,
+                session_id: None,
+            }),
+        _ => run_claude_autonomous(&full_prompt, &bot.working_dir, resume_id.as_deref()).await,
     };
+
+    // Save session ID for next run
+    if let Ok(ref result) = response
+        && let Some(ref sid) = result.session_id
+    {
+        let _ = db.set_session(&bot.workspace, &proactive_session_key, sid, "proactive");
+    }
 
     // Read the report file if it exists, otherwise fall back to streaming output
     let report = std::fs::read_to_string(&report_path).ok();
     let _ = std::fs::remove_file(&report_path);
 
-    match (report, response) {
+    let response_text = response.map(|r| r.text);
+
+    match (report, response_text) {
         (Some(text), _) if !text.trim().is_empty() => {
             let _ = db.add_message(&bot.workspace, &bot.name, "assistant", text.trim(), None);
             info!(
@@ -284,17 +309,43 @@ pub(crate) async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) 
         bot.name, bot.role, signal.title, signal.body
     );
 
-    // Dispatch to the right provider
+    // Dispatch to the right provider — resume session if available
+    let signal_session_key = format!("signal_{}", bot.name);
+    let resume_id = db
+        .get_session_id(&bot.workspace, &signal_session_key, "signal")
+        .unwrap_or(None);
+
     let response = match bot.provider.as_str() {
-        "codex" => run_codex_autonomous(&prompt, &bot.working_dir).await,
-        "gemini" => run_gemini_autonomous(&prompt, &bot.working_dir).await,
-        _ => run_claude_autonomous(&prompt, &bot.working_dir).await,
+        "codex" => run_codex_autonomous(&prompt, &bot.working_dir)
+            .await
+            .map(|text| AutonomousResult {
+                text,
+                session_id: None,
+            }),
+        "gemini" => run_gemini_autonomous(&prompt, &bot.working_dir)
+            .await
+            .map(|text| AutonomousResult {
+                text,
+                session_id: None,
+            }),
+        _ => run_claude_autonomous(&prompt, &bot.working_dir, resume_id.as_deref()).await,
     };
 
+    // Save session ID for next signal
+    if let Ok(ref result) = response
+        && let Some(ref sid) = result.session_id
+    {
+        let _ = db.set_session(&bot.workspace, &signal_session_key, sid, "signal");
+    }
+
     match response {
-        Ok(text) => {
-            let _ = db.add_message(&bot.workspace, &bot.name, "assistant", &text, None);
-            info!("[watcher] {} responded ({} chars)", bot.name, text.len());
+        Ok(result) => {
+            let _ = db.add_message(&bot.workspace, &bot.name, "assistant", &result.text, None);
+            info!(
+                "[watcher] {} responded ({} chars)",
+                bot.name,
+                result.text.len()
+            );
         }
         Err(e) => {
             let _ = db.add_message(
@@ -308,19 +359,27 @@ pub(crate) async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) 
     }
 }
 
+/// Result of an autonomous run — includes response text and session ID for reuse.
+pub(crate) struct AutonomousResult {
+    pub text: String,
+    pub session_id: Option<String>,
+}
+
 pub(crate) async fn run_claude_autonomous(
     prompt: &str,
     working_dir: &Option<PathBuf>,
-) -> Result<String, String> {
+    resume_session: Option<&str>,
+) -> Result<AutonomousResult, String> {
     use apiari_claude_sdk::{
         ClaudeClient, Event, SessionOptions, streaming::AssembledEvent, types::ContentBlock,
     };
 
     let opts = SessionOptions {
         dangerously_skip_permissions: true,
-        include_partial_messages: true,
+        include_partial_messages: false, // proactive bots don't need streaming
         working_dir: working_dir.clone(),
         max_turns: Some(10),
+        resume: resume_session.map(String::from),
         ..Default::default()
     };
 
@@ -332,6 +391,7 @@ pub(crate) async fn run_claude_autonomous(
         .map_err(|e| e.to_string())?;
 
     let mut full_text = String::new();
+    let mut session_id = None;
     loop {
         match session.next_event().await {
             Ok(Some(event)) => match event {
@@ -351,7 +411,10 @@ pub(crate) async fn run_claude_autonomous(
                         }
                     }
                 }
-                Event::Result(_) => break,
+                Event::Result(result) => {
+                    session_id = Some(result.session_id.clone());
+                    break;
+                }
                 _ => {}
             },
             Ok(None) => break,
@@ -359,7 +422,10 @@ pub(crate) async fn run_claude_autonomous(
         }
     }
 
-    Ok(full_text)
+    Ok(AutonomousResult {
+        text: full_text,
+        session_id,
+    })
 }
 
 pub(crate) async fn run_codex_autonomous(
