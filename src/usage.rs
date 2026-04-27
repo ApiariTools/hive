@@ -77,56 +77,74 @@ pub async fn fetch_usage() -> CachedUsage {
 
     let mut providers = Vec::new();
 
-    if let Some(obj) = raw.as_object() {
-        for (name, data) in obj {
-            if name == "version" || name == "timestamp" || name == "schema" {
-                continue;
-            }
+    // caut v1 format: { "schemaVersion": "caut.v1", "data": [ { "provider": "claude", "usage": {...} }, ... ] }
+    let entries = raw
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
 
-            let status = if data.get("error").is_some() {
-                "error".to_string()
-            } else if data
-                .get("rate_limited")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                "rate_limited".to_string()
-            } else {
-                "ok".to_string()
-            };
+    for entry in &entries {
+        let name = entry
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
-            let usage_percent = data
-                .get("usage_percent")
-                .or_else(|| data.get("percent_used"))
-                .and_then(|v| v.as_f64());
+        let usage = entry
+            .get("usage")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let primary = usage
+            .get("primary")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
 
-            let remaining = data
-                .get("remaining")
-                .or_else(|| data.get("remaining_text"))
-                .and_then(|v| v.as_str())
-                .map(String::from);
+        let auth_warning = entry.get("authWarning").and_then(|v| v.as_str());
 
-            let limit = data
-                .get("limit")
-                .or_else(|| data.get("limit_text"))
-                .and_then(|v| v.as_str())
-                .map(String::from);
+        let status = if auth_warning.is_some() {
+            "error".to_string()
+        } else if primary
+            .get("rateLimited")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            "rate_limited".to_string()
+        } else {
+            "ok".to_string()
+        };
 
-            let resets_at = data
-                .get("resets_at")
-                .or_else(|| data.get("reset_time"))
-                .and_then(|v| v.as_str())
-                .map(String::from);
+        let usage_percent = primary
+            .get("percentUsed")
+            .or_else(|| primary.get("usage_percent"))
+            .and_then(|v| v.as_f64());
 
-            providers.push(ProviderUsage {
-                name: name.clone(),
-                status,
-                usage_percent,
-                remaining,
-                limit,
-                resets_at,
-            });
-        }
+        let remaining = primary
+            .get("remaining")
+            .and_then(|v| v.as_str())
+            .or_else(|| primary.get("remainingDisplay").and_then(|v| v.as_str()))
+            .map(String::from);
+
+        let limit = primary
+            .get("limit")
+            .and_then(|v| v.as_str())
+            .or_else(|| primary.get("limitDisplay").and_then(|v| v.as_str()))
+            .map(String::from);
+
+        let resets_at = primary
+            .get("resetsAt")
+            .or_else(|| primary.get("resets_at"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        providers.push(ProviderUsage {
+            name,
+            status,
+            usage_percent,
+            remaining,
+            limit,
+            resets_at,
+        });
     }
 
     CachedUsage::Data(UsageData {
