@@ -88,7 +88,9 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   }
 
   function formatTime(iso: string): string {
-    const d = new Date(iso);
+    // Append Z if no timezone indicator — old DB rows lack it
+    const normalized = iso.includes("Z") || iso.includes("+") ? iso : iso + "Z";
+    const d = new Date(normalized);
     return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   }
 

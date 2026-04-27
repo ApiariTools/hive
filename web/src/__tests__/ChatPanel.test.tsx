@@ -133,6 +133,25 @@ describe("ChatPanel", () => {
     expect(container.querySelector('[class*="headerDescription"]')).toBeNull();
   });
 
+  it("displays time correctly for old timestamps without Z suffix", () => {
+    const msgs: Message[] = [
+      { id: 1, workspace: "test", bot: "Main", role: "user", content: "old msg", attachments: null, created_at: "2026-04-26 15:30:00" },
+    ];
+    render(<ChatPanel {...defaultProps} messages={msgs} />);
+    // Should render a valid time string (not "Invalid Date")
+    expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument();
+    expect(screen.getByText("old msg")).toBeInTheDocument();
+  });
+
+  it("displays time correctly for ISO timestamps with Z suffix", () => {
+    const msgs: Message[] = [
+      { id: 1, workspace: "test", bot: "Main", role: "user", content: "new msg", attachments: null, created_at: "2026-04-26T15:30:00Z" },
+    ];
+    render(<ChatPanel {...defaultProps} messages={msgs} />);
+    expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument();
+    expect(screen.getByText("new msg")).toBeInTheDocument();
+  });
+
   it("shows play button on assistant messages but not user messages", () => {
     render(<ChatPanel {...defaultProps} />);
     // Only the assistant message should have a play button
