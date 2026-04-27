@@ -7,6 +7,7 @@ use tracing::info;
 mod config_watcher;
 mod db;
 mod events;
+mod init;
 mod pr_feedback;
 mod pr_review;
 mod publish;
@@ -32,6 +33,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialize a new workspace configuration
+    Init {
+        /// Workspace name (used for config filename and display)
+        name: String,
+        /// Root directory path for the workspace
+        #[arg(long)]
+        root: Option<String>,
+    },
     /// Publish a report from a specialty bot
     Publish(publish::PublishArgs),
 }
@@ -65,6 +74,9 @@ async fn main() -> Result<()> {
     // Handle subcommands before daemon startup
     if let Some(command) = cli.command {
         match command {
+            Command::Init { name, root } => {
+                return init::run(init::InitArgs { name, root }, &config_dir);
+            }
             Command::Publish(args) => {
                 let db_path = config_dir.join("hive.db");
                 return publish::run(args, &db_path);
