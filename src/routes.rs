@@ -8,6 +8,7 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
+use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::broadcast;
@@ -1859,9 +1860,44 @@ async fn get_usage(State(state): State<AppState>) -> Json<crate::usage::UsageDat
 
 // ── Frontend ──
 
-async fn serve_frontend(_uri: axum::http::Uri) -> Result<axum::response::Html<String>, StatusCode> {
-    let html = include_str!("../web/index.html");
-    Ok(axum::response::Html(html.to_string()))
+#[derive(Embed)]
+#[folder = "web/dist/"]
+struct FrontendAssets;
+
+async fn serve_frontend(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let path = uri.path().trim_start_matches('/');
+
+    // Try to serve the requested file
+    if !path.is_empty()
+        && let Some(file) = FrontendAssets::get(path)
+    {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        let cache = if !path.ends_with(".html") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", mime.as_ref()), ("cache-control", cache)],
+            file.data.into_owned(),
+        )
+            .into_response();
+    }
+
+    // SPA fallback: serve index.html for all unmatched routes
+    if let Some(index) = FrontendAssets::get("index.html") {
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html"), ("cache-control", "no-cache")],
+            index.data.into_owned(),
+        )
+            .into_response();
+    }
+
+    StatusCode::NOT_FOUND.into_response()
 }
 
 #[cfg(test)]
