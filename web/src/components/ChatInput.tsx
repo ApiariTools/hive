@@ -28,6 +28,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const animFrameRef = useRef<number>(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const smoothedBars = useRef<number[]>([]);
@@ -45,6 +46,12 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
     return () => {
       mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
       mediaStreamRef.current = null;
+      audioCtxRef.current?.close();
+      audioCtxRef.current = null;
+      if (longPressTimer.current) {
+        clearTimeout(longPressTimer.current);
+        longPressTimer.current = null;
+      }
     };
   }, []);
 
@@ -98,6 +105,8 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
     mediaStreamRef.current = null;
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     analyserRef.current = null;
+    audioCtxRef.current?.close();
+    audioCtxRef.current = null;
   }
 
   function drawWaveform() {
@@ -181,7 +190,9 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
 
+      audioCtxRef.current?.close();
       const audioCtx = new AudioContext();
+      audioCtxRef.current = audioCtx;
       const source = audioCtx.createMediaStreamSource(stream);
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
@@ -253,7 +264,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
       {micState === "recording" && (
         <canvas ref={canvasRef} className={styles.waveform} />
       )}
-      {attachments.length > 0 && (
+      {showAttachments && attachments.length > 0 && (
         <div className={styles.attachmentPreview}>
           {attachments.map((a, i) => (
             <div key={i} className={styles.attachmentChip}>
@@ -262,7 +273,12 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
               ) : (
                 <span className={styles.attachmentName}>{a.name}</span>
               )}
-              <button className={styles.attachmentRemove} onClick={() => removeAttachment(i)}>
+              <button
+                type="button"
+                className={styles.attachmentRemove}
+                aria-label={`Remove ${a.name}`}
+                onClick={() => removeAttachment(i)}
+              >
                 &times;
               </button>
             </div>
@@ -283,6 +299,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
             <button
               type="button"
               className={styles.attachBtn}
+              aria-label="Attach file"
               onClick={() => fileInputRef.current?.click()}
             >
               <Paperclip size={16} />
@@ -303,19 +320,21 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
           <button
             type="button"
             className={`${styles.actionBtn} ${styles.micRecording}`}
+            aria-label="Stop recording"
             onClick={stopRecording}
             onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
           >
             <Square size={16} />
           </button>
         ) : micState === "transcribing" || micState === "stopping" ? (
-          <button type="button" className={styles.actionBtn} disabled>
+          <button type="button" className={styles.actionBtn} aria-label="Transcribing" disabled>
             ...
           </button>
         ) : (
           <button
             type="button"
             className={`${styles.actionBtn} ${hasText || attachments.length > 0 ? styles.actionBtnSend : ""}`}
+            aria-label={hasText || attachments.length > 0 ? "Send message" : "Record voice"}
             disabled={disabled}
             onMouseDown={(e) => {
               e.preventDefault();

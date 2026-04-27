@@ -44,8 +44,11 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
   async function handleWorkerSend(text: string) {
     if (!text || sending) return;
     setSending(true);
-    await api.sendWorkerMessage(workspace, worker.id, text);
-    setSending(false);
+    try {
+      await api.sendWorkerMessage(workspace, worker.id, text);
+    } finally {
+      setSending(false);
+    }
   }
 
   function renderChat() {
