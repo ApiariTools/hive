@@ -231,10 +231,10 @@ Dark theme. CSS variables in `web/src/theme.css`:
 - Custom bot prompt: `prompt_file` field in workspace TOML
 
 ## Frontend Build
-- Built frontend assets (`web/dist/`) are committed to the repo so `cargo install --git` works without Node/npm
-- After any frontend code change (`web/src/`), rebuild and recommit: `cd web && npx vite build && cd .. && git add web/dist/`
-- `rust-embed` embeds `web/dist/` into the binary at compile time
-- `build.rs` creates a placeholder `web/dist/index.html` if the directory is missing
+- `web/dist/` is NOT committed — it is built during CI/release and embedded at compile time via `rust-embed`
+- `build.rs` creates a placeholder `web/dist/index.html` if the directory is missing, so `cargo build` always works
+- To build locally with the full frontend: `cd web && npm install && npx vite build && cd .. && cargo build --release`
+- GitHub Actions release workflow builds the frontend and Rust binary together on version tags
 
 ## Common Pitfalls
 - `overflow: hidden` on message containers HIDES ALL TEXT — we've hit this 3 times

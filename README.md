@@ -2,22 +2,36 @@
 
 Workspace chat hub with multi-bot, multi-provider support. A Rust daemon serves an HTTP API and React SPA, connecting you to AI bots (Claude, Codex, Gemini) that can chat, watch for signals, run on schedules, and coordinate swarm workers.
 
-## Quick Start
+## Install
+
+### From GitHub Releases (recommended)
+
+Download the latest binary from [Releases](https://github.com/ApiariTools/hive/releases), then:
+
+```bash
+chmod +x hive-aarch64-apple-darwin
+mv hive-aarch64-apple-darwin /usr/local/bin/hive
+hive init my-project
+hive --port 4200
+```
+
+### From Source
+
+Requires Rust 1.85+ and Node 20+.
+
+```bash
+git clone https://github.com/ApiariTools/hive.git
+cd hive
+cd web && npm install && npx vite build && cd ..
+cargo install --path .
+hive init my-project
+hive --port 4200
+```
 
 ### Prerequisites
 
-- Rust 1.85+
-- Node 20+
 - At least one provider CLI installed (e.g. `claude`)
 - Optional: `gh` CLI (for GitHub watch bots), `swarm` CLI (for worker integration)
-
-### Build & Run
-
-```bash
-cargo build --release
-cd web && npm install && npm run build && cd ..
-./target/release/hive --port 4200
-```
 
 Open `http://localhost:4200` in your browser.
 
