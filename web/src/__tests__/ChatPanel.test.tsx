@@ -3,14 +3,18 @@ import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
 // Mock Howler globally so it doesn't interfere with other test files
-vi.mock("howler", () => ({
-  Howl: vi.fn().mockImplementation((opts: Record<string, unknown>) => ({
-    play: vi.fn(),
-    stop: vi.fn(),
-    unload: vi.fn(),
-    _opts: opts,
-  })),
-}));
+vi.mock("howler", () => {
+  class MockHowl {
+    play = vi.fn();
+    stop = vi.fn();
+    unload = vi.fn();
+    _opts: Record<string, unknown>;
+    constructor(opts: Record<string, unknown>) {
+      this._opts = opts;
+    }
+  }
+  return { Howl: MockHowl };
+});
 
 import { ChatPanel } from "../components/ChatPanel";
 import * as api from "../api";
