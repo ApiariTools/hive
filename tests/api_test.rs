@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hive::db::Db;
-use hive::events::EventHub;
+use apiari_hive::db::Db;
+use apiari_hive::events::EventHub;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
@@ -20,7 +20,7 @@ fn test_app() -> (axum::Router, tempfile::TempDir) {
 
     let db = Db::open(&config_dir.join("hive.db")).unwrap();
     let events = EventHub::new();
-    let app = hive::routes::router(
+    let app = apiari_hive::routes::router(
         db,
         &config_dir,
         events,
@@ -84,9 +84,9 @@ async fn test_list_workspaces_tts_voice() {
     )
     .unwrap();
 
-    let db = hive::db::Db::open(&config_dir.join("hive.db")).unwrap();
-    let events = hive::events::EventHub::new();
-    let app = hive::routes::router(
+    let db = apiari_hive::db::Db::open(&config_dir.join("hive.db")).unwrap();
+    let events = apiari_hive::events::EventHub::new();
+    let app = apiari_hive::routes::router(
         db,
         &config_dir,
         events,

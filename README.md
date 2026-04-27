@@ -7,7 +7,7 @@ Workspace chat hub with multi-bot, multi-provider support. A Rust daemon serves 
 ### From crates.io (recommended)
 
 ```bash
-cargo install hive
+cargo install apiari-hive
 hive init my-project
 hive --port 4200
 ```

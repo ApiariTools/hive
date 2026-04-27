@@ -1,8 +1,17 @@
 [package]
-name = "hive"
+name = "apiari-hive"
 version = "0.1.0"
 edition = "2024"
-exclude = ["web/node_modules", "web/src", "web/public", "web/.gitignore", "node_modules"]
+description = "Workspace chat hub — multi-bot, multi-provider AI assistant with swarm integration"
+license = "MIT"
+repository = "https://github.com/ApiariTools/hive"
+keywords = ["ai", "chat", "workspace", "assistant"]
+categories = ["command-line-utilities"]
+include = ["src/**/*", "web/dist/**/*", "build.rs", "Cargo.toml", "README.md", "LICENSE", "tts/**/*", "hooks/**/*"]
+
+[[bin]]
+name = "hive"
+path = "src/main.rs"
 
 [workspace]
 

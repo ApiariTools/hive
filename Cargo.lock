@@ -148,6 +148,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "apiari-hive"
+version = "0.1.0"
+dependencies = [
+ "apiari-claude-sdk",
+ "apiari-codex-sdk",
+ "apiari-gemini-sdk",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "color-eyre",
+ "futures-core",
+ "futures-util",
+ "mime_guess",
+ "reqwest",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -752,37 +783,6 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
-
-[[package]]
-name = "hive"
-version = "0.1.0"
-dependencies = [
- "apiari-claude-sdk",
- "apiari-codex-sdk",
- "apiari-gemini-sdk",
- "async-stream",
- "async-trait",
- "axum",
- "chrono",
- "clap",
- "color-eyre",
- "futures-core",
- "futures-util",
- "mime_guess",
- "reqwest",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "http"

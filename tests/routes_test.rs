@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hive::db::Db;
-use hive::events::EventHub;
+use apiari_hive::db::Db;
+use apiari_hive::events::EventHub;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
@@ -13,7 +13,7 @@ fn test_app_with_workspace(workspace_toml: &str) -> (axum::Router, tempfile::Tem
 
     let db = Db::open(&config_dir.join("hive.db")).unwrap();
     let events = EventHub::new();
-    let app = hive::routes::router(
+    let app = apiari_hive::routes::router(
         db,
         &config_dir,
         events,
@@ -71,7 +71,7 @@ async fn test_multiple_workspaces() {
 
     let db = Db::open(&config_dir.join("hive.db")).unwrap();
     let events = EventHub::new();
-    let app = hive::routes::router(
+    let app = apiari_hive::routes::router(
         db,
         &config_dir,
         events,
@@ -157,7 +157,7 @@ async fn test_unread_per_bot() {
     .unwrap();
 
     let events = EventHub::new();
-    let app = hive::routes::router(
+    let app = apiari_hive::routes::router(
         db,
         &config_dir,
         events,
@@ -203,7 +203,7 @@ async fn test_cancel_resets_status() {
     .unwrap();
 
     let events = EventHub::new();
-    let app = hive::routes::router(
+    let app = apiari_hive::routes::router(
         db,
         &config_dir,
         events,
@@ -267,7 +267,7 @@ async fn test_search_endpoint() {
         .unwrap();
 
     let events = EventHub::new();
-    let app = hive::routes::router(
+    let app = apiari_hive::routes::router(
         db,
         &config_dir,
         events,
@@ -300,7 +300,7 @@ async fn test_non_toml_files_ignored() {
 
     let db = Db::open(&config_dir.join("hive.db")).unwrap();
     let events = EventHub::new();
-    let app = hive::routes::router(
+    let app = apiari_hive::routes::router(
         db,
         &config_dir,
         events,
