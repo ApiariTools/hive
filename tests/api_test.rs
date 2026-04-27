@@ -86,7 +86,13 @@ async fn test_list_workspaces_tts_voice() {
 
     let db = hive::db::Db::open(&config_dir.join("hive.db")).unwrap();
     let events = hive::events::EventHub::new();
-    let app = hive::routes::router(db, &config_dir, events, Default::default());
+    let app = hive::routes::router(
+        db,
+        &config_dir,
+        events,
+        Default::default(),
+        Default::default(),
+    );
 
     let (status, body) = get(&app, "/api/workspaces").await;
     assert_eq!(status, StatusCode::OK);
