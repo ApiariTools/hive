@@ -2,3 +2,6 @@
 web/node_modules
 web/dist
 .claude/
+tts/.venv/
+tts/kokoro-v1.0.onnx
+tts/voices-v1.0.bin

@@ -164,8 +164,8 @@ fn default_provider() -> String {
     "claude".to_string()
 }
 
-fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
-    let mut bots = vec![BotInfo {
+fn default_main_bot() -> BotInfo {
+    BotInfo {
         name: "Main".to_string(),
         color: Some("#f5c542".to_string()),
         role: Some("Workspace assistant".to_string()),
@@ -175,12 +175,20 @@ fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
         prompt_file: None,
         watch: vec![],
         services: vec![],
-    }];
+    }
+}
+
+fn load_bots_from_config(path: &std::path::Path) -> Vec<BotInfo> {
+    let mut bots = vec![default_main_bot()];
 
     if let Ok(content) = std::fs::read_to_string(path)
         && let Ok(config) = toml::from_str::<WorkspaceConfig>(&content)
     {
-        bots.extend(config.bots.unwrap_or_default());
+        let mut configured_bots = config.bots.unwrap_or_default();
+        if let Some(main_idx) = configured_bots.iter().position(|bot| bot.name == "Main") {
+            bots[0] = configured_bots.remove(main_idx);
+        }
+        bots.extend(configured_bots);
     }
 
     bots
@@ -2213,6 +2221,25 @@ mod tests {
         );
         // Default Main bot has no description
         assert_eq!(bots[0].description, None);
+    }
+
+    #[test]
+    fn test_load_bots_main_override_replaces_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        std::fs::write(
+            &path,
+            "[[bots]]\nname = \"Main\"\nprovider = \"codex\"\nmodel = \"o4-mini\"\nrole = \"Primary bot\"\n\n[[bots]]\nname = \"Perf\"\nrole = \"Monitor\"\n",
+        )
+        .unwrap();
+
+        let bots = load_bots_from_config(&path);
+        assert_eq!(bots.len(), 2);
+        assert_eq!(bots[0].name, "Main");
+        assert_eq!(bots[0].provider, "codex");
+        assert_eq!(bots[0].model, Some("o4-mini".to_string()));
+        assert_eq!(bots[0].role, Some("Primary bot".to_string()));
+        assert_eq!(bots[1].name, "Perf");
     }
 
     #[test]
