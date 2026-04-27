@@ -4,9 +4,17 @@ Workspace chat hub with multi-bot, multi-provider support. A Rust daemon serves 
 
 ## Install
 
-### From GitHub Releases (recommended)
+### From crates.io (recommended)
 
-Download the latest binary from [Releases](https://github.com/ApiariTools/hive/releases), then:
+```bash
+cargo install hive
+hive init my-project
+hive --port 4200
+```
+
+### From GitHub Releases
+
+Download the latest binary from [Releases](https://github.com/ApiariTools/hive/releases):
 
 ```bash
 chmod +x hive-aarch64-apple-darwin
