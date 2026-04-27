@@ -113,4 +113,29 @@ describe("Workspace switching", () => {
       expect(mock.mock.calls.some((c: string[]) => c[0] === "mgm")).toBe(true);
     });
   });
+
+  it("auto-selects Main bot on mobile when switching workspaces", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 600, writable: true });
+    window.dispatchEvent(new Event("resize"));
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("mgm")).toBeInTheDocument());
+    await user.click(screen.getByText("mgm"));
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/Message Main/)).toBeInTheDocument();
+    });
+    Object.defineProperty(window, "innerWidth", { value: 1024, writable: true });
+  });
+});
+
+describe("Mobile auto-select", () => {
+  it("auto-selects Main bot on mobile initial load without bot in hash", async () => {
+    window.location.hash = "";
+    Object.defineProperty(window, "innerWidth", { value: 600, writable: true });
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/Message Main/)).toBeInTheDocument();
+    });
+    Object.defineProperty(window, "innerWidth", { value: 1024, writable: true });
+  });
 });
