@@ -22,9 +22,10 @@ interface Props {
   onWorkersToggle?: () => void;
   onCancel?: () => void;
   onSend: (text: string, attachments?: Attachment[]) => void;
+  ttsVoice?: string;
 }
 
-export function ChatPanel({ bot, botDescription, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel }: Props) {
+export function ChatPanel({ bot, botDescription, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel, ttsVoice }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [playingId, setPlayingId] = useState<number | null>(null);
@@ -92,7 +93,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       audioCtx.resume();
     }
 
-    const audioData = await api.textToSpeech(msg.content);
+    const audioData = await api.textToSpeech(msg.content, ttsVoice);
 
     // Guard: user stopped or started a different message while fetch was in-flight
     if (ttsPlayCountRef.current !== myPlayCount) return;

@@ -31,7 +31,7 @@ class TTSHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Invalid JSON")
             return
         text = body.get("text", "")
-        voice = body.get("voice", "af_heart")
+        voice = body.get("voice", "am_echo")
         if not text:
             self.send_error(400, "Missing text")
             return
