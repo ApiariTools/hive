@@ -60,20 +60,41 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   }, []);
 
   async function playMessage(msg: Message) {
+    // Toggle off if already playing this message
+    if (playingId === msg.id) {
+      if (ttsSourceRef.current) {
+        ttsSourceRef.current.stop();
+        ttsSourceRef.current = null;
+      }
+      setPlayingId(null);
+      return;
+    }
+
+    // Stop any currently playing audio
     if (ttsSourceRef.current) {
       ttsSourceRef.current.stop();
       ttsSourceRef.current = null;
     }
-    if (playingId === msg.id) {
+
+    setPlayingId(msg.id);
+
+    const audioData = await api.textToSpeech(msg.content);
+    if (!audioData) {
+      console.warn("TTS: no audio data returned");
       setPlayingId(null);
       return;
     }
-    const audioData = await api.textToSpeech(msg.content);
-    if (!audioData) return;
+
     if (!ttsAudioCtxRef.current) {
       ttsAudioCtxRef.current = new AudioContext();
     }
     const audioCtx = ttsAudioCtxRef.current;
+
+    // Safari/iOS requires resume() during a user gesture
+    if (audioCtx.state === "suspended") {
+      await audioCtx.resume();
+    }
+
     const buffer = await audioCtx.decodeAudioData(audioData);
     const source = audioCtx.createBufferSource();
     source.buffer = buffer;
@@ -83,7 +104,6 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       ttsSourceRef.current = null;
     };
     ttsSourceRef.current = source;
-    setPlayingId(msg.id);
     source.start();
   }
 
