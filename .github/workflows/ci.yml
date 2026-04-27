@@ -12,18 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/claude-sdk
-          path: ../claude-sdk
-      - uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/codex-sdk
-          path: ../codex-sdk
-      - uses: actions/checkout@v4
-        with:
-          repository: ApiariTools/gemini-sdk
-          path: ../gemini-sdk
+      - name: Check out SDK dependencies
+        run: |
+          git clone --depth 1 https://github.com/ApiariTools/claude-sdk.git ../claude-sdk
+          git clone --depth 1 https://github.com/ApiariTools/codex-sdk.git ../codex-sdk
+          git clone --depth 1 https://github.com/ApiariTools/gemini-sdk.git ../gemini-sdk
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
