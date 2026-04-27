@@ -98,8 +98,14 @@ async fn list_workspaces(State(state): State<AppState>) -> Json<Vec<WorkspaceInf
             if path.extension().is_some_and(|e| e == "toml")
                 && let Some(name) = path.file_stem().and_then(|s| s.to_str())
             {
+                let tts_voice = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| toml::from_str::<WorkspaceConfig>(&s).ok())
+                    .and_then(|c| c.workspace)
+                    .and_then(|w| w.tts_voice);
                 workspaces.push(WorkspaceInfo {
                     name: name.to_string(),
+                    tts_voice,
                 });
             }
         }
@@ -112,6 +118,8 @@ async fn list_workspaces(State(state): State<AppState>) -> Json<Vec<WorkspaceInf
 #[derive(Serialize)]
 struct WorkspaceInfo {
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tts_voice: Option<String>,
 }
 
 // ── Bots ──
@@ -186,6 +194,7 @@ struct WorkspaceInfo_ {
     root: Option<String>,
     name: Option<String>,
     description: Option<String>,
+    tts_voice: Option<String>,
 }
 
 fn load_workspace_config(path: &std::path::Path) -> WorkspaceConfig {
@@ -1939,6 +1948,7 @@ mod tests {
                 root: None,
                 name: Some("test".into()),
                 description: Some("A test workspace".into()),
+                ..Default::default()
             }),
             bots: None,
         };
@@ -1956,6 +1966,7 @@ mod tests {
                 root: None,
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: Some(vec![BotInfo {
                 name: "Customer".into(),
@@ -1983,6 +1994,7 @@ mod tests {
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: None,
         };
@@ -2000,6 +2012,7 @@ mod tests {
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: None,
         };
@@ -2022,6 +2035,7 @@ mod tests {
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: None,
         };
@@ -2040,6 +2054,7 @@ mod tests {
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: None,
         };
@@ -2054,6 +2069,7 @@ mod tests {
                 root: Some("/tmp".into()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: None,
         };
@@ -2355,6 +2371,7 @@ mod tests {
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: Some(vec![BotInfo {
                 name: "Monitor".into(),
@@ -2388,6 +2405,7 @@ mod tests {
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: Some(vec![BotInfo {
                 name: "Plain".into(),
@@ -2449,6 +2467,7 @@ services = ["sentry", "grafana"]
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: Some(vec![BotInfo {
                 name: "Custom".into(),
@@ -2566,6 +2585,7 @@ role = "Chat"
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
                 description: None,
+                ..Default::default()
             }),
             bots: None,
         };

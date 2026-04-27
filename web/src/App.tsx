@@ -375,6 +375,7 @@ export default function App() {
             workerCount={workers.length}
             onWorkersToggle={() => setWorkersOpen((v) => !v)}
             onCancel={loading ? () => api.cancelBot(workspace, bot) : undefined}
+            ttsVoice={workspaces.find((w) => w.name === workspace)?.tts_voice}
           />
         ) : (
           <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8 }}>
