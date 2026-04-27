@@ -187,6 +187,21 @@
   padding: 16px;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Chat tab: hidden on desktop, visible on mobile */
+.tabChat {
+  display: none;
+}
+
+/* Chat rendered inside tab content on mobile */
+.chatInTab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin: -16px;
 }
 
 .prose {
@@ -359,14 +374,15 @@
 
   .info {
     border-right: none;
-    border-bottom: 1px solid var(--border);
-    flex: none;
-    max-height: 40%;
+    flex: 1;
   }
 
-  .chat {
-    width: 100%;
-    flex: 1;
+  .tabChat {
+    display: block;
+  }
+
+  .inputField {
+    font-size: 16px;
   }
 }
 
