@@ -83,8 +83,9 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
     setPlayingId(msg.id);
     const myPlayCount = ++ttsPlayCountRef.current;
 
-    // Safari/iOS requires AudioContext.resume() in the same synchronous call stack
-    // as the user gesture — must happen BEFORE any await
+    // Safari/iOS requires AudioContext created + resumed + a buffer played
+    // ALL in the same synchronous user gesture handler, BEFORE any await.
+    // Playing a silent buffer "unlocks" the audio context for later playback.
     if (!ttsAudioCtxRef.current) {
       ttsAudioCtxRef.current = new AudioContext();
     }
@@ -92,6 +93,12 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
     if (audioCtx.state === "suspended") {
       audioCtx.resume();
     }
+    // Play a tiny silent buffer to unlock audio on iPad Safari
+    const silentBuf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
+    const silentSrc = audioCtx.createBufferSource();
+    silentSrc.buffer = silentBuf;
+    silentSrc.connect(audioCtx.destination);
+    silentSrc.start();
 
     const audioData = await api.textToSpeech(msg.content, ttsVoice);
 

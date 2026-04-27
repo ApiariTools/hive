@@ -174,12 +174,17 @@ describe("ChatPanel", () => {
       get onended() { return onendedCb; },
     };
     const mockResume = vi.fn();
+    const silentSource = { buffer: null, connect: vi.fn(), start: vi.fn() };
     const ctx = {
       state,
       resume: mockResume,
+      sampleRate: 44100,
       decodeAudioData: vi.fn().mockResolvedValue({ duration: 1 }),
       destination: {},
-      createBufferSource: () => mockSource,
+      createBuffer: () => ({ getChannelData: () => new Float32Array(1) }),
+      createBufferSource: vi.fn()
+        .mockReturnValueOnce(silentSource) // first call: silent unlock buffer
+        .mockReturnValue(mockSource),      // second call: actual audio
       close: vi.fn(),
     };
     return { ctx, mockStart, mockStop, mockResume, getOnended: () => onendedCb };
