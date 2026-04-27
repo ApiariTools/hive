@@ -480,35 +480,11 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
 
     // Hive configuration reference — helps bots answer config questions
     prompt.push_str(
-        "\n## Hive Configuration Reference\n\
-         You are running inside Hive, a workspace chat hub. The user may ask about configuring their workspace.\n\n\
-         Workspace config: ~/.config/hive/workspaces/<workspace-id>.toml\n\
-         (The workspace id is the config filename stem, which may differ from [workspace].name.)\n\n\
-         [workspace]\n\
-         root = \"/path/to/project\"    # workspace root directory\n\
-         name = \"my-workspace\"        # display name\n\
-         description = \"...\"          # optional description\n\
-         tts_voice = \"am_echo\"        # TTS voice (optional)\n\n\
-         [[bots]]\n\
-         name = \"BotName\"             # bot display name\n\
-         color = \"#f5c542\"            # hex color for UI\n\
-         role = \"Description\"         # short role (shown in sidebar)\n\
-         description = \"...\"          # longer description (shown in chat header)\n\
-         provider = \"claude\"           # claude | codex | gemini\n\
-         model = \"...\"                # optional model override\n\
-         prompt_file = \"path.md\"      # custom system prompt file\n\
-         watch = [\"github\"]            # signal sources: github, sentry\n\
-         schedule_hours = 24           # proactive run interval\n\
-         proactive_prompt = \"...\"     # task for scheduled runs\n\
-         services = [\"sentry\"]        # inject service credentials from .apiari/services.toml\n\n\
-         Context files in workspace root:\n\
-         - .apiari/context.md — project context (appended to all bot prompts)\n\
-         - .apiari/soul.md — communication style (appended to all bot prompts)\n\
-         - .apiari/docs/ — reference docs (indexed, read on demand)\n\
-         - .apiari/services.toml — service credentials (sentry, grafana)\n\n\
-         To initialize a new workspace: `hive init <name> [--root /path]`\n\
-         The user can edit these files directly. If they ask you to help configure, \
-         explain the options and suggest what to add to their TOML or context files.\n",
+        "\n## Hive Configuration\n\
+         Workspace configs: ~/.config/hive/workspaces/<id>.toml\n\
+         Context files: .apiari/context.md, .apiari/soul.md, .apiari/docs/, .apiari/services.toml\n\
+         Initialize: `hive init <name> [--root /path]`\n\
+         For full config schema, read the workspace TOML file directly.\n",
     );
 
     // Chat history — bot can query the local DB directly
@@ -993,7 +969,7 @@ async fn run_bot_claude(
         dangerously_skip_permissions: true,
         include_partial_messages: true,
         working_dir,
-        max_turns: None,
+        max_turns: Some(50),
         resume: resume_id,
         system_prompt,
         ..Default::default()
@@ -1051,6 +1027,25 @@ async fn run_bot_claude(
                 }
                 Event::Result(result) => {
                     let _ = db.set_session(ws, bot, &result.session_id, prompt_hash);
+                    if let Some(ref usage) = result.usage {
+                        let input = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let output = usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let cached = usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        info!(
+                            "[usage] {ws}/{bot}: input={input} output={output} cached={cached} turns={} cost=${:.4}",
+                            result.num_turns,
+                            result.total_cost_usd.unwrap_or(0.0)
+                        );
+                    }
                     break;
                 }
                 _ => {}
@@ -1150,6 +1145,12 @@ async fn run_bot_codex(
                     if let Some(text) = item.text() {
                         update_text(text);
                     }
+                }
+                apiari_codex_sdk::Event::TurnCompleted { usage: Some(usage) } => {
+                    info!(
+                        "[usage] {ws}/{bot}: input={} output={} cached={}",
+                        usage.input_tokens, usage.output_tokens, usage.cached_input_tokens
+                    );
                 }
                 apiari_codex_sdk::Event::TurnFailed { error, .. } => {
                     let msg = error
@@ -1260,6 +1261,12 @@ async fn run_bot_gemini(
                         if let Some(text) = event.text() {
                             update_text(&text);
                         }
+                    }
+                    apiari_gemini_sdk::Event::TurnCompleted { usage: Some(usage) } => {
+                        info!(
+                            "[usage] {ws}/{bot}: input={} output={} cached={}",
+                            usage.input_tokens, usage.output_tokens, usage.cached_input_tokens
+                        );
                     }
                     apiari_gemini_sdk::Event::TurnFailed { error, .. } => {
                         let msg = error
