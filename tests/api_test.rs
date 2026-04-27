@@ -1,7 +1,7 @@
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
 use apiari_hive::db::Db;
 use apiari_hive::events::EventHub;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
