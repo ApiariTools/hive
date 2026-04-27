@@ -8,6 +8,7 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
+use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::sync::broadcast;
@@ -1859,9 +1860,48 @@ async fn get_usage(State(state): State<AppState>) -> Json<crate::usage::UsageDat
 
 // ── Frontend ──
 
-async fn serve_frontend(_uri: axum::http::Uri) -> Result<axum::response::Html<String>, StatusCode> {
-    let html = include_str!("../web/index.html");
-    Ok(axum::response::Html(html.to_string()))
+#[derive(Embed)]
+#[folder = "web/dist/"]
+struct FrontendAssets;
+
+async fn serve_frontend(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let path = uri.path().trim_start_matches('/');
+
+    // Try to serve the requested file
+    if !path.is_empty()
+        && let Some(file) = FrontendAssets::get(path)
+    {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        let cache = if !path.ends_with(".html") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
+        return (
+            StatusCode::OK,
+            [("content-type", mime.as_ref()), ("cache-control", cache)],
+            file.data.into_owned(),
+        )
+            .into_response();
+    }
+
+    // SPA fallback: only for navigation requests, not missing static assets
+    if path.starts_with("assets/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if let Some(index) = FrontendAssets::get("index.html") {
+        return (
+            StatusCode::OK,
+            [("content-type", "text/html"), ("cache-control", "no-cache")],
+            index.data.into_owned(),
+        )
+            .into_response();
+    }
+
+    StatusCode::NOT_FOUND.into_response()
 }
 
 #[cfg(test)]
@@ -2649,5 +2689,50 @@ role = "Chat"
         let prompt = build_system_prompt(&config, "Main");
         assert!(prompt.contains("Workspace Docs (.apiari/docs/)"));
         assert!(prompt.contains("overview.md — Project Overview"));
+    }
+
+    // ── serve_frontend ──
+
+    #[tokio::test]
+    async fn test_spa_fallback_returns_index_html() {
+        use axum::http::Uri;
+
+        let uri: Uri = "/some/route".parse().unwrap();
+        let resp = serve_frontend(uri).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let headers = resp.headers();
+        assert_eq!(headers.get("content-type").unwrap(), "text/html");
+        assert_eq!(headers.get("cache-control").unwrap(), "no-cache");
+    }
+
+    #[tokio::test]
+    async fn test_missing_asset_returns_404() {
+        use axum::http::Uri;
+
+        let uri: Uri = "/assets/nonexistent.js".parse().unwrap();
+        let resp = serve_frontend(uri).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_mime_type_detection() {
+        assert_eq!(
+            mime_guess::from_path("index.css")
+                .first_or_octet_stream()
+                .as_ref(),
+            "text/css"
+        );
+        assert_eq!(
+            mime_guess::from_path("app.js")
+                .first_or_octet_stream()
+                .as_ref(),
+            "text/javascript"
+        );
+        assert_eq!(
+            mime_guess::from_path("index.html")
+                .first_or_octet_stream()
+                .as_ref(),
+            "text/html"
+        );
     }
 }

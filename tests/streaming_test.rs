@@ -1,4 +1,4 @@
-use hive::db::Db;
+use apiari_hive::db::Db;
 use tempfile::tempdir;
 
 #[test]
