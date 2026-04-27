@@ -230,6 +230,12 @@ Dark theme. CSS variables in `web/src/theme.css`:
 - Project context: `.apiari/context.md` in workspace root
 - Custom bot prompt: `prompt_file` field in workspace TOML
 
+## Frontend Build
+- Built frontend assets (`web/dist/`) are committed to the repo so `cargo install --git` works without Node/npm
+- After any frontend code change (`web/src/`), rebuild and recommit: `cd web && npx vite build && cd .. && git add web/dist/`
+- `rust-embed` embeds `web/dist/` into the binary at compile time
+- `build.rs` creates a placeholder `web/dist/index.html` if the directory is missing
+
 ## Common Pitfalls
 - `overflow: hidden` on message containers HIDES ALL TEXT — we've hit this 3 times
 - Swarm state uses `worktrees` not `workers`, `agent_kind` not `agent`
