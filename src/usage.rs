@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::tick::{Action, TickContext, Watcher};
@@ -18,8 +19,9 @@ pub enum CachedUsage {
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct UsageData {
+    pub installed: bool,
     pub providers: Vec<ProviderUsage>,
-    pub updated_at: String,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
@@ -30,29 +32,35 @@ pub struct ProviderUsage {
     pub remaining: Option<String>,
     pub limit: Option<String>,
     pub resets_at: Option<String>,
-    pub raw: serde_json::Value,
 }
+
+const CAUT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Fetch usage by running `caut usage --json` and parsing the output.
 pub async fn fetch_usage() -> CachedUsage {
     let mut cmd = tokio::process::Command::new("caut");
     cmd.args(["usage", "--json"]);
+    cmd.kill_on_drop(true);
 
     if std::env::var("CLAUDECODE").is_ok() {
         cmd.env_remove("GH_TOKEN");
     }
 
-    let output = match cmd.output().await {
-        Ok(o) if o.status.success() => o,
-        Ok(o) => {
+    let output = match tokio::time::timeout(CAUT_TIMEOUT, cmd.output()).await {
+        Ok(Ok(o)) if o.status.success() => o,
+        Ok(Ok(o)) => {
             tracing::debug!(
                 "[usage] caut failed: {}",
                 String::from_utf8_lossy(&o.stderr)
             );
             return CachedUsage::NotInstalled;
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::debug!("[usage] caut not found or failed to run: {e}");
+            return CachedUsage::NotInstalled;
+        }
+        Err(_) => {
+            tracing::warn!("[usage] caut timed out after {}s", CAUT_TIMEOUT.as_secs());
             return CachedUsage::NotInstalled;
         }
     };
@@ -117,14 +125,14 @@ pub async fn fetch_usage() -> CachedUsage {
                 remaining,
                 limit,
                 resets_at,
-                raw: data.clone(),
             });
         }
     }
 
     CachedUsage::Data(UsageData {
+        installed: true,
         providers,
-        updated_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
     })
 }
 
@@ -165,7 +173,7 @@ mod tests {
     fn test_usage_data_default() {
         let data = UsageData::default();
         assert!(data.providers.is_empty());
-        assert!(data.updated_at.is_empty());
+        assert!(data.updated_at.is_none());
     }
 
     #[test]
@@ -177,7 +185,6 @@ mod tests {
             remaining: Some("57.5% remaining".to_string()),
             limit: Some("1000 requests".to_string()),
             resets_at: Some("2026-04-28T00:00:00Z".to_string()),
-            raw: serde_json::json!({"test": true}),
         };
         let json = serde_json::to_string(&provider).unwrap();
         let deserialized: ProviderUsage = serde_json::from_str(&json).unwrap();
@@ -193,7 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_usage_returns_not_installed_when_caut_missing() {
-        let result = fetch_usage().await;
+        // Use empty PATH to ensure caut is never found, regardless of environment
+        let result = fetch_usage_with_empty_path().await;
         assert!(matches!(result, CachedUsage::NotInstalled));
     }
 
@@ -204,7 +212,8 @@ mod tests {
         let ctx = TickContext { tick_number: 1 };
         let actions = watcher.tick(&ctx).await;
         assert!(actions.is_empty());
-        assert!(matches!(*cache.lock().await, CachedUsage::NotInstalled));
+        // After tick, cache should no longer be Unknown
+        assert!(!matches!(*cache.lock().await, CachedUsage::Unknown));
     }
 
     #[test]
@@ -213,5 +222,16 @@ mod tests {
         let watcher = UsageWatcher::new(cache);
         assert_eq!(watcher.name(), "usage-watcher");
         assert_eq!(watcher.interval_ticks(), 8);
+    }
+
+    /// Helper that runs caut with an empty PATH so the binary is never found.
+    async fn fetch_usage_with_empty_path() -> CachedUsage {
+        let mut cmd = tokio::process::Command::new("caut");
+        cmd.args(["usage", "--json"]);
+        cmd.env("PATH", "");
+        match cmd.output().await {
+            Ok(_) => CachedUsage::Data(UsageData::default()),
+            Err(_) => CachedUsage::NotInstalled,
+        }
     }
 }

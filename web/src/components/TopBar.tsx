@@ -29,8 +29,8 @@ function dotTitle(p: { name: string; status: string; usage_percent: number | nul
 }
 
 export function TopBar({ workspaces, active, onSelect, onMenuToggle, onOpenPalette, usage }: Props) {
-  const showDots = usage && usage.installed === true && usage.providers.length > 0;
-  const showInstallHint = usage && usage.installed === false;
+  const showDots = usage?.installed && usage.providers.length > 0;
+  const showInstallHint = usage && !usage.installed;
 
   return (
     <div className={styles.bar}>
@@ -55,6 +55,8 @@ export function TopBar({ workspaces, active, onSelect, onMenuToggle, onOpenPalet
               className={styles.usageDot}
               style={{ background: dotColor(p) }}
               title={dotTitle(p)}
+              role="img"
+              aria-label={dotTitle(p)}
             />
           ))}
         </div>

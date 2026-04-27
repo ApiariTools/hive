@@ -130,7 +130,7 @@ export interface ProviderUsage {
 }
 
 export interface UsageData {
-  installed: boolean | null;
+  installed: boolean;
   providers: ProviderUsage[];
   updated_at: string | null;
 }

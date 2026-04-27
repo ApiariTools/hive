@@ -60,7 +60,7 @@ export default function App() {
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
-  const [usage, setUsage] = useState<api.UsageData>({ installed: null, providers: [], updated_at: null });
+  const [usage, setUsage] = useState<api.UsageData>({ installed: false, providers: [], updated_at: null });
   const lastMsgId = useRef<number>(0);
   const nextTempId = useRef<number>(-1);
   const loadingRef = useRef(false);

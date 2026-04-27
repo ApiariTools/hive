@@ -313,3 +313,14 @@ async fn test_non_toml_files_ignored() {
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0]["name"], "test");
 }
+
+#[tokio::test]
+async fn test_usage_endpoint_returns_not_installed_when_cache_empty() {
+    let (app, _dir) = test_app_with_workspace("[workspace]\nname = \"test\"\n");
+    let (status, body) = get(&app, "/api/usage").await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["installed"], false);
+    assert!(parsed["providers"].as_array().unwrap().is_empty());
+    assert!(parsed["updated_at"].is_null());
+}

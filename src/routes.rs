@@ -1798,23 +1798,24 @@ async fn send_worker_message(
 
 // ── Usage ──
 
-async fn get_usage(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let cache = state.usage_cache.lock().await;
-    match &*cache {
-        crate::usage::CachedUsage::Data(data) => {
-            let mut val = serde_json::to_value(data).unwrap_or_default();
-            if let Some(obj) = val.as_object_mut() {
-                obj.insert("installed".to_string(), serde_json::Value::Bool(true));
-            }
-            Json(val)
+async fn get_usage(State(state): State<AppState>) -> Json<crate::usage::UsageData> {
+    let response = {
+        let cache = state.usage_cache.lock().await;
+        match &*cache {
+            crate::usage::CachedUsage::Data(data) => data.clone(),
+            crate::usage::CachedUsage::NotInstalled => crate::usage::UsageData {
+                installed: false,
+                providers: vec![],
+                updated_at: None,
+            },
+            crate::usage::CachedUsage::Unknown => crate::usage::UsageData {
+                installed: false,
+                providers: vec![],
+                updated_at: None,
+            },
         }
-        crate::usage::CachedUsage::NotInstalled => {
-            Json(serde_json::json!({ "installed": false, "providers": [], "updated_at": null }))
-        }
-        crate::usage::CachedUsage::Unknown => {
-            Json(serde_json::json!({ "installed": null, "providers": [], "updated_at": null }))
-        }
-    }
+    };
+    Json(response)
 }
 
 // ── Frontend ──

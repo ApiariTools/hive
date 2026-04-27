@@ -31,5 +31,5 @@ export const sendMessage = vi.fn().mockResolvedValue({ ok: true });
 export const cancelBot = vi.fn().mockResolvedValue({ ok: true });
 export const getWorkerDetail = vi.fn().mockResolvedValue(null);
 export const sendWorkerMessage = vi.fn().mockResolvedValue({ ok: true });
-export const getUsage = vi.fn().mockResolvedValue({ installed: null, providers: [], updated_at: null });
+export const getUsage = vi.fn().mockResolvedValue({ installed: false, providers: [], updated_at: null });
 export const connectWebSocket = vi.fn().mockReturnValue({ close: vi.fn() });
