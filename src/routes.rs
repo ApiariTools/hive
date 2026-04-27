@@ -1200,7 +1200,6 @@ async fn run_bot_gemini(
                     session_id: Some(sid.clone()),
                     model: model.clone(),
                     working_dir,
-                    ..Default::default()
                 },
             )
             .await
