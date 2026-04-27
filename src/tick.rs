@@ -33,6 +33,12 @@ pub enum Action {
     },
     /// Run a proactive/scheduled bot (runs autonomously in background)
     RunBot { bot: WatchedBot },
+    /// Send a message to a swarm worker
+    SendToWorker {
+        workspace_root: PathBuf,
+        worker_id: String,
+        message: String,
+    },
 }
 
 /// Trait that all watchers implement.
@@ -153,6 +159,39 @@ fn execute_action(action: Action, db: &Db) {
             tokio::spawn(async move {
                 let prompt = bot.proactive_prompt.as_deref().unwrap_or("");
                 crate::watcher::run_proactive(&bot, &db, prompt).await;
+            });
+        }
+        Action::SendToWorker {
+            workspace_root,
+            worker_id,
+            message,
+        } => {
+            let root = workspace_root.clone();
+            tokio::spawn(async move {
+                let output = tokio::process::Command::new("swarm")
+                    .args([
+                        "--dir",
+                        &root.to_string_lossy(),
+                        "send",
+                        &worker_id,
+                        &message,
+                    ])
+                    .output()
+                    .await;
+                match output {
+                    Ok(o) if o.status.success() => {
+                        tracing::info!("[pr-feedback] Sent feedback to {}", worker_id);
+                    }
+                    Ok(o) => {
+                        tracing::warn!(
+                            "[pr-feedback] swarm send failed: {}",
+                            String::from_utf8_lossy(&o.stderr)
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("[pr-feedback] Failed to run swarm: {e}");
+                    }
+                }
             });
         }
     }

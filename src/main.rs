@@ -7,6 +7,7 @@ use tracing::info;
 mod config_watcher;
 mod db;
 mod events;
+mod pr_feedback;
 mod pr_review;
 mod publish;
 mod routes;
@@ -102,7 +103,16 @@ async fn main() -> Result<()> {
         );
         engine.add_watcher(Box::new(tick::PrReviewWatcher::new(
             pr_review_cache.clone(),
+            ws_roots.clone(),
+        )));
+
+        let hive_dir = config_dir.join(".hive");
+        std::fs::create_dir_all(&hive_dir).ok();
+        engine.add_watcher(Box::new(pr_feedback::PrFeedbackWatcher::new(
             ws_roots,
+            hive_dir.join("pr_feedback.json"),
+            3,
+            pr_review_cache.clone(),
         )));
     }
 
