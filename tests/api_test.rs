@@ -63,6 +63,37 @@ async fn test_list_workspaces() {
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0]["name"], "test");
+    // tts_voice not set in default test config — should be omitted
+    assert!(parsed[0].get("tts_voice").is_none());
+}
+
+#[tokio::test]
+async fn test_list_workspaces_tts_voice() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(config_dir.join("workspaces")).unwrap();
+
+    let ws_root = dir.path().join("workspace");
+    std::fs::create_dir_all(&ws_root).unwrap();
+    std::fs::write(
+        config_dir.join("workspaces/voice.toml"),
+        format!(
+            "[workspace]\nname = \"voice\"\nroot = \"{}\"\ntts_voice = \"am_echo\"\n",
+            ws_root.display()
+        ),
+    )
+    .unwrap();
+
+    let db = hive::db::Db::open(&config_dir.join("hive.db")).unwrap();
+    let events = hive::events::EventHub::new();
+    let app = hive::routes::router(db, &config_dir, events, Default::default());
+
+    let (status, body) = get(&app, "/api/workspaces").await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0]["name"], "voice");
+    assert_eq!(parsed[0]["tts_voice"], "am_echo");
 }
 
 #[tokio::test]
