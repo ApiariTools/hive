@@ -30,6 +30,33 @@ fn test_app() -> (axum::Router, tempfile::TempDir) {
     (app, dir)
 }
 
+fn test_app_with_tts_url(tts_base_url: &str) -> (axum::Router, tempfile::TempDir) {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(config_dir.join("workspaces")).unwrap();
+
+    let ws_root = dir.path().join("workspace");
+    std::fs::create_dir_all(&ws_root).unwrap();
+    std::fs::write(
+        config_dir.join("workspaces/test.toml"),
+        format!("[workspace]\nname = \"test\"\nroot = \"{}\"\n\n[[bots]]\nname = \"Customer\"\ncolor = \"#e85555\"\nrole = \"Test bot\"\n", ws_root.display()),
+    )
+    .unwrap();
+
+    let db = Db::open(&config_dir.join("hive.db")).unwrap();
+    let events = EventHub::new();
+    let app = apiari_hive::routes::router_with_http_client(
+        db,
+        &config_dir,
+        events,
+        Default::default(),
+        Default::default(),
+        reqwest::Client::new(),
+        tts_base_url.to_string(),
+    );
+    (app, dir)
+}
+
 async fn get(app: &axum::Router, path: &str) -> (StatusCode, String) {
     let req = Request::builder().uri(path).body(Body::empty()).unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
@@ -238,8 +265,7 @@ async fn test_tts_text_too_long() {
 
 #[tokio::test]
 async fn test_tts_server_unavailable() {
-    let (app, _dir) = test_app();
-    // TTS server is not running, so we expect SERVICE_UNAVAILABLE
+    let (app, _dir) = test_app_with_tts_url("http://127.0.0.1:9");
     let (status, body) = post_json(&app, "/api/tts", r#"{"text":"hello"}"#).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body.contains("TTS server not running"));

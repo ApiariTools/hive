@@ -28,6 +28,7 @@ pub struct AppState {
     pub pr_review_cache: PrReviewCache,
     pub usage_cache: UsageCache,
     pub http_client: reqwest::Client,
+    pub tts_base_url: String,
 }
 
 pub fn router(
@@ -37,13 +38,34 @@ pub fn router(
     pr_review_cache: PrReviewCache,
     usage_cache: UsageCache,
 ) -> Router {
+    router_with_http_client(
+        db,
+        config_dir,
+        events,
+        pr_review_cache,
+        usage_cache,
+        reqwest::Client::new(),
+        "http://127.0.0.1:4201".to_string(),
+    )
+}
+
+pub fn router_with_http_client(
+    db: Db,
+    config_dir: &std::path::Path,
+    events: EventHub,
+    pr_review_cache: PrReviewCache,
+    usage_cache: UsageCache,
+    http_client: reqwest::Client,
+    tts_base_url: String,
+) -> Router {
     let state = AppState {
         db,
         config_dir: config_dir.to_path_buf(),
         events,
         pr_review_cache,
         usage_cache,
-        http_client: reqwest::Client::new(),
+        http_client,
+        tts_base_url,
     };
 
     Router::new()
@@ -1349,7 +1371,7 @@ async fn text_to_speech(
 
     match state
         .http_client
-        .post("http://127.0.0.1:4201/tts")
+        .post(format!("{}/tts", state.tts_base_url.trim_end_matches('/')))
         .json(&body)
         .timeout(std::time::Duration::from_secs(30))
         .send()
