@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { ChatPanel } from "../components/ChatPanel";
+import * as api from "../api";
 import type { Message } from "../types";
 
 const mockMessages: Message[] = [
@@ -157,5 +158,101 @@ describe("ChatPanel", () => {
     // Only the assistant message should have a play button
     const playButtons = screen.getAllByLabelText("Play");
     expect(playButtons).toHaveLength(1);
+  });
+
+  function makeMockAudioCtx(state = "running") {
+    const mockStart = vi.fn();
+    const mockStop = vi.fn();
+    let onendedCb: (() => void) | null = null;
+    const mockSource = {
+      start: mockStart,
+      stop: mockStop,
+      connect: vi.fn(),
+      buffer: null,
+      set onended(cb: (() => void) | null) { onendedCb = cb; },
+      get onended() { return onendedCb; },
+    };
+    const mockResume = vi.fn();
+    const ctx = {
+      state,
+      resume: mockResume,
+      decodeAudioData: vi.fn().mockResolvedValue({ duration: 1 }),
+      destination: {},
+      createBufferSource: () => mockSource,
+      close: vi.fn(),
+    };
+    return { ctx, mockStart, mockStop, mockResume, getOnended: () => onendedCb };
+  }
+
+  function installMockAudioCtx(ctx: Record<string, unknown>) {
+    const orig = globalThis.AudioContext;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    globalThis.AudioContext = function MockAudioContext() { return ctx; } as any;
+    return orig;
+  }
+
+  it("plays TTS audio and shows stop icon, then resets on ended", async () => {
+    const user = userEvent.setup();
+    const { ctx, mockStart, mockResume, getOnended } = makeMockAudioCtx("suspended");
+    const origAudioCtx = installMockAudioCtx(ctx);
+    vi.spyOn(api, "textToSpeech").mockResolvedValue(new ArrayBuffer(8));
+
+    render(<ChatPanel {...defaultProps} messagesLoading={false} />);
+    await user.click(screen.getByLabelText("Play"));
+
+    await waitFor(() => {
+      expect(mockResume).toHaveBeenCalled();
+      expect(mockStart).toHaveBeenCalled();
+    });
+    expect(screen.getByLabelText("Stop")).toBeInTheDocument();
+
+    // Simulate audio ended
+    getOnended()?.();
+    await waitFor(() => {
+      expect(screen.getByLabelText("Play")).toBeInTheDocument();
+    });
+
+    globalThis.AudioContext = origAudioCtx;
+    vi.restoreAllMocks();
+  });
+
+  it("stops TTS audio when clicking stop", async () => {
+    const user = userEvent.setup();
+    const { ctx, mockStop } = makeMockAudioCtx("running");
+    const origAudioCtx = installMockAudioCtx(ctx);
+    vi.spyOn(api, "textToSpeech").mockResolvedValue(new ArrayBuffer(8));
+
+    render(<ChatPanel {...defaultProps} messagesLoading={false} />);
+    await user.click(screen.getByLabelText("Play"));
+
+    await waitFor(() => expect(screen.getByLabelText("Stop")).toBeInTheDocument());
+
+    await user.click(screen.getByLabelText("Stop"));
+    await waitFor(() => {
+      expect(mockStop).toHaveBeenCalled();
+      expect(screen.getByLabelText("Play")).toBeInTheDocument();
+    });
+
+    globalThis.AudioContext = origAudioCtx;
+    vi.restoreAllMocks();
+  });
+
+  it("resets playingId when TTS returns no data", async () => {
+    const user = userEvent.setup();
+    const { ctx } = makeMockAudioCtx("running");
+    const origAudioCtx = installMockAudioCtx(ctx);
+    vi.spyOn(api, "textToSpeech").mockResolvedValue(null);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    render(<ChatPanel {...defaultProps} messagesLoading={false} />);
+    await user.click(screen.getByLabelText("Play"));
+
+    await waitFor(() => {
+      expect(warnSpy).toHaveBeenCalledWith("TTS: no audio data returned");
+      expect(screen.getByLabelText("Play")).toBeInTheDocument();
+    });
+
+    globalThis.AudioContext = origAudioCtx;
+    vi.restoreAllMocks();
   });
 });

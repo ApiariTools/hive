@@ -30,6 +30,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   const [playingId, setPlayingId] = useState<number | null>(null);
   const ttsSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const ttsAudioCtxRef = useRef<AudioContext | null>(null);
+  const ttsPlayCountRef = useRef(0);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -63,6 +64,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
     // Toggle off if already playing this message
     if (playingId === msg.id) {
       if (ttsSourceRef.current) {
+        ttsSourceRef.current.onended = null;
         ttsSourceRef.current.stop();
         ttsSourceRef.current = null;
       }
@@ -70,41 +72,56 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       return;
     }
 
-    // Stop any currently playing audio
+    // Stop any currently playing audio — detach onended first to avoid stale setPlayingId(null)
     if (ttsSourceRef.current) {
+      ttsSourceRef.current.onended = null;
       ttsSourceRef.current.stop();
       ttsSourceRef.current = null;
     }
 
     setPlayingId(msg.id);
+    const myPlayCount = ++ttsPlayCountRef.current;
+
+    // Safari/iOS requires AudioContext.resume() in the same synchronous call stack
+    // as the user gesture — must happen BEFORE any await
+    if (!ttsAudioCtxRef.current) {
+      ttsAudioCtxRef.current = new AudioContext();
+    }
+    const audioCtx = ttsAudioCtxRef.current;
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume();
+    }
 
     const audioData = await api.textToSpeech(msg.content);
+
+    // Guard: user stopped or started a different message while fetch was in-flight
+    if (ttsPlayCountRef.current !== myPlayCount) return;
+
     if (!audioData) {
       console.warn("TTS: no audio data returned");
       setPlayingId(null);
       return;
     }
 
-    if (!ttsAudioCtxRef.current) {
-      ttsAudioCtxRef.current = new AudioContext();
-    }
-    const audioCtx = ttsAudioCtxRef.current;
+    try {
+      const buffer = await audioCtx.decodeAudioData(audioData);
+      if (ttsPlayCountRef.current !== myPlayCount) return;
 
-    // Safari/iOS requires resume() during a user gesture
-    if (audioCtx.state === "suspended") {
-      await audioCtx.resume();
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioCtx.destination);
+      source.onended = () => {
+        setPlayingId(null);
+        ttsSourceRef.current = null;
+      };
+      ttsSourceRef.current = source;
+      source.start();
+    } catch (err) {
+      console.warn("TTS: playback failed", err);
+      if (ttsPlayCountRef.current === myPlayCount) {
+        setPlayingId(null);
+      }
     }
-
-    const buffer = await audioCtx.decodeAudioData(audioData);
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(audioCtx.destination);
-    source.onended = () => {
-      setPlayingId(null);
-      ttsSourceRef.current = null;
-    };
-    ttsSourceRef.current = source;
-    source.start();
   }
 
   function formatTime(iso: string): string {
