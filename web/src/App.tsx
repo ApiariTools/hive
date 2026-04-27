@@ -90,7 +90,7 @@ export default function App() {
         setWorkspace(ws[0].name);
       }
     });
-    if (isMobile && !initial.bot) {
+    if (window.innerWidth <= 768 && !initial.bot) {
       setBot("Main");
     }
   }, []);
