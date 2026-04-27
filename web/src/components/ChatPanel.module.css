@@ -251,6 +251,21 @@
   border-top: 1px solid var(--border);
 }
 
+.playBtn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  padding: 2px 4px;
+  cursor: pointer;
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.playBtn:hover {
+  color: var(--text);
+}
+
 .cancelBtn {
   font-size: 12px;
   padding: 3px 10px;
