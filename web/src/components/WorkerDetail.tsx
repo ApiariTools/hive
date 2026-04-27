@@ -3,6 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Worker, WorkerDetail as WorkerDetailData } from "../types";
 import * as api from "../api";
+import { ChatInput } from "./ChatInput";
 import styles from "./WorkerDetail.module.css";
 
 interface Props {
@@ -19,7 +20,6 @@ function branchName(branch: string): string {
 type InfoTab = "output" | "task" | "chat";
 
 export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
-  const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [infoTab, setInfoTab] = useState<InfoTab>(window.innerWidth <= 768 ? "chat" : "output");
@@ -41,11 +41,9 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [detail?.conversation.length]);
 
-  async function handleSend() {
-    const text = input.trim();
+  async function handleWorkerSend(text: string) {
     if (!text || sending) return;
     setSending(true);
-    setInput("");
     await api.sendWorkerMessage(workspace, worker.id, text);
     setSending(false);
   }
@@ -75,26 +73,12 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
           ))}
           <div ref={bottomRef} />
         </div>
-        <div className={styles.inputArea}>
-          <div className={styles.inputRow}>
-            <input
-              className={styles.inputField}
-              placeholder="Message worker..."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSend();
-              }}
-            />
-            <button
-              className={styles.sendBtn}
-              onClick={handleSend}
-              disabled={sending}
-            >
-              &uarr;
-            </button>
-          </div>
-        </div>
+        <ChatInput
+          placeholder="Message worker..."
+          disabled={sending}
+          onSend={handleWorkerSend}
+          showAttachments={false}
+        />
       </>
     );
   }
