@@ -1801,8 +1801,19 @@ async fn send_worker_message(
 async fn get_usage(State(state): State<AppState>) -> Json<serde_json::Value> {
     let cache = state.usage_cache.lock().await;
     match &*cache {
-        Some(data) => Json(serde_json::to_value(data).unwrap_or_default()),
-        None => Json(serde_json::json!({ "providers": [], "updated_at": null })),
+        crate::usage::CachedUsage::Data(data) => {
+            let mut val = serde_json::to_value(data).unwrap_or_default();
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("installed".to_string(), serde_json::Value::Bool(true));
+            }
+            Json(val)
+        }
+        crate::usage::CachedUsage::NotInstalled => {
+            Json(serde_json::json!({ "installed": false, "providers": [], "updated_at": null }))
+        }
+        crate::usage::CachedUsage::Unknown => {
+            Json(serde_json::json!({ "installed": null, "providers": [], "updated_at": null }))
+        }
     }
 }
 

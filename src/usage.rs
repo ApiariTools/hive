@@ -6,7 +6,15 @@ use tokio::sync::Mutex;
 use crate::tick::{Action, TickContext, Watcher};
 
 /// Cached usage data from `caut` CLI.
-pub type UsageCache = Arc<Mutex<Option<UsageData>>>;
+pub type UsageCache = Arc<Mutex<CachedUsage>>;
+
+#[derive(Clone, Debug, Default)]
+pub enum CachedUsage {
+    #[default]
+    Unknown,
+    NotInstalled,
+    Data(UsageData),
+}
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct UsageData {
@@ -26,7 +34,7 @@ pub struct ProviderUsage {
 }
 
 /// Fetch usage by running `caut usage --json` and parsing the output.
-pub async fn fetch_usage() -> Option<UsageData> {
+pub async fn fetch_usage() -> CachedUsage {
     let mut cmd = tokio::process::Command::new("caut");
     cmd.args(["usage", "--json"]);
 
@@ -41,11 +49,11 @@ pub async fn fetch_usage() -> Option<UsageData> {
                 "[usage] caut failed: {}",
                 String::from_utf8_lossy(&o.stderr)
             );
-            return None;
+            return CachedUsage::NotInstalled;
         }
         Err(e) => {
             tracing::debug!("[usage] caut not found or failed to run: {e}");
-            return None;
+            return CachedUsage::NotInstalled;
         }
     };
 
@@ -55,7 +63,7 @@ pub async fn fetch_usage() -> Option<UsageData> {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("[usage] Failed to parse caut output: {e}");
-            return None;
+            return CachedUsage::NotInstalled;
         }
     };
 
@@ -114,7 +122,7 @@ pub async fn fetch_usage() -> Option<UsageData> {
         }
     }
 
-    Some(UsageData {
+    CachedUsage::Data(UsageData {
         providers,
         updated_at: chrono::Utc::now().to_rfc3339(),
     })
@@ -142,10 +150,9 @@ impl Watcher for UsageWatcher {
     }
 
     async fn tick(&mut self, _ctx: &TickContext) -> Vec<Action> {
-        if let Some(data) = fetch_usage().await {
-            let mut cache = self.cache.lock().await;
-            *cache = Some(data);
-        }
+        let result = fetch_usage().await;
+        let mut cache = self.cache.lock().await;
+        *cache = result;
         Vec::new()
     }
 }
@@ -179,31 +186,30 @@ mod tests {
     }
 
     #[test]
-    fn test_usage_cache_type() {
-        let cache: UsageCache = Arc::new(Mutex::new(None));
-        assert!(cache.try_lock().unwrap().is_none());
+    fn test_usage_cache_default_is_unknown() {
+        let cache: UsageCache = Arc::new(Mutex::new(CachedUsage::default()));
+        assert!(matches!(*cache.try_lock().unwrap(), CachedUsage::Unknown));
     }
 
     #[tokio::test]
-    async fn test_fetch_usage_gracefully_handles_missing_caut() {
-        // caut is not installed in test environment, should return None
+    async fn test_fetch_usage_returns_not_installed_when_caut_missing() {
         let result = fetch_usage().await;
-        assert!(result.is_none());
+        assert!(matches!(result, CachedUsage::NotInstalled));
     }
 
     #[tokio::test]
     async fn test_usage_watcher_tick_with_no_caut() {
-        let cache: UsageCache = Arc::new(Mutex::new(None));
+        let cache: UsageCache = Arc::new(Mutex::new(CachedUsage::default()));
         let mut watcher = UsageWatcher::new(cache.clone());
         let ctx = TickContext { tick_number: 1 };
         let actions = watcher.tick(&ctx).await;
         assert!(actions.is_empty());
-        assert!(cache.lock().await.is_none());
+        assert!(matches!(*cache.lock().await, CachedUsage::NotInstalled));
     }
 
     #[test]
     fn test_usage_watcher_interval() {
-        let cache: UsageCache = Arc::new(Mutex::new(None));
+        let cache: UsageCache = Default::default();
         let watcher = UsageWatcher::new(cache);
         assert_eq!(watcher.name(), "usage-watcher");
         assert_eq!(watcher.interval_ticks(), 8);

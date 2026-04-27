@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
     let watched_bots = load_watched_bots(&config_dir);
     let watched_workspaces = load_watched_workspaces(&config_dir);
     let pr_review_cache: pr_review::PrReviewCache = Default::default();
-    let usage_cache: usage::UsageCache = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let usage_cache: usage::UsageCache = Default::default();
     let ws_roots = load_workspace_roots(&config_dir);
 
     let mut engine = tick::TickEngine::new(15);

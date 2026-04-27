@@ -29,6 +29,9 @@ function dotTitle(p: { name: string; status: string; usage_percent: number | nul
 }
 
 export function TopBar({ workspaces, active, onSelect, onMenuToggle, onOpenPalette, usage }: Props) {
+  const showDots = usage && usage.installed === true && usage.providers.length > 0;
+  const showInstallHint = usage && usage.installed === false;
+
   return (
     <div className={styles.bar}>
       <button className={styles.hamburger} onClick={onMenuToggle}>
@@ -44,7 +47,7 @@ export function TopBar({ workspaces, active, onSelect, onMenuToggle, onOpenPalet
           {ws.name}
         </button>
       ))}
-      {usage && usage.providers.length > 0 && (
+      {showDots && (
         <div className={styles.usageDots}>
           {usage.providers.map((p) => (
             <span
@@ -55,6 +58,14 @@ export function TopBar({ workspaces, active, onSelect, onMenuToggle, onOpenPalet
             />
           ))}
         </div>
+      )}
+      {showInstallHint && (
+        <span
+          className={styles.installHint}
+          title="cargo install --git https://github.com/Dicklesworthstone/coding_agent_usage_tracker"
+        >
+          Install caut for usage stats
+        </span>
       )}
       <button
         className={styles.searchBtn}
