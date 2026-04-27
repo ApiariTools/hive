@@ -26,6 +26,7 @@ pub struct WatchedBot {
 }
 
 /// Start watcher loops for all bots that have watch sources or schedules.
+#[allow(dead_code)]
 pub fn start_watchers(bots: Vec<WatchedBot>, db: Db) {
     for bot in bots {
         let has_watch = !bot.watch.is_empty();
@@ -53,6 +54,7 @@ pub fn start_watchers(bots: Vec<WatchedBot>, db: Db) {
     }
 }
 
+#[allow(dead_code)]
 async fn run_watcher(bot: WatchedBot, db: Db) {
     let signal_interval = Duration::from_secs(60);
     let proactive_interval = Duration::from_secs(bot.schedule_hours.unwrap_or(24) * 3600);
@@ -89,7 +91,7 @@ async fn run_watcher(bot: WatchedBot, db: Db) {
     }
 }
 
-async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
+pub(crate) async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
     info!("[watcher] running proactive task for {}", bot.name);
 
     let report_path = format!("/tmp/hive-report-{}-{}.md", bot.workspace, bot.name);
@@ -197,13 +199,13 @@ async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-struct Signal {
-    source: String,
-    title: String,
-    body: String,
+pub(crate) struct Signal {
+    pub source: String,
+    pub title: String,
+    pub body: String,
 }
 
-async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
+pub(crate) async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
     let dir = working_dir.as_ref()?;
 
     // Check for open PRs that need attention
@@ -260,7 +262,7 @@ async fn poll_github(working_dir: &Option<PathBuf>) -> Option<Signal> {
     None
 }
 
-async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) {
+pub(crate) async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) {
     info!("[watcher] dispatching to {}: {}", bot.name, signal.title);
 
     // Store the signal as a system message in the bot's chat
@@ -306,7 +308,7 @@ async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) {
     }
 }
 
-async fn run_claude_autonomous(
+pub(crate) async fn run_claude_autonomous(
     prompt: &str,
     working_dir: &Option<PathBuf>,
 ) -> Result<String, String> {
@@ -360,7 +362,7 @@ async fn run_claude_autonomous(
     Ok(full_text)
 }
 
-async fn run_codex_autonomous(
+pub(crate) async fn run_codex_autonomous(
     prompt: &str,
     working_dir: &Option<PathBuf>,
 ) -> Result<String, String> {
@@ -388,7 +390,7 @@ async fn run_codex_autonomous(
     Ok(response)
 }
 
-async fn run_gemini_autonomous(
+pub(crate) async fn run_gemini_autonomous(
     prompt: &str,
     working_dir: &Option<PathBuf>,
 ) -> Result<String, String> {

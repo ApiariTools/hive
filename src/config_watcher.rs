@@ -18,6 +18,7 @@ pub struct WatchedWorkspace {
 }
 
 /// Start a background task that watches for config/prompt changes.
+#[allow(dead_code)]
 pub fn start_config_watcher(workspaces: Vec<WatchedWorkspace>, db: Db) {
     if workspaces.is_empty() {
         return;
@@ -29,6 +30,7 @@ pub fn start_config_watcher(workspaces: Vec<WatchedWorkspace>, db: Db) {
     tokio::spawn(run_watcher(workspaces, db));
 }
 
+#[allow(dead_code)]
 async fn run_watcher(workspaces: Vec<WatchedWorkspace>, db: Db) {
     let mut hashes: HashMap<(String, String), String> = HashMap::new();
     let mut tick = interval(Duration::from_secs(30));
@@ -73,7 +75,7 @@ async fn run_watcher(workspaces: Vec<WatchedWorkspace>, db: Db) {
     }
 }
 
-fn compute_prompt_hash(ws: &WatchedWorkspace, _bot: &str) -> String {
+pub(crate) fn compute_prompt_hash(ws: &WatchedWorkspace, _bot: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
