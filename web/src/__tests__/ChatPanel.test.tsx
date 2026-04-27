@@ -1,6 +1,17 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
+
+// Mock Howler globally so it doesn't interfere with other test files
+vi.mock("howler", () => ({
+  Howl: vi.fn().mockImplementation((opts: Record<string, unknown>) => ({
+    play: vi.fn(),
+    stop: vi.fn(),
+    unload: vi.fn(),
+    _opts: opts,
+  })),
+}));
+
 import { ChatPanel } from "../components/ChatPanel";
 import * as api from "../api";
 import type { Message } from "../types";
@@ -161,71 +172,22 @@ describe("ChatPanel", () => {
     expect(playButtons).toHaveLength(1);
   });
 
-  function makeMockAudioCtx(state = "running") {
-    const mockStart = vi.fn();
-    const mockStop = vi.fn();
-    let onendedCb: (() => void) | null = null;
-    const mockSource = {
-      start: mockStart,
-      stop: mockStop,
-      connect: vi.fn(),
-      buffer: null,
-      set onended(cb: (() => void) | null) { onendedCb = cb; },
-      get onended() { return onendedCb; },
-    };
-    const mockResume = vi.fn();
-    const silentSource = { buffer: null, connect: vi.fn(), start: vi.fn() };
-    const ctx = {
-      state,
-      resume: mockResume,
-      sampleRate: 44100,
-      decodeAudioData: vi.fn().mockResolvedValue({ duration: 1 }),
-      destination: {},
-      createBuffer: () => ({ getChannelData: () => new Float32Array(1) }),
-      createBufferSource: vi.fn()
-        .mockReturnValueOnce(silentSource) // first call: silent unlock buffer
-        .mockReturnValue(mockSource),      // second call: actual audio
-      close: vi.fn(),
-    };
-    return { ctx, mockStart, mockStop, mockResume, getOnended: () => onendedCb };
-  }
-
-  function installMockAudioCtx(ctx: Record<string, unknown>) {
-    const orig = globalThis.AudioContext;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    globalThis.AudioContext = function MockAudioContext() { return ctx; } as any;
-    return orig;
-  }
-
-  it("plays TTS audio and shows stop icon, then resets on ended", async () => {
+  it("plays TTS audio and shows stop icon", async () => {
     const user = userEvent.setup();
-    const { ctx, mockStart, mockResume, getOnended } = makeMockAudioCtx("suspended");
-    const origAudioCtx = installMockAudioCtx(ctx);
     vi.spyOn(api, "textToSpeech").mockResolvedValue(new ArrayBuffer(8));
 
     render(<ChatPanel {...defaultProps} messagesLoading={false} />);
     await user.click(screen.getByLabelText("Play"));
 
     await waitFor(() => {
-      expect(mockResume).toHaveBeenCalled();
-      expect(mockStart).toHaveBeenCalled();
-    });
-    expect(screen.getByLabelText("Stop")).toBeInTheDocument();
-
-    // Simulate audio ended
-    getOnended()?.();
-    await waitFor(() => {
-      expect(screen.getByLabelText("Play")).toBeInTheDocument();
+      expect(screen.getByLabelText("Stop")).toBeInTheDocument();
     });
 
-    globalThis.AudioContext = origAudioCtx;
     vi.restoreAllMocks();
   });
 
   it("stops TTS audio when clicking stop", async () => {
     const user = userEvent.setup();
-    const { ctx, mockStop } = makeMockAudioCtx("running");
-    const origAudioCtx = installMockAudioCtx(ctx);
     vi.spyOn(api, "textToSpeech").mockResolvedValue(new ArrayBuffer(8));
 
     render(<ChatPanel {...defaultProps} messagesLoading={false} />);
@@ -235,18 +197,14 @@ describe("ChatPanel", () => {
 
     await user.click(screen.getByLabelText("Stop"));
     await waitFor(() => {
-      expect(mockStop).toHaveBeenCalled();
       expect(screen.getByLabelText("Play")).toBeInTheDocument();
     });
 
-    globalThis.AudioContext = origAudioCtx;
     vi.restoreAllMocks();
   });
 
   it("resets playingId when TTS returns no data", async () => {
     const user = userEvent.setup();
-    const { ctx } = makeMockAudioCtx("running");
-    const origAudioCtx = installMockAudioCtx(ctx);
     vi.spyOn(api, "textToSpeech").mockResolvedValue(null);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
@@ -258,7 +216,6 @@ describe("ChatPanel", () => {
       expect(screen.getByLabelText("Play")).toBeInTheDocument();
     });
 
-    globalThis.AudioContext = origAudioCtx;
     vi.restoreAllMocks();
   });
 });

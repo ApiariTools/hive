@@ -2,6 +2,7 @@ import { useRef, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, Square, Volume2 } from "lucide-react";
+import { Howl } from "howler";
 import * as api from "../api";
 import type { Message } from "../types";
 import { ChatInput } from "./ChatInput";
@@ -29,9 +30,8 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   const bottomRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [playingId, setPlayingId] = useState<number | null>(null);
-  const ttsSourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const ttsAudioCtxRef = useRef<AudioContext | null>(null);
-  const ttsPlayCountRef = useRef(0);
+  const howlRef = useRef<Howl | null>(null);
+  const playCountRef = useRef(0);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -50,60 +50,37 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
 
   useEffect(() => {
     return () => {
-      if (ttsSourceRef.current) {
-        ttsSourceRef.current.stop();
-        ttsSourceRef.current = null;
-      }
-      if (ttsAudioCtxRef.current) {
-        ttsAudioCtxRef.current.close();
-        ttsAudioCtxRef.current = null;
+      if (howlRef.current) {
+        howlRef.current.unload();
+        howlRef.current = null;
       }
     };
   }, []);
 
   async function playMessage(msg: Message) {
-    // Toggle off if already playing this message
+    // Toggle off if already playing
     if (playingId === msg.id) {
-      if (ttsSourceRef.current) {
-        ttsSourceRef.current.onended = null;
-        ttsSourceRef.current.stop();
-        ttsSourceRef.current = null;
+      if (howlRef.current) {
+        howlRef.current.stop();
+        howlRef.current.unload();
+        howlRef.current = null;
       }
       setPlayingId(null);
       return;
     }
 
-    // Stop any currently playing audio — detach onended first to avoid stale setPlayingId(null)
-    if (ttsSourceRef.current) {
-      ttsSourceRef.current.onended = null;
-      ttsSourceRef.current.stop();
-      ttsSourceRef.current = null;
+    // Stop any currently playing audio
+    if (howlRef.current) {
+      howlRef.current.stop();
+      howlRef.current.unload();
+      howlRef.current = null;
     }
 
     setPlayingId(msg.id);
-    const myPlayCount = ++ttsPlayCountRef.current;
-
-    // Safari/iOS requires AudioContext created + resumed + a buffer played
-    // ALL in the same synchronous user gesture handler, BEFORE any await.
-    // Playing a silent buffer "unlocks" the audio context for later playback.
-    if (!ttsAudioCtxRef.current) {
-      ttsAudioCtxRef.current = new AudioContext();
-    }
-    const audioCtx = ttsAudioCtxRef.current;
-    if (audioCtx.state === "suspended") {
-      audioCtx.resume();
-    }
-    // Play a tiny silent buffer to unlock audio on iPad Safari
-    const silentBuf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
-    const silentSrc = audioCtx.createBufferSource();
-    silentSrc.buffer = silentBuf;
-    silentSrc.connect(audioCtx.destination);
-    silentSrc.start();
+    const myCount = ++playCountRef.current;
 
     const audioData = await api.textToSpeech(msg.content, ttsVoice);
-
-    // Guard: user stopped or started a different message while fetch was in-flight
-    if (ttsPlayCountRef.current !== myPlayCount) return;
+    if (playCountRef.current !== myCount) return;
 
     if (!audioData) {
       console.warn("TTS: no audio data returned");
@@ -111,25 +88,35 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       return;
     }
 
-    try {
-      const buffer = await audioCtx.decodeAudioData(audioData);
-      if (ttsPlayCountRef.current !== myPlayCount) return;
+    // Convert ArrayBuffer to blob URL for Howler
+    const blob = new Blob([audioData], { type: "audio/wav" });
+    const url = URL.createObjectURL(blob);
 
-      const source = audioCtx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioCtx.destination);
-      source.onended = () => {
+    const howl = new Howl({
+      src: [url],
+      format: ["wav"],
+      html5: true, // Better iOS/Safari support
+      onend: () => {
         setPlayingId(null);
-        ttsSourceRef.current = null;
-      };
-      ttsSourceRef.current = source;
-      source.start();
-    } catch (err) {
-      console.warn("TTS: playback failed", err);
-      if (ttsPlayCountRef.current === myPlayCount) {
+        URL.revokeObjectURL(url);
+        howlRef.current = null;
+      },
+      onloaderror: (_id: number, err: unknown) => {
+        console.warn("TTS: load error", err);
         setPlayingId(null);
-      }
-    }
+        URL.revokeObjectURL(url);
+        howlRef.current = null;
+      },
+      onplayerror: (_id: number, err: unknown) => {
+        console.warn("TTS: play error", err);
+        setPlayingId(null);
+        URL.revokeObjectURL(url);
+        howlRef.current = null;
+      },
+    });
+
+    howlRef.current = howl;
+    howl.play();
   }
 
   function formatTime(iso: string): string {
