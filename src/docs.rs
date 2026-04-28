@@ -39,12 +39,9 @@ pub enum DocsCommand {
         workspace: String,
         /// Filename (e.g. overview.md)
         filename: String,
-        /// Doc content (inline)
-        #[arg(long, conflicts_with = "file")]
-        content: Option<String>,
         /// Path to file containing the doc content
-        #[arg(long, conflicts_with = "content")]
-        file: Option<String>,
+        #[arg(long)]
+        file: String,
     },
     /// Delete a doc from .apiari/docs/ and git commit
     Delete {
@@ -166,20 +163,14 @@ pub fn run(args: DocsArgs, config_dir: &Path) -> Result<()> {
         DocsCommand::Write {
             workspace,
             filename,
-            content,
             file,
         } => {
             validate_filename(&filename)?;
             let root = resolve_workspace_root(config_dir, &workspace)?;
             let dir = docs_dir(&root);
             std::fs::create_dir_all(&dir)?;
-            let content = match (content, file) {
-                (Some(text), _) => text,
-                (_, Some(path)) => {
-                    std::fs::read_to_string(&path).map_err(|e| eyre!("cannot read {path}: {e}"))?
-                }
-                _ => return Err(eyre!("provide --content or --file")),
-            };
+            let content =
+                std::fs::read_to_string(&file).map_err(|e| eyre!("cannot read {file}: {e}"))?;
             let dest = dir.join(&filename);
             std::fs::write(&dest, &content)?;
             println!("Wrote {filename} ({} bytes)", content.len());
@@ -375,8 +366,7 @@ mod tests {
             command: DocsCommand::Write {
                 workspace: "test".into(),
                 filename: "new.md".into(),
-                content: None,
-                file: Some(src.path().to_string_lossy().to_string()),
+                file: src.path().to_string_lossy().to_string(),
             },
         };
         // This will succeed for file write but git commit will warn (no git repo)
@@ -384,34 +374,6 @@ mod tests {
         // Verify file was written
         let written = std::fs::read_to_string(root.path().join(".apiari/docs/new.md")).unwrap();
         assert_eq!(written, "# New Doc\nHello world.");
-    }
-
-    #[test]
-    fn test_write_doc_inline_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let ws_dir = dir.path().join("workspaces");
-        std::fs::create_dir_all(&ws_dir).unwrap();
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            ws_dir.join("test.toml"),
-            format!(
-                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
-                root.path().display()
-            ),
-        )
-        .unwrap();
-
-        let args = DocsArgs {
-            command: DocsCommand::Write {
-                workspace: "test".into(),
-                filename: "inline.md".into(),
-                content: Some("# Inline\nWritten inline.".into()),
-                file: None,
-            },
-        };
-        assert!(run(args, dir.path()).is_ok());
-        let written = std::fs::read_to_string(root.path().join(".apiari/docs/inline.md")).unwrap();
-        assert_eq!(written, "# Inline\nWritten inline.");
     }
 
     #[test]
