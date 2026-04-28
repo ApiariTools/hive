@@ -392,7 +392,7 @@ fn build_docs_instructions(ws_id: &str) -> String {
          You can manage reference docs in `.apiari/docs/`. These are markdown files shared across all bots in this workspace.\n\n\
          - **List docs**: `hive docs list --workspace {ws_id}`\n\
          - **Read a doc**: `hive docs read --workspace {ws_id} <filename>`\n\
-         - **Create/update a doc**: Write content to a temp file, then `hive docs write --workspace {ws_id} <filename>.md --file /tmp/doc.md`\n\
+         - **Create/update a doc**: `hive docs write --workspace {ws_id} <filename>.md --content \"markdown\"` or `--file /tmp/doc.md` for longer docs\n\
          - **Delete a doc**: `hive docs delete --workspace {ws_id} <filename>.md`\n\n\
          Use docs to store reference material, project notes, cheat sheets, or anything useful for the workspace. \
          The first line of each doc (heading or plain text) becomes its description in the index.\n"
