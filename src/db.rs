@@ -63,6 +63,9 @@ const SCHEMA: &str = "
         message_id INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (workspace, bot)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_conversations_ws_bot_role
+        ON conversations(workspace, bot, role);
 ";
 
 fn open_conn(path: &Path) -> Result<Connection> {
