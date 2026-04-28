@@ -189,6 +189,16 @@ impl Db {
         Ok(rows)
     }
 
+    pub fn count_assistant_messages(&self, workspace: &str, bot: &str) -> Result<i64> {
+        let conn = self.reader()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE workspace = ?1 AND bot = ?2 AND role = 'assistant'",
+            params![workspace, bot],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     pub fn get_message_content(&self, message_id: i64) -> Result<Option<String>> {
         let conn = self.reader()?;
         let result = conn.query_row(

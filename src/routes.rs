@@ -705,7 +705,7 @@ async fn send_message(
     let images = extract_images(&body.attachments);
 
     let text_attachments = extract_text_attachments(&body.attachments);
-    let message = if text_attachments.is_empty() {
+    let mut message = if text_attachments.is_empty() {
         body.message
     } else {
         let mut msg = body.message;
@@ -715,6 +715,21 @@ async fn send_message(
         }
         msg
     };
+
+    // Inject workflow reminder nudge for long conversations (provider-agnostic)
+    let has_swarm = working_dir
+        .as_ref()
+        .map(|d| d.join(".swarm").exists())
+        .unwrap_or(false);
+    if has_swarm {
+        let assistant_count = state
+            .db
+            .count_assistant_messages(&workspace, &bot)
+            .unwrap_or(0);
+        if should_inject_nudge(assistant_count, &provider, true) {
+            message.push_str(build_workflow_nudge());
+        }
+    }
 
     let db = state.db.clone();
     let ws_name = workspace.clone();
@@ -924,6 +939,30 @@ async fn handle_ws(mut socket: ws::WebSocket, state: AppState) {
             }
         }
     }
+}
+
+/// Build a short workflow reminder nudge to append to user messages.
+/// Keeps bots from drifting away from swarm/docs workflows in long conversations.
+fn build_workflow_nudge() -> &'static str {
+    "\n\n<workflow-reminder>\n\
+     You have tools available through this workspace. Use them:\n\
+     - Code changes: dispatch swarm workers (swarm create --repo <repo> --prompt-file /tmp/task.txt). Never write code directly.\n\
+     - Workspace docs: use `hive docs` commands to read/write reference docs in .apiari/docs/\n\
+     - Stay focused on coordinating and answering questions. Workers do the implementation.\n\
+     </workflow-reminder>"
+}
+
+/// Returns whether a workflow nudge should be injected for this turn.
+/// Only injects when .swarm/ exists, assistant turn count > 0, and at the right interval.
+fn should_inject_nudge(assistant_count: i64, provider: &str, has_swarm: bool) -> bool {
+    if !has_swarm || assistant_count == 0 {
+        return false;
+    }
+    let interval: i64 = match provider {
+        "codex" | "gemini" => 3,
+        _ => 5, // claude default
+    };
+    assistant_count % interval == 0
 }
 
 /// Simple hash of a string for change detection. Not cryptographic.
@@ -3575,5 +3614,99 @@ role = "Chat"
                 .as_ref(),
             "text/html"
         );
+    }
+
+    // ── workflow nudge ──
+
+    #[test]
+    fn test_nudge_not_injected_on_turn_zero() {
+        assert!(!should_inject_nudge(0, "claude", true));
+        assert!(!should_inject_nudge(0, "codex", true));
+        assert!(!should_inject_nudge(0, "gemini", true));
+    }
+
+    #[test]
+    fn test_nudge_injected_at_turn_5_for_claude() {
+        assert!(should_inject_nudge(5, "claude", true));
+        assert!(should_inject_nudge(10, "claude", true));
+        assert!(should_inject_nudge(15, "claude", true));
+    }
+
+    #[test]
+    fn test_nudge_not_injected_between_intervals_claude() {
+        assert!(!should_inject_nudge(1, "claude", true));
+        assert!(!should_inject_nudge(3, "claude", true));
+        assert!(!should_inject_nudge(7, "claude", true));
+    }
+
+    #[test]
+    fn test_nudge_injected_at_turn_3_for_codex() {
+        assert!(should_inject_nudge(3, "codex", true));
+        assert!(should_inject_nudge(6, "codex", true));
+        assert!(should_inject_nudge(9, "codex", true));
+    }
+
+    #[test]
+    fn test_nudge_injected_at_turn_3_for_gemini() {
+        assert!(should_inject_nudge(3, "gemini", true));
+        assert!(should_inject_nudge(6, "gemini", true));
+    }
+
+    #[test]
+    fn test_nudge_not_injected_without_swarm() {
+        assert!(!should_inject_nudge(5, "claude", false));
+        assert!(!should_inject_nudge(3, "codex", false));
+        assert!(!should_inject_nudge(3, "gemini", false));
+    }
+
+    #[test]
+    fn test_nudge_content_has_workflow_reminder_tag() {
+        let nudge = build_workflow_nudge();
+        assert!(nudge.contains("<workflow-reminder>"));
+        assert!(nudge.contains("</workflow-reminder>"));
+        assert!(nudge.contains("swarm"));
+    }
+
+    #[tokio::test]
+    async fn test_nudge_not_stored_in_db() {
+        // The nudge is only appended to the message sent to the provider,
+        // not stored in the DB. Verify by sending a message and checking DB content.
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+
+        // Create workspace config pointing to temp dir with .swarm/
+        std::fs::create_dir_all(config_dir.path().join("workspaces")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
+        std::fs::write(
+            config_dir.path().join("workspaces/test.toml"),
+            format!(
+                "[workspace]\nroot = \"{}\"\nname = \"test\"\n",
+                dir.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let db = crate::db::Db::open(&config_dir.path().join("test.db")).unwrap();
+
+        // Add 5 assistant messages to trigger nudge for claude
+        for i in 0..5 {
+            db.add_message("test", "Main", "assistant", &format!("response {i}"), None)
+                .unwrap();
+        }
+        // Add user message (simulating what send_message stores BEFORE nudge injection)
+        let user_msg = "do something";
+        db.add_message("test", "Main", "user", user_msg, None)
+            .unwrap();
+
+        // Verify the DB has the original message without nudge
+        let convos = db.get_conversations("test", "Main", 100).unwrap();
+        let last_user = convos.iter().rev().find(|m| m.role == "user").unwrap();
+        assert_eq!(last_user.content, user_msg);
+        assert!(!last_user.content.contains("workflow-reminder"));
+
+        // Verify assistant count triggers nudge
+        let count = db.count_assistant_messages("test", "Main").unwrap();
+        assert_eq!(count, 5);
+        assert!(should_inject_nudge(count, "claude", true));
     }
 }
