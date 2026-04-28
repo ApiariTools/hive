@@ -94,36 +94,78 @@ pub(crate) fn compute_prompt_hash(ws: &WatchedWorkspace, _bot: &str) -> String {
         if let Ok(soul) = std::fs::read_to_string(root.join(".apiari/soul.md")) {
             soul.hash(&mut hasher);
         }
-
-        // Hash docs directory: sorted filenames + modification times.
-        // This supplements the prompt-based hash: the built system prompt
-        // includes the docs index (filenames + descriptions), so adding/removing
-        // files or changing first lines already changes the prompt hash. The mtime
-        // tracking here catches edits deeper in the file that don't change the
-        // first line, ensuring a session reset even then.
-        let docs_dir = root.join(".apiari/docs");
-        if docs_dir.is_dir()
-            && let Ok(read_dir) = std::fs::read_dir(&docs_dir)
-        {
-            let mut doc_entries: Vec<(String, u128)> = read_dir
-                .flatten()
-                .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
-                .map(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    let mtime = e
-                        .metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-                    (name, mtime)
-                })
-                .collect();
-            doc_entries.sort_by(|a, b| a.0.cmp(&b.0));
-            doc_entries.hash(&mut hasher);
-        }
     }
 
     format!("{:016x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn docs_changes_do_not_affect_prompt_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let config_path = root.join("workspace.toml");
+        fs::write(&config_path, "name = \"test\"").unwrap();
+
+        let ws = WatchedWorkspace {
+            name: "test".to_string(),
+            config_path,
+            root: Some(root.clone()),
+            bots: vec!["Main".to_string()],
+        };
+
+        let hash_before = compute_prompt_hash(&ws, "Main");
+
+        // Create docs directory and add a doc file
+        let docs_dir = root.join(".apiari/docs");
+        fs::create_dir_all(&docs_dir).unwrap();
+        fs::write(docs_dir.join("guide.md"), "# Guide\nSome content").unwrap();
+
+        let hash_after = compute_prompt_hash(&ws, "Main");
+        assert_eq!(
+            hash_before, hash_after,
+            "adding a doc should not change the config watcher hash"
+        );
+
+        // Edit the doc file
+        fs::write(docs_dir.join("guide.md"), "# Guide\nUpdated content").unwrap();
+
+        let hash_after_edit = compute_prompt_hash(&ws, "Main");
+        assert_eq!(
+            hash_before, hash_after_edit,
+            "editing a doc should not change the config watcher hash"
+        );
+    }
+
+    #[test]
+    fn core_config_changes_affect_prompt_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let config_path = root.join("workspace.toml");
+        fs::write(&config_path, "name = \"test\"").unwrap();
+        fs::create_dir_all(root.join(".apiari")).unwrap();
+
+        let ws = WatchedWorkspace {
+            name: "test".to_string(),
+            config_path,
+            root: Some(root.clone()),
+            bots: vec!["Main".to_string()],
+        };
+
+        let hash1 = compute_prompt_hash(&ws, "Main");
+
+        // Changing context.md should change the hash
+        fs::write(root.join(".apiari/context.md"), "project context").unwrap();
+        let hash2 = compute_prompt_hash(&ws, "Main");
+        assert_ne!(hash1, hash2, "context.md change should affect hash");
+
+        // Changing soul.md should change the hash
+        fs::write(root.join(".apiari/soul.md"), "be concise").unwrap();
+        let hash3 = compute_prompt_hash(&ws, "Main");
+        assert_ne!(hash2, hash3, "soul.md change should affect hash");
+    }
 }
