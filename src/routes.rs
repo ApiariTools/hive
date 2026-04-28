@@ -386,6 +386,18 @@ fn build_docs_index(root: &std::path::Path) -> Option<String> {
     Some(index)
 }
 
+fn build_docs_instructions() -> String {
+    "\n## Workspace Docs\n\
+     You can manage reference docs in `.apiari/docs/`. These are markdown files shared across all bots in this workspace.\n\n\
+     - **List docs**: `ls .apiari/docs/`\n\
+     - **Read a doc**: `cat \".apiari/docs/<filename>\"`\n\
+     - **Create/update a doc**: Write markdown to `.apiari/docs/<filename>.md`\n\
+     - **Delete a doc**: `rm \".apiari/docs/<filename>.md\"`\n\n\
+     Use docs to store reference material, project notes, cheat sheets, or anything useful for the workspace. \
+     The first line of each doc (heading or plain text) becomes its description in the index.\n"
+        .to_string()
+}
+
 fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
     let ws = ws_config.workspace.clone().unwrap_or_default();
     let ws_name = ws.name.as_deref().unwrap_or("unknown");
@@ -411,6 +423,12 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
             if let Some(ref root) = ws.root {
                 prompt.push_str(&format!("Working directory: {root}\n"));
             }
+            // Inject docs index and management instructions for custom prompt bots
+            if let Some(docs_index) = build_docs_index(root_path) {
+                prompt.push_str(&docs_index);
+            }
+            prompt.push_str(&build_docs_instructions());
+
             // Inject service credentials even for custom prompt bots
             if let Some(bot) = bot_config {
                 let services_prompt = build_services_prompt(root_path, &bot.services);
@@ -461,6 +479,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         if let Some(docs_index) = build_docs_index(root_path) {
             prompt.push_str(&docs_index);
         }
+
+        // Docs management instructions (always injected so bots know they can create docs)
+        prompt.push_str(&build_docs_instructions());
 
         // Swarm worker dispatch instructions
         let has_swarm = root_path.join(".swarm").exists();
@@ -3143,6 +3164,66 @@ role = "Chat"
         let prompt = build_system_prompt(&config, "Main");
         assert!(prompt.contains("Workspace Docs (.apiari/docs/)"));
         assert!(prompt.contains("overview.md — Project Overview"));
+        // Management instructions should also be present
+        assert!(prompt.contains("## Workspace Docs"));
+        assert!(prompt.contains("Create/update a doc"));
+    }
+
+    #[test]
+    fn test_docs_instructions_in_custom_prompt_bot() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("guide.md"), "# User Guide").unwrap();
+        std::fs::write(dir.path().join("custom.md"), "You are a custom bot.").unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+                ..Default::default()
+            }),
+            bots: Some(vec![BotInfo {
+                name: "Custom".into(),
+                color: None,
+                role: None,
+                description: None,
+                provider: "claude".into(),
+                model: None,
+                prompt_file: Some("custom.md".to_string()),
+                watch: vec![],
+                services: vec![],
+            }]),
+        };
+        let prompt = build_system_prompt(&config, "Custom");
+        assert!(prompt.contains("You are a custom bot."));
+        assert!(prompt.contains("Workspace Docs (.apiari/docs/)"));
+        assert!(prompt.contains("guide.md — User Guide"));
+        assert!(prompt.contains("## Workspace Docs"));
+        assert!(prompt.contains("Create/update a doc"));
+    }
+
+    #[test]
+    fn test_docs_instructions_present_without_existing_docs() {
+        let dir = tempfile::tempdir().unwrap();
+        // No .apiari/docs/ directory at all
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main");
+        // Even without docs, management instructions should be present
+        assert!(prompt.contains("## Workspace Docs"));
+        assert!(prompt.contains("Create/update a doc"));
+        // But the docs index should NOT be present (no docs dir)
+        assert!(!prompt.contains("Workspace Docs (.apiari/docs/)"));
     }
 
     // ── serve_frontend ──
