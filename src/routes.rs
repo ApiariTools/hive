@@ -505,7 +505,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                  'Plan and implement this completely in one session — do not pause mid-task \
                  for confirmation. Commit and open a PR when done.'\n\n\
                  When a task spans multiple repos, dispatch separate workers for each.\n\
-                 Each worker prompt must be self-contained — workers cannot see other repos.\n"
+                 Each worker prompt must be self-contained — workers cannot see other repos.\n\n\
+                 Workers auto-close when their PR is merged — do NOT manually close them or pull after merge. \
+                 Swarm handles cleanup and pulls main automatically.\n"
             ));
         }
 
