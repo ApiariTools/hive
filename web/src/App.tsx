@@ -153,17 +153,20 @@ export default function App() {
   // Load conversations + initial status when workspace or bot changes
   useEffect(() => {
     if (!workspace || !bot) return;
+    let cancelled = false;
     setMessages([]);
     setMessagesLoading(true);
     setLoading(false);
     setLoadingStatus(undefined);
     lastMsgId.current = 0;
     api.getConversations(workspace, bot, 30).then((msgs) => {
+      if (cancelled) return;
       setMessages(msgs);
       setMessagesLoading(false);
       if (msgs.length > 0) lastMsgId.current = msgs[msgs.length - 1].id;
     });
     api.getBotStatus(workspace, bot).then((s) => {
+      if (cancelled) return;
       if (s.status !== "idle") {
         setLoading(true);
         setLoadingStatus(s.tool_name ? `Using ${s.tool_name}...` : "Thinking...");
@@ -174,7 +177,10 @@ export default function App() {
     const seenTimer = setTimeout(() => {
       api.markSeen(workspace, bot);
     }, 500);
-    return () => clearTimeout(seenTimer);
+    return () => {
+      cancelled = true;
+      clearTimeout(seenTimer);
+    };
   }, [workspace, bot]);
 
   // Adaptive polling: 2s when active, 10s when idle, 30s when tab hidden
@@ -191,6 +197,7 @@ export default function App() {
     let cancelled = false;
     function poll() {
       const convP = api.getConversations(workspace, bot, 30).then((msgs) => {
+        if (cancelled) return;
         const latestId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
         if (latestId !== lastMsgId.current) {
           lastMsgId.current = latestId;
@@ -198,6 +205,7 @@ export default function App() {
         }
       });
       const statusP = api.getBotStatus(workspace, bot).then((s) => {
+        if (cancelled) return;
         if (s.status === "idle") {
           setLoading(false);
           setLoadingStatus(undefined);
