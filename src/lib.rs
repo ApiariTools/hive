@@ -1,6 +1,7 @@
 pub mod bot;
 pub mod config_watcher;
 pub mod db;
+pub mod docs;
 pub mod events;
 pub mod init;
 pub mod pr_feedback;

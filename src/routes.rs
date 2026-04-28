@@ -373,7 +373,7 @@ fn build_docs_index(root: &std::path::Path) -> Option<String> {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut index = String::from(
-        "\n## Workspace Docs (.apiari/docs/)\nReference docs available in this workspace. Read with `cat \".apiari/docs/<filename>\"` when relevant to the conversation.\n",
+        "\n## Workspace Docs (.apiari/docs/)\nReference docs available in this workspace. Read with `hive docs read` when relevant to the conversation.\n",
     );
     for (filename, desc) in &entries {
         if desc.is_empty() {
@@ -386,19 +386,20 @@ fn build_docs_index(root: &std::path::Path) -> Option<String> {
     Some(index)
 }
 
-fn build_docs_instructions() -> String {
-    "\n## Workspace Docs\n\
-     You can manage reference docs in `.apiari/docs/`. These are markdown files shared across all bots in this workspace.\n\n\
-     - **List docs**: `ls .apiari/docs/`\n\
-     - **Read a doc**: `cat \".apiari/docs/<filename>\"`\n\
-     - **Create/update a doc**: Write markdown to `.apiari/docs/<filename>.md`\n\
-     - **Delete a doc**: `rm \".apiari/docs/<filename>.md\"`\n\n\
-     Use docs to store reference material, project notes, cheat sheets, or anything useful for the workspace. \
-     The first line of each doc (heading or plain text) becomes its description in the index.\n"
-        .to_string()
+fn build_docs_instructions(ws_id: &str) -> String {
+    format!(
+        "\n## Workspace Docs\n\
+         You can manage reference docs in `.apiari/docs/`. These are markdown files shared across all bots in this workspace.\n\n\
+         - **List docs**: `hive docs list --workspace {ws_id}`\n\
+         - **Read a doc**: `hive docs read --workspace {ws_id} <filename>`\n\
+         - **Create/update a doc**: Write content to a temp file, then `hive docs write --workspace {ws_id} <filename>.md --file /tmp/doc.md`\n\
+         - **Delete a doc**: `hive docs delete --workspace {ws_id} <filename>.md`\n\n\
+         Use docs to store reference material, project notes, cheat sheets, or anything useful for the workspace. \
+         The first line of each doc (heading or plain text) becomes its description in the index.\n"
+    )
 }
 
-fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
+fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str) -> String {
     let ws = ws_config.workspace.clone().unwrap_or_default();
     let ws_name = ws.name.as_deref().unwrap_or("unknown");
     let ws_desc = ws.description.as_deref().unwrap_or("");
@@ -427,7 +428,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
             if let Some(docs_index) = build_docs_index(root_path) {
                 prompt.push_str(&docs_index);
             }
-            prompt.push_str(&build_docs_instructions());
+            prompt.push_str(&build_docs_instructions(ws_id));
 
             // Inject service credentials even for custom prompt bots
             if let Some(bot) = bot_config {
@@ -481,7 +482,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
         }
 
         // Docs management instructions (always injected so bots know they can create docs)
-        prompt.push_str(&build_docs_instructions());
+        prompt.push_str(&build_docs_instructions(ws_id));
 
         // Swarm worker dispatch instructions
         let has_swarm = root_path.join(".swarm").exists();
@@ -683,7 +684,7 @@ async fn send_message(
     let model = bot_config.as_ref().and_then(|b| b.model.clone());
 
     // Build system prompt and hash it — if prompt changed, start fresh session
-    let full_prompt = build_system_prompt(&ws_config, &bot);
+    let full_prompt = build_system_prompt(&ws_config, &bot, &workspace);
     let prompt_hash = simple_hash(&full_prompt);
 
     let resume_id = state
@@ -2505,7 +2506,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main");
+        let prompt = build_system_prompt(&config, "Main", "test");
         assert!(prompt.contains("Main"));
         assert!(prompt.contains("test"));
         assert!(prompt.contains("A test workspace"));
@@ -2533,7 +2534,7 @@ mod tests {
                 services: vec![],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Customer");
+        let prompt = build_system_prompt(&config, "Customer", "test");
         assert!(prompt.contains("Handles errors"));
     }
 
@@ -2551,7 +2552,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main");
+        let prompt = build_system_prompt(&config, "Main", "test");
         assert!(prompt.contains("Swarm Workers"));
         assert!(prompt.contains("swarm"));
     }
@@ -2569,7 +2570,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main");
+        let prompt = build_system_prompt(&config, "Main", "test");
         assert!(!prompt.contains("Swarm Workers"));
     }
 
@@ -2592,7 +2593,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main");
+        let prompt = build_system_prompt(&config, "Main", "test");
         assert!(prompt.contains("This is a Rust project"));
     }
 
@@ -2611,7 +2612,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main");
+        let prompt = build_system_prompt(&config, "Main", "test");
         assert!(prompt.contains("Be concise"));
     }
 
@@ -2626,7 +2627,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main");
+        let prompt = build_system_prompt(&config, "Main", "test");
         assert!(prompt.contains("sqlite3"));
         assert!(prompt.contains("Chat History"));
     }
@@ -2957,7 +2958,7 @@ mod tests {
                 services: vec!["sentry".to_string()],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Monitor");
+        let prompt = build_system_prompt(&config, "Monitor", "test");
         assert!(prompt.contains("Sentry Access"));
         assert!(prompt.contains("tok"));
     }
@@ -2991,7 +2992,7 @@ mod tests {
                 services: vec![],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Plain");
+        let prompt = build_system_prompt(&config, "Plain", "test");
         assert!(!prompt.contains("Sentry Access"));
     }
 
@@ -3053,7 +3054,7 @@ services = ["sentry", "grafana"]
                 services: vec!["sentry".to_string()],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Custom");
+        let prompt = build_system_prompt(&config, "Custom", "test");
         assert!(prompt.contains("You are a custom bot."));
         assert!(prompt.contains("Sentry Access"));
     }
@@ -3161,12 +3162,15 @@ role = "Chat"
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main");
+        let prompt = build_system_prompt(&config, "Main", "test");
         assert!(prompt.contains("Workspace Docs (.apiari/docs/)"));
         assert!(prompt.contains("overview.md — Project Overview"));
-        // Management instructions should also be present
+        // Management instructions should reference hive docs commands
         assert!(prompt.contains("## Workspace Docs"));
-        assert!(prompt.contains("Create/update a doc"));
+        assert!(prompt.contains("hive docs list --workspace test"));
+        assert!(prompt.contains("hive docs read --workspace test"));
+        assert!(prompt.contains("hive docs write --workspace test"));
+        assert!(prompt.contains("hive docs delete --workspace test"));
     }
 
     #[test]
@@ -3196,12 +3200,13 @@ role = "Chat"
                 services: vec![],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Custom");
+        let prompt = build_system_prompt(&config, "Custom", "test");
         assert!(prompt.contains("You are a custom bot."));
         assert!(prompt.contains("Workspace Docs (.apiari/docs/)"));
         assert!(prompt.contains("guide.md — User Guide"));
         assert!(prompt.contains("## Workspace Docs"));
-        assert!(prompt.contains("Create/update a doc"));
+        assert!(prompt.contains("hive docs list --workspace test"));
+        assert!(prompt.contains("hive docs write --workspace test"));
     }
 
     #[test]
@@ -3218,10 +3223,10 @@ role = "Chat"
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main");
+        let prompt = build_system_prompt(&config, "Main", "test");
         // Even without docs, management instructions should be present
         assert!(prompt.contains("## Workspace Docs"));
-        assert!(prompt.contains("Create/update a doc"));
+        assert!(prompt.contains("hive docs list --workspace test"));
         // But the docs index should NOT be present (no docs dir)
         assert!(!prompt.contains("Workspace Docs (.apiari/docs/)"));
     }
