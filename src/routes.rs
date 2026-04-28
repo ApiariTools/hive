@@ -579,20 +579,24 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          or when you need context about what was discussed before.\n"
     );
 
-    prompt.push_str(&hive_ref);
-    let stable = prompt.clone();
-
-    // Insert docs content before the hive reference section for the full prompt
-    if !docs_dynamic.is_empty() {
-        let insert_pos = stable.len() - hive_ref.len();
-        let mut full = String::with_capacity(stable.len() + docs_dynamic.len());
-        full.push_str(&stable[..insert_pos]);
-        full.push_str(&docs_dynamic);
-        full.push_str(&hive_ref);
-        BuiltPrompt { full, stable }
+    if docs_dynamic.is_empty() {
+        // No dynamic docs — stable and full are identical, no clone needed
+        prompt.push_str(&hive_ref);
+        BuiltPrompt {
+            stable: prompt.clone(),
+            full: prompt,
+        }
     } else {
-        let full = stable.clone();
-        BuiltPrompt { full, stable }
+        // Clone prompt (before hive_ref) as the base for stable,
+        // then build full by appending docs + hive_ref to the original prompt
+        let mut stable = prompt.clone();
+        stable.push_str(&hive_ref);
+        prompt.push_str(&docs_dynamic);
+        prompt.push_str(&hive_ref);
+        BuiltPrompt {
+            full: prompt,
+            stable,
+        }
     }
 }
 
