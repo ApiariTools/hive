@@ -3,7 +3,7 @@ use tokio::process::Child;
 use tracing::{info, warn};
 
 /// Resolve the TTS directory: try CWD first, then fall back to the executable's directory.
-fn find_tts_dir() -> Option<PathBuf> {
+pub(crate) fn find_tts_dir() -> Option<PathBuf> {
     // Try CWD first (normal dev usage)
     let cwd_tts = PathBuf::from("tts");
     if cwd_tts.join("server.py").exists() {

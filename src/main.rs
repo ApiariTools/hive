@@ -13,6 +13,7 @@ mod pr_feedback;
 mod pr_review;
 mod publish;
 mod routes;
+mod setup;
 mod stt;
 mod tick;
 mod tts;
@@ -48,6 +49,8 @@ enum Command {
     Publish(publish::PublishArgs),
     /// Manage workspace reference docs
     Docs(docs::DocsArgs),
+    /// Install voice dependencies (whisper STT + Kokoro TTS)
+    Setup,
 }
 
 #[tokio::main]
@@ -88,6 +91,9 @@ async fn main() -> Result<()> {
             }
             Command::Docs(args) => {
                 return docs::run(args, &config_dir);
+            }
+            Command::Setup => {
+                return setup::run();
             }
         }
     }
