@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 
@@ -191,6 +191,28 @@ describe("ChatPanel", () => {
       const play = screen.queryByLabelText("Play");
       expect(play).not.toBeInTheDocument();
     });
+  });
+
+  it("queues messages sent while loading and sends after loading completes", () => {
+    const onSend = vi.fn();
+    const { rerender } = render(<ChatPanel {...defaultProps} onSend={onSend} loading={true} loadingStatus="Thinking..." />);
+
+    // Send a message while bot is loading — should be queued, not sent
+    const textarea = screen.getByPlaceholderText(/Message Main/);
+    (textarea as HTMLTextAreaElement).value = "queued msg";
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByText("1 message queued")).toBeInTheDocument();
+
+    // Bot finishes — queued message should be sent
+    rerender(<ChatPanel {...defaultProps} onSend={onSend} loading={false} />);
+    expect(onSend).toHaveBeenCalledWith("queued msg", undefined);
+  });
+
+  it("input is not disabled while bot is responding", () => {
+    render(<ChatPanel {...defaultProps} loading={true} loadingStatus="Thinking..." />);
+    const textarea = screen.getByPlaceholderText(/Message Main/) as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(false);
   });
 
   it("clicking active play button stops and restores play", async () => {

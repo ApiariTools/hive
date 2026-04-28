@@ -160,6 +160,13 @@
   margin-top: 4px;
 }
 
+.queueIndicator {
+  font-size: 12px;
+  color: var(--accent);
+  margin-top: 4px;
+  font-style: italic;
+}
+
 .inputField {
   flex: 1;
   background: none;
