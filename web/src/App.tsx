@@ -265,15 +265,21 @@ export default function App() {
   useEffect(() => {
     if (!paletteOpen || workspaces.length === 0) return;
     let cancelled = false;
+    setOtherWorkspaceBots([]);
     const others = workspaces.filter((ws) => ws.name !== workspace);
-    Promise.all(
+    Promise.allSettled(
       others.map((ws) =>
         api.getBots(ws.name).then((bots) =>
           bots.map((b) => ({ workspace: ws.name, bot: b }))
-        ).catch(() => [] as CrossWorkspaceBot[])
+        )
       )
     ).then((results) => {
-      if (!cancelled) setOtherWorkspaceBots(results.flat());
+      if (!cancelled) {
+        const fulfilled = results
+          .filter((r): r is PromiseFulfilledResult<CrossWorkspaceBot[]> => r.status === "fulfilled")
+          .flatMap((r) => r.value);
+        setOtherWorkspaceBots(fulfilled);
+      }
     });
     return () => { cancelled = true; };
   }, [paletteOpen, workspaces, workspace]);
