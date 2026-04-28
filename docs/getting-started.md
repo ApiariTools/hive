@@ -138,8 +138,8 @@ prompt_file = "security-prompt.md"
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | yes | Display name in the UI |
-| `color` | yes | Hex color for the bot's avatar and UI elements |
-| `role` | yes | Role description — injected into the bot's system prompt |
+| `color` | no | Hex color for the bot's avatar (defaults to a fallback in the UI) |
+| `role` | no | Role description — injected into the bot's system prompt |
 | `provider` | yes | Which AI to use: `claude`, `codex`, or `gemini` |
 | `model` | no | Override the provider's default model |
 | `prompt_file` | no | Path to a markdown file that replaces the default system prompt |
@@ -173,6 +173,8 @@ provider = "claude"
 schedule_hours = 24
 proactive_prompt = "Summarize yesterday's git activity, open PRs, and any CI issues"
 ```
+
+> **Note:** Adding or removing `watch` or `schedule_hours` from a bot config requires restarting the daemon for the change to take effect. Chat-related config changes (role, model, prompt_file) are picked up automatically.
 
 ### Providers
 
@@ -266,9 +268,13 @@ Example structure:
 You can manage docs with the `hive docs` subcommand:
 
 ```bash
-hive docs add my-workspace path/to/doc.md
-hive docs list my-workspace
+hive docs list --workspace my-project
+hive docs read --workspace my-project api-schema.md
+hive docs write --workspace my-project overview.md --file /path/to/doc.md
+hive docs delete --workspace my-project overview.md
 ```
+
+The `write` and `delete` commands automatically git-commit the change in the workspace root.
 
 ## Swarm integration
 
@@ -288,11 +294,12 @@ Hive supports voice input (speech-to-text) and spoken bot responses (text-to-spe
 hive setup
 ```
 
-This installs:
-- **whisper** — for speech-to-text transcription (requires `ffmpeg`)
-- **Kokoro TTS** — for text-to-speech responses
+This runs three setup steps, each of which is skipped if already installed or if prerequisites are missing:
 
-Voice servers start automatically when you launch the daemon if they're set up.
+- **whisper-cpp** (STT) — installed via Homebrew. Skipped if `brew` is not available. Also downloads the `base.en` whisper model.
+- **Kokoro TTS** — creates a Python venv in the `tts/` directory of the Hive installation, installs pip requirements, and downloads the Kokoro model. Skipped if the `tts/` directory is not found (only present when building from source or in release bundles that include it).
+
+Voice servers start automatically when you launch the daemon if their dependencies are set up.
 
 You can configure TTS per-workspace in the config TOML:
 
