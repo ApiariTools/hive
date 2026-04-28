@@ -139,3 +139,50 @@ describe("Mobile auto-select", () => {
     Object.defineProperty(window, "innerWidth", { value: 1024, writable: true });
   });
 });
+
+describe("WebSocket message dedup", () => {
+  it("fetches conversations on WS message event instead of appending directly", async () => {
+    // Capture the WS callback so we can simulate events
+    let wsCallback: (event: Record<string, unknown>) => void = () => {};
+    (api.connectWebSocket as ReturnType<typeof vi.fn>).mockImplementation(
+      (cb: (event: Record<string, unknown>) => void) => {
+        wsCallback = cb;
+        return { close: vi.fn() };
+      },
+    );
+
+    await renderAndSelectBot("Main");
+
+    // Clear call counts from initial load
+    (api.getConversations as ReturnType<typeof vi.fn>).mockClear();
+
+    // Return a new message set to simulate a new message in DB
+    const updatedMsgs = [
+      { id: 1, workspace: "apiari", bot: "Main", role: "user", content: "hello", attachments: null, created_at: new Date().toISOString() },
+      { id: 2, workspace: "apiari", bot: "Main", role: "assistant", content: "Hi! How can I help?", attachments: null, created_at: new Date().toISOString() },
+      { id: 3, workspace: "apiari", bot: "Main", role: "user", content: "new message", attachments: null, created_at: new Date().toISOString() },
+    ];
+    (api.getConversations as ReturnType<typeof vi.fn>).mockResolvedValueOnce(updatedMsgs);
+
+    // Simulate a WS message event for the active bot
+    wsCallback({
+      type: "message",
+      workspace: "apiari",
+      bot: "Main",
+      role: "user",
+      content: "new message",
+    });
+
+    // Should trigger getConversations fetch (not a direct append)
+    await waitFor(() => {
+      expect(api.getConversations).toHaveBeenCalledWith("apiari", "Main", 30);
+    });
+
+    // The new message should appear exactly once
+    await waitFor(() => {
+      expect(screen.getByText("new message")).toBeInTheDocument();
+    });
+    const matches = screen.getAllByText("new message");
+    expect(matches).toHaveLength(1);
+  });
+});

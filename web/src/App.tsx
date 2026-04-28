@@ -64,7 +64,6 @@ export default function App() {
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [usage, setUsage] = useState<api.UsageData>({ installed: false, providers: [], updated_at: null });
   const lastMsgId = useRef<number>(0);
-  const nextTempId = useRef<number>(-1);
   const loadingRef = useRef(false);
   const tabHiddenRef = useRef(document.hidden);
 
@@ -118,23 +117,16 @@ export default function App() {
       if (event.type === "message") {
         // Refresh unread counts
         if (workspace) api.getUnread(workspace).then(setUnread);
-        // Append message directly instead of full refetch
+        // Trigger an immediate fetch instead of appending directly —
+        // this avoids duplicates from WS + poll both adding the same message
         if (event.workspace === workspace && event.bot === bot) {
-          const role = event.role as string;
-          const content = event.content as string;
-          if (role === "assistant" && !content.trim()) {
-            return;
-          }
-          const newMsg: Message = {
-            id: nextTempId.current--,
-            workspace: event.workspace as string,
-            bot: event.bot as string,
-            role,
-            content,
-            attachments: null,
-            created_at: new Date().toISOString(),
-          };
-          setMessages((prev) => [...prev, newMsg]);
+          api.getConversations(workspace, bot, 30).then((msgs) => {
+            const latestId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
+            if (latestId !== lastMsgId.current) {
+              lastMsgId.current = latestId;
+              setMessages(msgs);
+            }
+          });
         }
       }
     });
