@@ -158,6 +158,7 @@ export default function App() {
     setMessagesLoading(true);
     setLoading(false);
     setLoadingStatus(undefined);
+    setStreamingContent("");
     lastMsgId.current = 0;
     api.getConversations(workspace, bot, 30).then((msgs) => {
       if (cancelled) return;

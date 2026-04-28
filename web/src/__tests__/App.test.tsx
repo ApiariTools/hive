@@ -102,6 +102,43 @@ describe("Bot switching", () => {
   });
 });
 
+describe("Polling cancellation on bot switch", () => {
+  it("does not apply stale poll responses after switching bots", async () => {
+    const statusMock = api.getBotStatus as ReturnType<typeof vi.fn>;
+
+    // Make getBotStatus return a delayed promise that we control
+    let resolveStale: (v: { status: string; streaming_content: string; tool_name: null }) => void;
+    const stalePromise = new Promise<{ status: string; streaming_content: string; tool_name: null }>((r) => {
+      resolveStale = r;
+    });
+
+    // First getBotStatus call (Main's initial load) gets the delayed promise
+    statusMock.mockReturnValueOnce(stalePromise);
+
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Main")).toBeInTheDocument());
+
+    // Select Main bot — triggers initial load, getBotStatus gets stalePromise
+    await user.click(screen.getByText("Main"));
+    await waitFor(() => expect(screen.getByPlaceholderText(/Message Main/)).toBeInTheDocument());
+
+    // Switch to Customer bot before the delayed Main response resolves
+    // This triggers cleanup (cancelled=true) on Main's initial load effect
+    await user.click(screen.getByText("Customer"));
+    await waitFor(() => expect(screen.getByPlaceholderText(/Message Customer/)).toBeInTheDocument());
+
+    // Now resolve the stale status from the old Main bot context
+    resolveStale!({ status: "streaming", streaming_content: "stale content from Main", tool_name: null });
+
+    // Wait a tick for the promise to settle
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The stale streaming content should NOT appear in the Customer bot's view
+    expect(screen.queryByText("stale content from Main")).not.toBeInTheDocument();
+  });
+});
+
 describe("Workspace switching", () => {
   it("calls getBots with new workspace", async () => {
     const user = userEvent.setup();
