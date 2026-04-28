@@ -27,8 +27,8 @@ rust-embed = { version = "8", features = ["compression"] }
 mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
 apiari-claude-sdk = { path = "../claude-sdk", version = "0.2.0" }
-apiari-codex-sdk = { path = "../codex-sdk", version = "0.1.1" }
-apiari-gemini-sdk = { path = "../gemini-sdk", version = "0.1.0" }
+apiari-codex-sdk = { path = "../codex-sdk", version = "0.1.2" }
+apiari-gemini-sdk = { path = "../gemini-sdk", version = "0.2.0" }
 async-stream = "0.3"
 async-trait = "0.1"
 serde_json = "1"
@@ -36,7 +36,7 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1", features = ["io-util"] }
 toml = "0.8"
 tempfile = "3"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
