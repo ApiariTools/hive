@@ -3228,6 +3228,7 @@ role = "Chat"
             usage_cache: Default::default(),
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
+            stt_base_url: "http://localhost".to_string(),
         };
 
         let result = list_docs(State(state), Path("test".to_string())).await;
@@ -3262,6 +3263,7 @@ role = "Chat"
             usage_cache: Default::default(),
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
+            stt_base_url: "http://localhost".to_string(),
         };
 
         let result = list_docs(State(state), Path("test".to_string())).await;
@@ -3298,6 +3300,7 @@ role = "Chat"
             usage_cache: Default::default(),
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
+            stt_base_url: "http://localhost".to_string(),
         };
 
         let result = get_doc(
@@ -3337,6 +3340,7 @@ role = "Chat"
             usage_cache: Default::default(),
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
+            stt_base_url: "http://localhost".to_string(),
         };
 
         let result = get_doc(
@@ -3371,6 +3375,7 @@ role = "Chat"
             usage_cache: Default::default(),
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
+            stt_base_url: "http://localhost".to_string(),
         };
 
         let result = put_doc(
@@ -3415,6 +3420,7 @@ role = "Chat"
             usage_cache: Default::default(),
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
+            stt_base_url: "http://localhost".to_string(),
         };
 
         let result = delete_doc(
@@ -3450,6 +3456,7 @@ role = "Chat"
             usage_cache: Default::default(),
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
+            stt_base_url: "http://localhost".to_string(),
         };
 
         let result = delete_doc(
