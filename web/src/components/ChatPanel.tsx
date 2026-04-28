@@ -55,6 +55,15 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
     [loading, onSend],
   );
 
+  // Clear queue on bot switch so queued messages don't leak across bots
+  const prevBotRef = useRef(bot);
+  useEffect(() => {
+    if (prevBotRef.current !== bot) {
+      setMessageQueue([]);
+      prevBotRef.current = bot;
+    }
+  }, [bot]);
+
   // Drain queue when bot finishes responding
   const prevLoadingRef = useRef(loading);
   useEffect(() => {
@@ -403,6 +412,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
 
       <ChatInput
         placeholder={`Message ${bot}...`}
+        disabled={loading}
         onSend={handleSendOrQueue}
         voiceMode={voiceMode}
         triggerRecord={triggerRecord}
