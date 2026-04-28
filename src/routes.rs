@@ -1368,13 +1368,11 @@ async fn transcribe_audio(
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
+        && resp.status().is_success()
+        && let Ok(body) = resp.json::<serde_json::Value>().await
     {
-        if resp.status().is_success() {
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                let text = body["text"].as_str().unwrap_or("").trim().to_string();
-                return (StatusCode::OK, Json(serde_json::json!({ "text": text })));
-            }
-        }
+        let text = body["text"].as_str().unwrap_or("").trim().to_string();
+        return (StatusCode::OK, Json(serde_json::json!({ "text": text })));
     }
 
     // Fallback: whisper-cli (cold start, slower but works without server)
