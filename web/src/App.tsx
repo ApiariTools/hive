@@ -122,7 +122,7 @@ export default function App() {
         if (event.workspace === workspace && event.bot === bot) {
           api.getConversations(workspace, bot, 30).then((msgs) => {
             const latestId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
-            if (latestId !== lastMsgId.current) {
+            if (latestId > lastMsgId.current) {
               lastMsgId.current = latestId;
               setMessages(msgs);
             }
@@ -184,7 +184,7 @@ export default function App() {
     function poll() {
       const convP = api.getConversations(workspace, bot, 30).then((msgs) => {
         const latestId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
-        if (latestId !== lastMsgId.current) {
+        if (latestId > lastMsgId.current) {
           lastMsgId.current = latestId;
           setMessages(msgs);
         }

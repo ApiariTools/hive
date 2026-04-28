@@ -153,6 +153,11 @@ describe("WebSocket message dedup", () => {
 
     await renderAndSelectBot("Main");
 
+    // Wait for initial messages to render before clearing mocks
+    await waitFor(() => {
+      expect(screen.getByText("hello")).toBeInTheDocument();
+    });
+
     // Clear call counts from initial load
     (api.getConversations as ReturnType<typeof vi.fn>).mockClear();
 
