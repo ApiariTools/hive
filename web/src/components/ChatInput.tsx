@@ -1,5 +1,7 @@
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useCallback } from "react";
 import { Mic, Square, Paperclip, ArrowUp } from "lucide-react";
+import type { MicVAD } from "@ricky0123/vad-web";
+import { cleanTranscription, matchConfirmation, float32ToWav } from "../voice";
 import styles from "./ChatInput.module.css";
 
 export interface Attachment {
@@ -13,47 +15,415 @@ interface Props {
   disabled?: boolean;
   onSend: (text: string, attachments?: Attachment[]) => void;
   showAttachments?: boolean;
+  voiceMode?: boolean;
+  triggerRecord?: number;
+  playTts?: (url: string, onEnd?: () => void) => Promise<void>;
 }
 
-export function ChatInput({ placeholder, disabled, onSend, showAttachments = true }: Props) {
+const VOICE_CONFIRM_DELAY_MS = 5000;
+
+export function ChatInput({ placeholder, disabled, onSend, showAttachments = true, voiceMode, triggerRecord, playTts }: Props) {
+  // ── Text input state ──
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [micState, setMicState] = useState<"idle" | "recording" | "stopping" | "transcribing">("idle");
   const [hasText, setHasText] = useState(false);
+
+  // ── Mic/voice state ──
+  const [micState, setMicState] = useState<"idle" | "listening" | "transcribing">("idle");
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
+  const [partialText, setPartialText] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [silenceCountdown, setSilenceCountdown] = useState(0);
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const partialTextRef = useRef("");
+  const confirmingRef = useRef(false);
+  const isListeningRef = useRef(false);
+  const pendingTranscriptions = useRef(0);
+
+  // ── VAD refs ──
+  const vadRef = useRef<MicVAD | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const vizCtxRef = useRef<AudioContext | null>(null);
+
+  // ── Timers ──
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const didLongPress = useRef(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const animFrameRef = useRef<number>(0);
+  const voiceSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Waveform ──
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
   const smoothedBars = useRef<number[]>([]);
 
+  // ── Effects ──
+
+  // Waveform: simple interval-based drawing. Runs whenever canvas is visible.
+  // No start/stop/restart lifecycle — just draws if analyser exists, no-ops if not.
   useEffect(() => {
-    if (micState === "recording" && analyserRef.current) {
-      animFrameRef.current = requestAnimationFrame(drawWaveform);
-    }
-    return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    };
-  }, [micState]);
+    const id = setInterval(() => {
+      if (analyserRef.current && canvasRef.current) drawWaveform();
+    }, 1000 / 30); // 30fps
+    return () => clearInterval(id);
+  }, []);
+
+  // Cleanup on unmount
+  // Ignore speech when page is not visible (tab switched, app backgrounded)
+  const pageVisibleRef = useRef(true);
+  useEffect(() => {
+    function onVisibility() { pageVisibleRef.current = document.visibilityState === "visible"; }
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
 
   useEffect(() => {
     return () => {
-      mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
-      mediaStreamRef.current = null;
-      audioCtxRef.current?.close();
-      audioCtxRef.current = null;
-      if (longPressTimer.current) {
-        clearTimeout(longPressTimer.current);
-        longPressTimer.current = null;
-      }
+      vadRef.current?.destroy();
+      vadRef.current = null;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      vizCtxRef.current?.close();
+      vizCtxRef.current = null;
+      clearTimer(longPressTimer);
+      clearTimer(voiceSendTimerRef);
+      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     };
   }, []);
+
+  // Parent triggers recording (voice mode loop)
+  useEffect(() => {
+    if (triggerRecord && triggerRecord > 0 && micState === "idle") {
+      startListening();
+    }
+  }, [triggerRecord]);
+
+  // Track bot processing state — VAD stays running for waveform,
+  // but we ignore speech events while bot is thinking
+  const botThinkingRef = useRef(false);
+
+  useEffect(() => {
+    if (!voiceMode) return;
+    botThinkingRef.current = !!disabled;
+    if (!disabled && vadRef.current) {
+      isListeningRef.current = true;
+      setMicState("listening");
+    }
+  }, [disabled, voiceMode]);
+
+  // ── Timer helpers ──
+
+  function clearTimer(ref: React.MutableRefObject<ReturnType<typeof setTimeout> | null>) {
+    if (ref.current) { clearTimeout(ref.current); ref.current = null; }
+  }
+
+  // ── Voice mode confirmation ──
+
+  function resetVoiceSendTimer() {
+    clearTimer(voiceSendTimerRef);
+    // Clear any existing countdown
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setSilenceCountdown(0);
+
+    // Start countdown after 2 seconds of silence (visual feedback)
+    const countdownStart = VOICE_CONFIRM_DELAY_MS - 3000; // show countdown for last 3 seconds
+    voiceSendTimerRef.current = setTimeout(() => {
+      let remaining = 3;
+      setSilenceCountdown(remaining);
+      countdownIntervalRef.current = setInterval(() => {
+        remaining--;
+        setSilenceCountdown(remaining);
+        if (remaining <= 0) {
+          if (countdownIntervalRef.current) {
+            clearInterval(countdownIntervalRef.current);
+            countdownIntervalRef.current = null;
+          }
+          const text = partialTextRef.current.trim();
+          if (text && voiceMode && !confirmingRef.current) {
+            confirmingRef.current = true;
+            setConfirming(true);
+            if (playTts) {
+              playTts("/api/tts/speak?" + new URLSearchParams({ text: "Send?" }).toString());
+            }
+          }
+        }
+      }, 1000);
+    }, countdownStart);
+  }
+
+  function cancelCountdown() {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setSilenceCountdown(0);
+  }
+
+  async function handleConfirmation(audio: Float32Array) {
+    const blob = float32ToWav(audio, 16000);
+    try {
+      const form = new FormData();
+      form.append("audio", blob, "audio.wav");
+      const res = await fetch("/api/transcribe", { method: "POST", body: form });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.text) return;
+
+      const answer = cleanTranscription(data.text);
+      if (!answer) return;
+
+      const result = matchConfirmation(answer);
+      switch (result) {
+        case "yes":
+          if (partialTextRef.current.trim()) onSend(partialTextRef.current.trim());
+          clearPartial();
+          break;
+        case "no":
+        case "clear":
+          clearPartial();
+          break;
+        case "continue":
+          partialTextRef.current = partialTextRef.current
+            ? partialTextRef.current + " " + answer
+            : answer;
+          setPartialText(partialTextRef.current);
+          resetVoiceSendTimer();
+          break;
+      }
+    } catch {}
+    confirmingRef.current = false;
+    setConfirming(false);
+  }
+
+  function clearPartial() {
+    partialTextRef.current = "";
+    setPartialText("");
+    cancelCountdown();
+  }
+
+  // ── Transcription ──
+
+  async function transcribeChunk(audio: Float32Array) {
+    const blob = float32ToWav(audio, 16000);
+    pendingTranscriptions.current++;
+    try {
+      const form = new FormData();
+      form.append("audio", blob, "audio.wav");
+      const res = await fetch("/api/transcribe", { method: "POST", body: form });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.text) {
+        const cleaned = cleanTranscription(data.text);
+        if (cleaned) {
+          // Check if user said "send" at the end — auto-send without confirmation
+          const sendMatch = cleaned.match(/^(.+?)\s+send[.!]?$/i);
+          if (voiceMode && sendMatch) {
+            const content = partialTextRef.current
+              ? partialTextRef.current + " " + sendMatch[1]
+              : sendMatch[1];
+            onSend(content.trim());
+            clearPartial();
+            cancelCountdown();
+            clearTimer(voiceSendTimerRef);
+          } else {
+            partialTextRef.current = partialTextRef.current
+              ? partialTextRef.current + " " + cleaned
+              : cleaned;
+            setPartialText(partialTextRef.current);
+            if (voiceMode) {
+              cancelCountdown();
+              resetVoiceSendTimer();
+            }
+          }
+        }
+      }
+    } catch {}
+    finally {
+      pendingTranscriptions.current--;
+      if (!isListeningRef.current && pendingTranscriptions.current === 0) {
+        finalize();
+      }
+    }
+  }
+
+  function finalize() {
+    clearTimer(voiceSendTimerRef);
+    confirmingRef.current = false;
+    setConfirming(false);
+    const text = partialTextRef.current.trim();
+    if (text) {
+      if (voiceMode) {
+        onSend(text);
+      } else {
+        const el = textareaRef.current;
+        if (el) {
+          el.value = el.value ? el.value + " " + text : text;
+          autoGrow();
+        }
+      }
+    }
+    clearPartial();
+    setMicState("idle");
+  }
+
+  // ── VAD lifecycle ──
+
+  async function startListening() {
+    setTranscribeError(null);
+    clearPartial();
+
+    try {
+      // Resume existing VAD (fast path)
+      if (vadRef.current) {
+        await vadRef.current.start();
+        isListeningRef.current = true;
+        setMicState("listening");
+  
+        return;
+      }
+
+      // First time: acquire mic + load VAD model (slow)
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+
+      const { MicVAD } = await import("@ricky0123/vad-web");
+      const vad = await MicVAD.new({
+        model: "legacy",
+        modelURL: "/silero_vad_legacy.onnx",
+        workletURL: "/vad.worklet.bundle.min.js",
+        onnxWASMBasePath: "/",
+        positiveSpeechThreshold: 0.8,
+        negativeSpeechThreshold: 0.5,
+        minSpeechFrames: 5,
+        redemptionMs: 600,
+        getStream: async () => stream,
+        onSpeechEnd: (audio) => {
+          // Ignore speech while bot is thinking, page hidden, or TTS playing
+          if (botThinkingRef.current || !pageVisibleRef.current) return;
+          if (confirmingRef.current) {
+            handleConfirmation(audio);
+          } else {
+            transcribeChunk(audio);
+          }
+        },
+        onSpeechStart: () => {},
+      });
+
+      vadRef.current = vad;
+
+      // Set up waveform analyser on its OWN AudioContext (independent from VAD —
+      // VAD pausing won't kill the analyser)
+      const vizCtx = new AudioContext();
+      vizCtxRef.current = vizCtx;
+      const source = vizCtx.createMediaStreamSource(stream);
+      const analyser = vizCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      await vad.start();
+      isListeningRef.current = true;
+      setMicState("listening");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setTranscribeError(
+        msg.includes("Permission") || msg.includes("NotAllowed")
+          ? "Microphone access denied"
+          : `Voice init failed: ${msg}`
+      );
+    }
+  }
+
+  async function stopListening() {
+    isListeningRef.current = false;
+    if (vadRef.current) await vadRef.current.pause();
+
+    if (!voiceMode) {
+      analyserRef.current = null;
+      vizCtxRef.current?.close();
+      vizCtxRef.current = null;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      if (vadRef.current) { await vadRef.current.destroy(); vadRef.current = null; }
+    }
+
+    if (pendingTranscriptions.current > 0) {
+      setMicState("transcribing");
+    } else {
+      finalize();
+    }
+  }
+
+  // ── Waveform ──
+
+  function drawWaveform() {
+    const canvas = canvasRef.current;
+    const analyser = analyserRef.current;
+    if (!canvas || !analyser) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+
+    const w = rect.width;
+    const h = rect.height;
+    const freqData = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(freqData);
+
+    const halfCount = 12;
+    const usableBins = Math.floor(freqData.length * 0.4);
+    if (smoothedBars.current.length !== halfCount) {
+      smoothedBars.current = new Array(halfCount).fill(0);
+    }
+
+    ctx.clearRect(0, 0, w, h);
+    const totalBars = halfCount * 2;
+    const gap = 3;
+    const barWidth = (w - gap * (totalBars - 1)) / totalBars;
+    const centerY = h / 2;
+
+    for (let i = 0; i < halfCount; i++) {
+      const startBin = Math.floor(Math.pow(i / halfCount, 1.5) * usableBins);
+      const endBin = Math.floor(Math.pow((i + 1) / halfCount, 1.5) * usableBins);
+      const binCount = Math.max(1, endBin - startBin);
+      let sum = 0;
+      for (let j = startBin; j < startBin + binCount; j++) sum += freqData[j];
+      const raw = sum / binCount / 255;
+      const gated = Math.max(0, raw - 0.2);
+      const scaled = Math.pow(gated / 0.8, 0.9) * 1.4;
+      const target = Math.min(scaled, 1.0);
+      const prev = smoothedBars.current[i];
+      smoothedBars.current[i] = target > prev
+        ? prev + (target - prev) * 0.7
+        : prev + (target - prev) * 0.25;
+    }
+
+    for (let i = 0; i < halfCount; i++) {
+      const barH = Math.max(4, 4 + smoothedBars.current[i] * (h - 8));
+      ctx.fillStyle = "#e85555";
+
+      const xRight = (halfCount + i) * (barWidth + gap);
+      ctx.beginPath();
+      ctx.roundRect(xRight, centerY - barH / 2, barWidth, barH, 2);
+      ctx.fill();
+
+      const xLeft = (halfCount - 1 - i) * (barWidth + gap);
+      ctx.beginPath();
+      ctx.roundRect(xLeft, centerY - barH / 2, barWidth, barH, 2);
+      ctx.fill();
+    }
+
+  }
+
+  // ── Text input helpers ──
 
   function send() {
     const el = textareaRef.current;
@@ -76,10 +446,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   }
 
   function handleFiles(files: FileList | null) {
@@ -88,8 +455,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
       const reader = new FileReader();
       reader.onload = () => {
         setAttachments((prev) => [
-          ...prev,
-          { name: file.name, type: file.type, dataUrl: reader.result as string },
+          ...prev, { name: file.name, type: file.type, dataUrl: reader.result as string },
         ]);
       };
       reader.readAsDataURL(file);
@@ -100,169 +466,27 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function stopStreamTracks() {
-    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    analyserRef.current = null;
-    audioCtxRef.current?.close();
-    audioCtxRef.current = null;
-  }
-
-  function drawWaveform() {
-    const canvas = canvasRef.current;
-    const analyser = analyserRef.current;
-    if (!canvas || !analyser) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
-
-    const freqData = new Uint8Array(analyser.frequencyBinCount);
-    analyser.getByteFrequencyData(freqData);
-
-    const halfCount = 12;
-    const usableBins = Math.floor(freqData.length * 0.4);
-
-    if (smoothedBars.current.length !== halfCount) {
-      smoothedBars.current = new Array(halfCount).fill(0);
-    }
-
-    ctx.clearRect(0, 0, w, h);
-
-    const totalBars = halfCount * 2;
-    const gap = 3;
-    const barWidth = (w - gap * (totalBars - 1)) / totalBars;
-    const centerY = h / 2;
-
-    for (let i = 0; i < halfCount; i++) {
-      const startBin = Math.floor(Math.pow(i / halfCount, 1.5) * usableBins);
-      const endBin = Math.floor(Math.pow((i + 1) / halfCount, 1.5) * usableBins);
-      const binCount = Math.max(1, endBin - startBin);
-
-      let sum = 0;
-      for (let j = startBin; j < startBin + binCount; j++) {
-        sum += freqData[j];
-      }
-      const raw = sum / binCount / 255;
-
-      const gated = Math.max(0, raw - 0.2);
-      const scaled = Math.pow(gated / 0.8, 0.9) * 1.4;
-      const target = Math.min(scaled, 1.0);
-
-      const prev = smoothedBars.current[i];
-      smoothedBars.current[i] = target > prev
-        ? prev + (target - prev) * 0.7
-        : prev + (target - prev) * 0.25;
-    }
-
-    for (let i = 0; i < halfCount; i++) {
-      const barH = Math.max(4, 4 + smoothedBars.current[i] * (h - 8));
-
-      const rightIdx = halfCount + i;
-      const xRight = rightIdx * (barWidth + gap);
-      ctx.fillStyle = "#e85555";
-      ctx.beginPath();
-      ctx.roundRect(xRight, centerY - barH / 2, barWidth, barH, 2);
-      ctx.fill();
-
-      const leftIdx = halfCount - 1 - i;
-      const xLeft = leftIdx * (barWidth + gap);
-      ctx.beginPath();
-      ctx.roundRect(xLeft, centerY - barH / 2, barWidth, barH, 2);
-      ctx.fill();
-    }
-
-    animFrameRef.current = requestAnimationFrame(drawWaveform);
-  }
-
-  async function startRecording() {
-    setTranscribeError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-
-      audioCtxRef.current?.close();
-      const audioCtx = new AudioContext();
-      audioCtxRef.current = audioCtx;
-      const source = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
-      mediaRecorder.onstop = async () => {
-        stopStreamTracks();
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        await transcribeAudio(blob);
-      };
-
-      mediaRecorder.start();
-      setMicState("recording");
-    } catch {
-      stopStreamTracks();
-      setTranscribeError("Microphone access denied");
-    }
-  }
-
-  function stopRecording() {
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state === "inactive") return;
-    setMicState("stopping");
-    recorder.stop();
-  }
-
-  async function transcribeAudio(blob: Blob) {
-    setMicState("transcribing");
-    setTranscribeError(null);
-    try {
-      const form = new FormData();
-      form.append("audio", blob, "audio.webm");
-      const res = await fetch("/api/transcribe", { method: "POST", body: form });
-      if (!res.ok) {
-        let msg = `Server error (${res.status})`;
-        try { const data = await res.json(); if (data.error) msg = data.error; } catch {}
-        setTranscribeError(msg);
-        return;
-      }
-      const data = await res.json();
-      if (data.error) {
-        setTranscribeError(data.error);
-      } else if (data.text) {
-        const el = textareaRef.current;
-        if (el) {
-          const current = el.value;
-          el.value = current ? current + " " + data.text : data.text;
-          autoGrow();
-        }
-      }
-    } catch {
-      setTranscribeError("Transcription failed");
-    } finally {
-      setMicState("idle");
-    }
-  }
+  // ── Render ──
 
   return (
     <div className={styles.inputArea}>
-      {micState === "recording" && (
-        <canvas ref={canvasRef} className={styles.waveform} />
+      {(voiceMode || micState === "listening" || micState === "transcribing") && (
+        <>
+          <canvas ref={canvasRef} className={styles.waveform} />
+          {partialText && (
+            <div className={styles.partialText}>
+              {partialText}
+              {silenceCountdown > 0 && !confirming && (
+                <span className={styles.countdown}>{silenceCountdown}</span>
+              )}
+              {confirming && (
+                <span className={styles.confirmPrompt}>
+                  Say "yes" to send, "no" to keep editing, or "clear" to start over
+                </span>
+              )}
+            </div>
+          )}
+        </>
       )}
       {showAttachments && attachments.length > 0 && (
         <div className={styles.attachmentPreview}>
@@ -273,12 +497,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
               ) : (
                 <span className={styles.attachmentName}>{a.name}</span>
               )}
-              <button
-                type="button"
-                className={styles.attachmentRemove}
-                aria-label={`Remove ${a.name}`}
-                onClick={() => removeAttachment(i)}
-              >
+              <button type="button" className={styles.attachmentRemove} aria-label={`Remove ${a.name}`} onClick={() => removeAttachment(i)}>
                 &times;
               </button>
             </div>
@@ -288,89 +507,55 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
       <div className={styles.inputRow}>
         {showAttachments && (
           <>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
+            <input ref={fileInputRef} type="file" multiple
               accept="image/*,.pdf,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.rs,.go,.rb,.swift"
-              style={{ display: "none" }}
-              onChange={(e) => handleFiles(e.target.files)}
-            />
-            <button
-              type="button"
-              className={styles.attachBtn}
-              aria-label="Attach file"
-              onClick={() => fileInputRef.current?.click()}
-            >
+              style={{ display: "none" }} onChange={(e) => handleFiles(e.target.files)} />
+            <button type="button" className={styles.attachBtn} aria-label="Attach file" onClick={() => fileInputRef.current?.click()}>
               <Paperclip size={16} />
             </button>
           </>
         )}
-        <textarea
-          ref={textareaRef}
-          className={styles.inputField}
-          placeholder={placeholder}
-          rows={1}
-          readOnly={disabled}
-          enterKeyHint="send"
-          onInput={autoGrow}
-          onKeyDown={handleKeyDown}
-        />
-        {micState === "recording" ? (
-          <button
-            type="button"
-            className={`${styles.actionBtn} ${styles.micRecording}`}
-            aria-label="Stop recording"
-            onClick={stopRecording}
-            onTouchEnd={(e) => { e.preventDefault(); stopRecording(); }}
-          >
+        <textarea ref={textareaRef} className={styles.inputField} placeholder={placeholder}
+          rows={1} readOnly={disabled} enterKeyHint="send" onInput={autoGrow} onKeyDown={handleKeyDown} />
+        {micState === "listening" ? (
+          <button type="button" className={`${styles.actionBtn} ${styles.micRecording}`} aria-label="Stop listening"
+            onClick={stopListening} onTouchEnd={(e) => { e.preventDefault(); stopListening(); }}>
             <Square size={16} />
           </button>
-        ) : micState === "transcribing" || micState === "stopping" ? (
-          <button type="button" className={styles.actionBtn} aria-label="Transcribing" disabled>
-            ...
-          </button>
+        ) : micState === "transcribing" ? (
+          <button type="button" className={styles.actionBtn} aria-label="Transcribing" disabled>...</button>
         ) : (
-          <button
-            type="button"
+          <button type="button"
             className={`${styles.actionBtn} ${hasText || attachments.length > 0 ? styles.actionBtnSend : ""}`}
             aria-label={hasText || attachments.length > 0 ? "Send message" : "Record voice"}
             disabled={disabled}
             onMouseDown={(e) => {
               e.preventDefault();
               didLongPress.current = false;
-              longPressTimer.current = setTimeout(() => {
-                didLongPress.current = true;
-                startRecording();
-              }, 500);
+              longPressTimer.current = setTimeout(() => { didLongPress.current = true; startListening(); }, 500);
             }}
             onMouseUp={() => {
-              if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
-              if (didLongPress.current) { stopRecording(); return; }
-              if (hasText || attachments.length > 0) { send(); } else { startRecording(); }
+              clearTimer(longPressTimer);
+              if (didLongPress.current) { stopListening(); return; }
+              if (hasText || attachments.length > 0) { send(); } else { startListening(); }
             }}
-            onMouseLeave={() => {
-              if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
-            }}
+            onMouseLeave={() => clearTimer(longPressTimer)}
             onTouchStart={() => {
               didLongPress.current = false;
-              longPressTimer.current = setTimeout(() => {
-                didLongPress.current = true;
-                startRecording();
-              }, 500);
+              longPressTimer.current = setTimeout(() => { didLongPress.current = true; startListening(); }, 500);
             }}
             onTouchEnd={(e) => {
               e.preventDefault();
-              if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
-              if (didLongPress.current) { stopRecording(); return; }
-              if (hasText || attachments.length > 0) { send(); } else { startRecording(); }
+              clearTimer(longPressTimer);
+              if (didLongPress.current) { stopListening(); return; }
+              if (hasText || attachments.length > 0) { send(); } else { startListening(); }
             }}
           >
             {hasText || attachments.length > 0 ? <ArrowUp size={18} /> : <Mic size={16} />}
           </button>
         )}
       </div>
-      {micState === "transcribing" && <div className={styles.transcribeStatus}>Transcribing...</div>}
+      {micState === "transcribing" && !partialText && <div className={styles.transcribeStatus}>Transcribing...</div>}
       {transcribeError && <div className={styles.transcribeError}>{transcribeError}</div>}
     </div>
   );

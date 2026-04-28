@@ -7,6 +7,7 @@ pub mod pr_feedback;
 pub mod pr_review;
 pub mod publish;
 pub mod routes;
+pub mod stt;
 pub mod tick;
 pub mod tts;
 pub mod usage;

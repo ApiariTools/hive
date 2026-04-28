@@ -53,6 +53,7 @@ fn test_app_with_tts_url(tts_base_url: &str) -> (axum::Router, tempfile::TempDir
         Default::default(),
         reqwest::Client::new(),
         tts_base_url.to_string(),
+        "http://127.0.0.1:4202".to_string(),
     );
     (app, dir)
 }

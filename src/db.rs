@@ -189,6 +189,20 @@ impl Db {
         Ok(rows)
     }
 
+    pub fn get_message_content(&self, message_id: i64) -> Result<Option<String>> {
+        let conn = self.reader()?;
+        let result = conn.query_row(
+            "SELECT content FROM conversations WHERE id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(content) => Ok(Some(content)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn get_session_id(
         &self,
         workspace: &str,

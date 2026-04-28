@@ -36,6 +36,39 @@
   white-space: nowrap;
 }
 
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voiceModeBtn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-faint);
+  padding: 6px 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.voiceModeBtn:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+
+.voiceModeActive {
+  color: var(--accent);
+  border-color: var(--accent);
+  animation: pulse-voice 2s ease-in-out infinite;
+}
+
+@keyframes pulse-voice {
+  0%, 100% { border-color: var(--accent); }
+  50% { border-color: transparent; }
+}
+
 .workersBtn {
   display: none;
   background: none;
@@ -254,16 +287,31 @@
 .playBtn {
   background: none;
   border: none;
-  color: var(--text-faint);
+  color: var(--accent);
   padding: 2px 4px;
   cursor: pointer;
   margin-left: 6px;
   display: inline-flex;
   align-items: center;
+  opacity: 0.7;
 }
 
 .playBtn:hover {
-  color: var(--text);
+  opacity: 1;
+}
+
+.playBtnActive {
+  color: var(--red);
+  opacity: 1;
+}
+
+.ttsSpinner {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .cancelBtn {

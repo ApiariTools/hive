@@ -31,12 +31,13 @@ class TTSHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Invalid JSON")
             return
         text = body.get("text", "")
-        voice = body.get("voice", "am_echo")
+        voice = body.get("voice", "bf_emma")
+        speed = float(body.get("speed", 1.5))
         if not text:
             self.send_error(400, "Missing text")
             return
 
-        samples, sample_rate = kokoro.create(text, voice=voice, speed=1.0)
+        samples, sample_rate = kokoro.create(text, voice=voice, speed=speed)
 
         buf = io.BytesIO()
         sf.write(buf, samples, sample_rate, format="WAV")

@@ -86,7 +86,8 @@ description = ""
 # proactive_prompt = "Review recent PRs and summarize trends"
 
 # Voice (optional):
-# tts_voice = "am_echo"
+# tts_voice = "af_nova"
+# tts_speed = 1.2
 "##,
             root = root_escaped,
             name = name_escaped,

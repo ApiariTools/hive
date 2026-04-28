@@ -1,6 +1,7 @@
 export interface Workspace {
   name: string;
   tts_voice?: string;
+  tts_speed?: number;
 }
 
 export interface Bot {

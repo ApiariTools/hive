@@ -12,6 +12,7 @@ mod pr_feedback;
 mod pr_review;
 mod publish;
 mod routes;
+mod stt;
 mod tick;
 mod tts;
 mod usage;
@@ -135,8 +136,9 @@ async fn main() -> Result<()> {
 
     tokio::spawn(engine.run(db.clone()));
 
-    // Auto-start TTS server if set up
+    // Auto-start TTS and STT servers if set up
     let _tts_child = tts::start_tts_server().await;
+    let _stt_child = stt::start_stt_server().await;
 
     let event_hub = events::EventHub::new();
     let app = routes::router(db, &config_dir, event_hub, pr_review_cache, usage_cache);

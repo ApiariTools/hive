@@ -11,3 +11,10 @@ class MockWebSocket {
   send() {}
 }
 (globalThis as unknown as Record<string, unknown>).WebSocket = MockWebSocket;
+
+// Mock speechSynthesis (not available in jsdom)
+(globalThis as unknown as Record<string, unknown>).speechSynthesis = {
+  speak: () => {},
+  cancel: () => {},
+  getVoices: () => [],
+};

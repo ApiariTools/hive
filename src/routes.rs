@@ -29,6 +29,7 @@ pub struct AppState {
     pub usage_cache: UsageCache,
     pub http_client: reqwest::Client,
     pub tts_base_url: String,
+    pub stt_base_url: String,
 }
 
 pub fn router(
@@ -46,6 +47,7 @@ pub fn router(
         usage_cache,
         reqwest::Client::new(),
         "http://127.0.0.1:4201".to_string(),
+        "http://127.0.0.1:4202".to_string(),
     )
 }
 
@@ -57,6 +59,7 @@ pub fn router_with_http_client(
     usage_cache: UsageCache,
     http_client: reqwest::Client,
     tts_base_url: String,
+    stt_base_url: String,
 ) -> Router {
     let state = AppState {
         db,
@@ -66,6 +69,7 @@ pub fn router_with_http_client(
         usage_cache,
         http_client,
         tts_base_url,
+        stt_base_url,
     };
 
     Router::new()
@@ -94,6 +98,8 @@ pub fn router_with_http_client(
         )
         .route("/api/transcribe", post(transcribe_audio))
         .route("/api/tts", post(text_to_speech))
+        .route("/api/tts/speak", get(tts_speak))
+        .route("/api/tts/{message_id}", get(tts_for_message))
         .route("/api/workspaces/{workspace}/unread", get(get_unread))
         .route("/api/workspaces/{workspace}/seen/{bot}", post(mark_seen))
         .route("/api/usage", get(get_usage))
@@ -127,10 +133,14 @@ async fn list_workspaces(State(state): State<AppState>) -> Json<Vec<WorkspaceInf
                 && let Some(name) = path.file_stem().and_then(|s| s.to_str())
             {
                 let config = load_workspace_config(&path);
-                let tts_voice = config.workspace.and_then(|w| w.tts_voice);
+                let (tts_voice, tts_speed) = config
+                    .workspace
+                    .map(|w| (w.tts_voice, w.tts_speed))
+                    .unwrap_or((None, None));
                 workspaces.push(WorkspaceInfo {
                     name: name.to_string(),
                     tts_voice,
+                    tts_speed,
                 });
             }
         }
@@ -145,6 +155,8 @@ struct WorkspaceInfo {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     tts_voice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tts_speed: Option<f32>,
 }
 
 // ── Bots ──
@@ -228,6 +240,7 @@ struct WorkspaceInfo_ {
     name: Option<String>,
     description: Option<String>,
     tts_voice: Option<String>,
+    tts_speed: Option<f32>,
 }
 
 fn load_workspace_config(path: &std::path::Path) -> WorkspaceConfig {
@@ -488,7 +501,8 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str) -> String {
          root = \"/path/to/project\"    # workspace root directory\n\
          name = \"my-workspace\"        # display name\n\
          description = \"...\"          # optional description\n\
-         tts_voice = \"am_echo\"        # TTS voice (optional)\n\n\
+         tts_voice = \"af_nova\"         # TTS voice (optional)\n\
+         tts_speed = 1.2              # TTS speed multiplier (optional, default 1.2)\n\n\
          [[bots]]\n\
          name = \"BotName\"             # bot display name\n\
          color = \"#f5c542\"            # hex color for UI\n\
@@ -1306,42 +1320,23 @@ fn transcribe_err(msg: impl Into<String>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "error": msg.into() }))
 }
 
-async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_json::Value>) {
-    // Stream audio field directly to a temp file to avoid buffering in memory
-    let tmp_dir = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                transcribe_err("failed to create temp dir"),
-            );
-        }
-    };
-    let audio_path = tmp_dir.path().join("audio.webm");
-
+async fn transcribe_audio(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Read audio bytes from multipart
+    let mut audio_bytes = Vec::new();
+    let mut filename = "audio.webm".to_string();
     let mut found_audio = false;
+
     while let Ok(Some(mut field)) = multipart.next_field().await {
         if field.name() == Some("audio") {
             found_audio = true;
-            let mut file = match tokio::fs::File::create(&audio_path).await {
-                Ok(f) => f,
-                Err(_) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        transcribe_err("failed to create audio file"),
-                    );
-                }
-            };
+            if let Some(name) = field.file_name() {
+                filename = name.to_string();
+            }
             while let Ok(Some(chunk)) = field.chunk().await {
-                if tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
-                    .await
-                    .is_err()
-                {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        transcribe_err("failed to write audio chunk"),
-                    );
-                }
+                audio_bytes.extend_from_slice(&chunk);
             }
             break;
         }
@@ -1353,17 +1348,64 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
         );
     }
 
-    // Convert webm/opus to wav (whisper needs wav)
+    // Try whisper-server first (fast path — model already loaded)
+    let stt_url = format!("{}/inference", state.stt_base_url.trim_end_matches('/'));
+    let part = reqwest::multipart::Part::bytes(audio_bytes.clone())
+        .file_name(filename.clone())
+        .mime_str("audio/webm")
+        .unwrap_or_else(|_| {
+            reqwest::multipart::Part::bytes(audio_bytes.clone()).file_name(filename.clone())
+        });
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("response_format", "json")
+        .text("temperature", "0.0");
+
+    if let Ok(resp) = state
+        .http_client
+        .post(&stt_url)
+        .multipart(form)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                let text = body["text"].as_str().unwrap_or("").trim().to_string();
+                return (StatusCode::OK, Json(serde_json::json!({ "text": text })));
+            }
+        }
+    }
+
+    // Fallback: whisper-cli (cold start, slower but works without server)
+    let tmp_dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                transcribe_err("failed to create temp dir"),
+            );
+        }
+    };
+
+    let audio_path = tmp_dir.path().join("audio.webm");
+    if tokio::fs::write(&audio_path, &audio_bytes).await.is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            transcribe_err("failed to write audio file"),
+        );
+    }
+
+    // Convert to wav
     let wav_path = tmp_dir.path().join("audio.wav");
-    let convert = tokio::process::Command::new("ffmpeg")
+    match tokio::process::Command::new("ffmpeg")
         .args(["-i"])
         .arg(&audio_path)
         .args(["-ar", "16000", "-ac", "1", "-y"])
         .arg(&wav_path)
         .output()
-        .await;
-
-    match convert {
+        .await
+    {
         Ok(o) if !o.status.success() => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             return (
@@ -1386,10 +1428,8 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
         _ => {}
     }
 
-    // Run whisper-cli on the wav file
     let home = std::env::var("HOME").unwrap_or_default();
     let model_path = format!("{home}/.local/share/whisper/ggml-base.en.bin");
-
     let output = match tokio::process::Command::new("whisper-cli")
         .arg("-m")
         .arg(&model_path)
@@ -1424,7 +1464,6 @@ async fn transcribe_audio(mut multipart: Multipart) -> (StatusCode, Json<serde_j
         );
     }
 
-    // Read the output text file
     let txt_path = tmp_dir.path().join("audio.txt");
     match tokio::fs::read_to_string(&txt_path).await {
         Ok(text) => {
@@ -1489,6 +1528,105 @@ async fn text_to_speech(
             "TTS server not running. Run: cd tts && ./setup.sh && source .venv/bin/activate && python server.py",
         )
             .into_response(),
+    }
+}
+
+async fn tts_speak(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let text = params.get("text").cloned().unwrap_or_default();
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing text").into_response();
+    }
+    if text.len() > TTS_MAX_TEXT_LENGTH {
+        return (StatusCode::BAD_REQUEST, "Text too long").into_response();
+    }
+
+    let voice = params.get("voice").cloned().unwrap_or_default();
+    let speed = params.get("speed").and_then(|s| s.parse::<f32>().ok());
+    let mut body = serde_json::json!({ "text": text });
+    if !voice.is_empty() {
+        body["voice"] = serde_json::Value::String(voice);
+    }
+    if let Some(spd) = speed {
+        body["speed"] = serde_json::json!(spd);
+    }
+
+    match state
+        .http_client
+        .post(format!("{}/tts", state.tts_base_url.trim_end_matches('/')))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+            Ok(bytes) => (StatusCode::OK, [("content-type", "audio/wav")], bytes).into_response(),
+            Err(_) => (StatusCode::BAD_GATEWAY, "Failed to read TTS response").into_response(),
+        },
+        Ok(_) => (StatusCode::BAD_GATEWAY, "TTS server error").into_response(),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "TTS server not running").into_response(),
+    }
+}
+
+async fn tts_for_message(
+    State(state): State<AppState>,
+    Path(message_id): Path<i64>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let content = match state.db.get_message_content(message_id) {
+        Ok(Some(c)) => c,
+        Ok(None) => return (StatusCode::NOT_FOUND, "Message not found").into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "DB error").into_response(),
+    };
+
+    if content.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Empty message").into_response();
+    }
+
+    let text = if content.len() > TTS_MAX_TEXT_LENGTH {
+        &content[..TTS_MAX_TEXT_LENGTH]
+    } else {
+        &content
+    };
+
+    let voice = params.get("voice").cloned().unwrap_or_default();
+    let speed = params.get("speed").and_then(|s| s.parse::<f32>().ok());
+    let mut body = serde_json::json!({ "text": text });
+    if !voice.is_empty() {
+        body["voice"] = serde_json::Value::String(voice);
+    }
+    if let Some(spd) = speed {
+        body["speed"] = serde_json::json!(spd);
+    }
+
+    match state
+        .http_client
+        .post(format!("{}/tts", state.tts_base_url.trim_end_matches('/')))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+            Ok(bytes) => (
+                StatusCode::OK,
+                [
+                    ("content-type", "audio/wav"),
+                    ("cache-control", "public, max-age=3600"),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Err(_) => (StatusCode::BAD_GATEWAY, "Failed to read TTS response").into_response(),
+        },
+        Ok(_) => (StatusCode::BAD_GATEWAY, "TTS server error").into_response(),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "TTS server not running").into_response(),
     }
 }
 
