@@ -6,7 +6,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { ReposPanel } from "./components/ReposPanel";
 import { WorkerDetail } from "./components/WorkerDetail";
 import { DocsPanel } from "./components/DocsPanel";
-import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData } from "./types";
+import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData, CrossWorkspaceBot } from "./types";
 import * as api from "./api";
 
 // ── Route parsing ──
@@ -60,6 +60,7 @@ export default function App() {
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [otherWorkspaceBots, setOtherWorkspaceBots] = useState<CrossWorkspaceBot[]>([]);
   const [docsOpen, setDocsOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [usage, setUsage] = useState<api.UsageData>({ installed: false, providers: [], updated_at: null });
@@ -260,6 +261,19 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  // Fetch bots for other workspaces when palette opens
+  useEffect(() => {
+    if (!paletteOpen || workspaces.length === 0) return;
+    const others = workspaces.filter((ws) => ws.name !== workspace);
+    Promise.all(
+      others.map((ws) =>
+        api.getBots(ws.name).then((bots) =>
+          bots.map((b) => ({ workspace: ws.name, bot: b }))
+        )
+      )
+    ).then((results) => setOtherWorkspaceBots(results.flat()));
+  }, [paletteOpen, workspaces, workspace]);
+
   // Cmd+K: command palette, Cmd+J: focus chat
   useEffect(() => {
     function handleGlobalKeyDown(e: KeyboardEvent) {
@@ -285,6 +299,16 @@ export default function App() {
     setLoading(false);
     setLoadingStatus(undefined);
   }, [isMobile]);
+
+  const handleSelectWorkspaceBot = useCallback((ws: string, botName: string) => {
+    setWorkspace(ws);
+    setBot(botName);
+    setWorkerId(null);
+    setDocsOpen(false);
+    setMenuOpen(false);
+    setLoading(false);
+    setLoadingStatus(undefined);
+  }, []);
 
   const handleSelectBot = useCallback((name: string) => {
     setBot(name);
@@ -434,6 +458,8 @@ export default function App() {
         onSelectWorkspace={handleSelectWorkspace}
         onSelectBot={handleSelectBot}
         onSelectWorker={handleSelectWorker}
+        otherWorkspaceBots={otherWorkspaceBots}
+        onSelectWorkspaceBot={handleSelectWorkspaceBot}
       />
     </>
   );

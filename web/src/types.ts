@@ -59,6 +59,11 @@ export interface WorkerMessage {
   content: string;
 }
 
+export interface CrossWorkspaceBot {
+  workspace: string;
+  bot: Bot;
+}
+
 export interface Doc {
   name: string;
   title: string;
