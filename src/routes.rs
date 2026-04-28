@@ -1997,16 +1997,23 @@ fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
             if !path.is_dir() {
                 continue;
             }
-            let dir_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
+            let dir_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             // Skip hidden directories and common non-project dirs
             if dir_name.starts_with('.') || skip_dirs.contains(dir_name.as_str()) {
                 continue;
             }
 
             if path.join(".git").exists() {
+                // Use relative path from root as display name (e.g. "org/project")
+                let name = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+
                 // Quick git status check
                 let is_clean = std::process::Command::new("git")
                     .args(["-C"])
@@ -2027,10 +2034,11 @@ fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
                     .unwrap_or_else(|| "unknown".to_string());
 
                 let has_swarm = root.join(".swarm").exists();
+                // Workers are keyed by leaf dir name in swarm state
                 let workers = repo_workers.remove(&dir_name).unwrap_or_default();
 
                 repos.push(RepoInfo {
-                    name: dir_name,
+                    name,
                     path: path.to_string_lossy().to_string(),
                     has_swarm,
                     is_clean,
@@ -2038,7 +2046,7 @@ fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
                     workers,
                 });
                 // Don't recurse into git repos
-            } else if depth < 3 {
+            } else if depth < 2 {
                 dirs_to_scan.push((path, depth + 1));
             }
         }
@@ -2923,6 +2931,55 @@ mod tests {
         let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"repo-a"));
         assert!(names.contains(&"repo-b"));
+    }
+
+    #[test]
+    fn test_build_repos_finds_nested_git_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        // Level 1
+        std::fs::create_dir_all(dir.path().join("top-repo/.git")).unwrap();
+        // Level 2
+        std::fs::create_dir_all(dir.path().join("org/nested-repo/.git")).unwrap();
+        // Level 3
+        std::fs::create_dir_all(dir.path().join("deep/path/deep-repo/.git")).unwrap();
+        // Level 4 — too deep, should NOT be found
+        std::fs::create_dir_all(dir.path().join("a/b/c/too-deep/.git")).unwrap();
+
+        let repos = build_repos_list(dir.path());
+        assert_eq!(repos.len(), 3);
+        let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"top-repo"));
+        assert!(names.contains(&"org/nested-repo"));
+        assert!(names.contains(&"deep/path/deep-repo"));
+    }
+
+    #[test]
+    fn test_build_repos_skips_hidden_and_excluded_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        // Hidden dir with a repo inside — should be skipped
+        std::fs::create_dir_all(dir.path().join(".hidden/repo/.git")).unwrap();
+        // node_modules with a repo inside — should be skipped
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg/.git")).unwrap();
+        // target dir — should be skipped
+        std::fs::create_dir_all(dir.path().join("target/debug/.git")).unwrap();
+        // Valid repo for comparison
+        std::fs::create_dir_all(dir.path().join("real-repo/.git")).unwrap();
+
+        let repos = build_repos_list(dir.path());
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "real-repo");
+    }
+
+    #[test]
+    fn test_build_repos_does_not_recurse_into_git_repos() {
+        let dir = tempfile::tempdir().unwrap();
+        // A git repo with a nested git repo inside — only the outer one should be found
+        std::fs::create_dir_all(dir.path().join("outer/.git")).unwrap();
+        std::fs::create_dir_all(dir.path().join("outer/inner/.git")).unwrap();
+
+        let repos = build_repos_list(dir.path());
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "outer");
     }
 
     // ── default_provider ──
