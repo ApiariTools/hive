@@ -1972,18 +1972,41 @@ fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
         }
     }
 
-    // Scan for git repos
+    // Scan for git repos recursively up to 3 levels deep
     let mut repos = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root) {
+    let mut dirs_to_scan: Vec<(std::path::PathBuf, u32)> = vec![(root.to_path_buf(), 0)];
+    let skip_dirs: std::collections::HashSet<&str> = [
+        "node_modules",
+        "target",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "dist",
+        "build",
+    ]
+    .into_iter()
+    .collect();
+
+    while let Some((dir, depth)) = dirs_to_scan.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && path.join(".git").exists() {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            // Skip hidden directories and common non-project dirs
+            if dir_name.starts_with('.') || skip_dirs.contains(dir_name.as_str()) {
+                continue;
+            }
 
+            if path.join(".git").exists() {
                 // Quick git status check
                 let is_clean = std::process::Command::new("git")
                     .args(["-C"])
@@ -2004,16 +2027,19 @@ fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
                     .unwrap_or_else(|| "unknown".to_string());
 
                 let has_swarm = root.join(".swarm").exists();
-                let workers = repo_workers.remove(&name).unwrap_or_default();
+                let workers = repo_workers.remove(&dir_name).unwrap_or_default();
 
                 repos.push(RepoInfo {
-                    name,
+                    name: dir_name,
                     path: path.to_string_lossy().to_string(),
                     has_swarm,
                     is_clean,
                     branch,
                     workers,
                 });
+                // Don't recurse into git repos
+            } else if depth < 3 {
+                dirs_to_scan.push((path, depth + 1));
             }
         }
     }
