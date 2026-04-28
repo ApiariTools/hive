@@ -1,5 +1,13 @@
 import "@testing-library/jest-dom/vitest";
 
+// jsdom doesn't implement ResizeObserver
+class MockResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+(globalThis as unknown as Record<string, unknown>).ResizeObserver = MockResizeObserver;
+
 // jsdom doesn't implement scrollIntoView
 Element.prototype.scrollIntoView = () => {};
 

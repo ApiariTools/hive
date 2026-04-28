@@ -1,5 +1,5 @@
 import { Command } from "cmdk";
-import type { Workspace, Bot, Worker } from "../types";
+import type { Workspace, Bot, Worker, CrossWorkspaceBot } from "../types";
 import styles from "./CommandPalette.module.css";
 
 interface Props {
@@ -13,6 +13,8 @@ interface Props {
   onSelectWorkspace: (name: string) => void;
   onSelectBot: (name: string) => void;
   onSelectWorker: (id: string) => void;
+  otherWorkspaceBots: CrossWorkspaceBot[];
+  onSelectWorkspaceBot: (workspace: string, botName: string) => void;
 }
 
 export function CommandPalette({
@@ -26,6 +28,8 @@ export function CommandPalette({
   onSelectWorkspace,
   onSelectBot,
   onSelectWorker,
+  otherWorkspaceBots,
+  onSelectWorkspaceBot,
 }: Props) {
   return (
     <Command.Dialog
@@ -72,6 +76,22 @@ export function CommandPalette({
             </Command.Item>
           ))}
         </Command.Group>
+        {otherWorkspaceBots.length > 0 && (
+          <Command.Group heading="Other Workspace Bots">
+            {otherWorkspaceBots.map((entry) => (
+              <Command.Item
+                key={`${entry.workspace}/${entry.bot.name}`}
+                value={`bot ${entry.workspace} ${entry.bot.name}`}
+                onSelect={() => {
+                  onSelectWorkspaceBot(entry.workspace, entry.bot.name);
+                  onOpenChange(false);
+                }}
+              >
+                {entry.workspace} / {entry.bot.name}
+              </Command.Item>
+            ))}
+          </Command.Group>
+        )}
         <Command.Group heading="Workers">
           {workers.map((w) => (
             <Command.Item
