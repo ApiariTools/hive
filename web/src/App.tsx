@@ -264,14 +264,18 @@ export default function App() {
   // Fetch bots for other workspaces when palette opens
   useEffect(() => {
     if (!paletteOpen || workspaces.length === 0) return;
+    let cancelled = false;
     const others = workspaces.filter((ws) => ws.name !== workspace);
     Promise.all(
       others.map((ws) =>
         api.getBots(ws.name).then((bots) =>
           bots.map((b) => ({ workspace: ws.name, bot: b }))
-        )
+        ).catch(() => [] as CrossWorkspaceBot[])
       )
-    ).then((results) => setOtherWorkspaceBots(results.flat()));
+    ).then((results) => {
+      if (!cancelled) setOtherWorkspaceBots(results.flat());
+    });
+    return () => { cancelled = true; };
   }, [paletteOpen, workspaces, workspace]);
 
   // Cmd+K: command palette, Cmd+J: focus chat
