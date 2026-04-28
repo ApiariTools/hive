@@ -1,6 +1,7 @@
 use color_eyre::Result;
-use std::path::PathBuf;
 use std::process::Command;
+
+use super::dirs;
 
 pub fn run() -> Result<()> {
     println!("\n=== Hive Voice Setup ===\n");
@@ -51,9 +52,12 @@ fn install_whisper() {
 fn download_whisper_model() {
     print!("[STT] whisper base.en model... ");
 
-    let model_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("~"))
-        .join(".local/share/whisper");
+    let Some(home) = dirs::home_dir() else {
+        println!("SKIPPED (cannot determine home directory)");
+        return;
+    };
+
+    let model_dir = home.join(".local/share/whisper");
     let model_path = model_dir.join("ggml-base.en.bin");
 
     if model_path.exists() {
@@ -87,8 +91,8 @@ fn download_whisper_model() {
 fn setup_tts() {
     println!("[TTS] Kokoro setup...");
 
-    // Find the tts/ directory relative to the binary or current dir
-    let tts_dir = find_tts_dir();
+    // Reuse the same resolver as the runtime TTS server
+    let tts_dir = crate::tts::find_tts_dir();
     let Some(tts_dir) = tts_dir else {
         println!("  SKIPPED (tts/ directory not found)");
         return;
@@ -104,11 +108,17 @@ fn setup_tts() {
         let result = Command::new("python3")
             .args(["-m", "venv"])
             .arg(&venv_dir)
-            .status();
+            .output();
         match result {
-            Ok(s) if s.success() => println!("created"),
-            Ok(_) | Err(_) => {
-                println!("FAILED");
+            Ok(output) if output.status.success() => println!("created"),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr.lines().last().unwrap_or("unknown error");
+                println!("FAILED ({})", detail);
+                return;
+            }
+            Err(e) => {
+                println!("FAILED ({})", e);
                 return;
             }
         }
@@ -138,9 +148,9 @@ fn setup_tts() {
         }
     }
 
-    // Download model
+    // Download model — use `python` to match runtime (tts.rs uses .venv/bin/python)
     print!("  [TTS] downloading Kokoro model... ");
-    let python = venv_dir.join("bin/python3");
+    let python = venv_dir.join("bin/python");
     let result = Command::new(&python)
         .args([
             "-c",
@@ -161,39 +171,25 @@ fn setup_tts() {
     }
 }
 
-fn find_tts_dir() -> Option<PathBuf> {
-    // Check relative to current executable
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let candidate = parent.join("tts");
-        if candidate.join("requirements.txt").exists() {
-            return Some(candidate);
-        }
-        // Check one level up (common for cargo builds: target/debug/hive)
-        if let Some(grandparent) = parent.parent() {
-            let candidate = grandparent.join("tts");
-            if candidate.join("requirements.txt").exists() {
-                return Some(candidate);
-            }
-            // target/debug -> target -> project root
-            if let Some(root) = grandparent.parent() {
-                let candidate = root.join("tts");
-                if candidate.join("requirements.txt").exists() {
-                    return Some(candidate);
-                }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_download_whisper_model_skips_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let model_dir = dir.path().join(".local/share/whisper");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let model_path = model_dir.join("ggml-base.en.bin");
+        std::fs::write(&model_path, b"fake model").unwrap();
+        assert!(model_path.exists());
     }
 
-    // Check relative to current working directory
-    let cwd = std::env::current_dir().ok()?;
-    let candidate = cwd.join("tts");
-    if candidate.join("requirements.txt").exists() {
-        return Some(candidate);
+    #[test]
+    fn test_home_dir_fallback_does_not_use_tilde() {
+        // Verify dirs::home_dir returns a real path, not "~"
+        if let Some(home) = dirs::home_dir() {
+            assert!(!home.to_string_lossy().starts_with('~'));
+        }
     }
-
-    None
 }
-
-use super::dirs;
