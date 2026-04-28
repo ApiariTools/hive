@@ -87,7 +87,7 @@ export default function App() {
   useEffect(() => { loadingRef.current = loading; }, [loading]);
 
   // Keep screen awake on mobile/iPad
-  useEffect(() => { initWakeLock(); }, []);
+  useEffect(() => initWakeLock(), []);
 
   // Load workspaces on mount
   useEffect(() => {

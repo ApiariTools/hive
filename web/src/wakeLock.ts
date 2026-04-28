@@ -2,6 +2,7 @@ let wakeLock: WakeLockSentinel | null = null;
 
 async function requestWakeLock() {
   if (!("wakeLock" in navigator)) return;
+  if (wakeLock) return;
   try {
     wakeLock = await navigator.wakeLock.request("screen");
     wakeLock.addEventListener("release", () => {
@@ -18,7 +19,12 @@ function onVisibilityChange() {
   }
 }
 
-export function initWakeLock() {
+export function initWakeLock(): () => void {
   requestWakeLock();
   document.addEventListener("visibilitychange", onVisibilityChange);
+  return () => {
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    wakeLock?.release();
+    wakeLock = null;
+  };
 }
