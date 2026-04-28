@@ -1,4 +1,4 @@
-import type { Workspace, Bot, Worker, WorkerDetail, Message, Repo } from "./types";
+import type { Workspace, Bot, Worker, WorkerDetail, Message, Repo, Doc } from "./types";
 
 const BASE = "/api";
 
@@ -137,6 +137,39 @@ export interface UsageData {
 
 export function getUsage(): Promise<UsageData> {
   return get("/usage");
+}
+
+export function getDocs(workspace: string): Promise<Doc[]> {
+  return get(`/workspaces/${workspace}/docs`);
+}
+
+export function getDoc(workspace: string, filename: string): Promise<Doc> {
+  return get(`/workspaces/${workspace}/docs/${encodeURIComponent(filename)}`);
+}
+
+export async function saveDoc(
+  workspace: string,
+  filename: string,
+  content: string,
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/workspaces/${workspace}/docs/${encodeURIComponent(filename)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) throw new Error(`PUT docs/${filename}: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteDoc(
+  workspace: string,
+  filename: string,
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/workspaces/${workspace}/docs/${encodeURIComponent(filename)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`DELETE docs/${filename}: ${res.status}`);
+  return res.json();
 }
 
 export async function sendMessage(

@@ -16,6 +16,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Use crates.io for SDK deps (path deps are siblings in local monorepo)
+        run: sed -i 's|path = "\.\./[^"]*", ||g' Cargo.toml
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings -A clippy::too_many_arguments
       - run: cargo test

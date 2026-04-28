@@ -58,3 +58,10 @@ export interface WorkerMessage {
   role: string;
   content: string;
 }
+
+export interface Doc {
+  name: string;
+  title: string;
+  content?: string;
+  updated_at: string;
+}

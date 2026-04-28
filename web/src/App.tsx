@@ -5,6 +5,7 @@ import { BotNav } from "./components/BotNav";
 import { ChatPanel } from "./components/ChatPanel";
 import { ReposPanel } from "./components/ReposPanel";
 import { WorkerDetail } from "./components/WorkerDetail";
+import { DocsPanel } from "./components/DocsPanel";
 import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData } from "./types";
 import * as api from "./api";
 
@@ -59,6 +60,7 @@ export default function App() {
   const [loadingStatus, setLoadingStatus] = useState<string | undefined>();
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [docsOpen, setDocsOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [usage, setUsage] = useState<api.UsageData>({ installed: false, providers: [], updated_at: null });
   const lastMsgId = useRef<number>(0);
@@ -287,13 +289,21 @@ export default function App() {
   const handleSelectBot = useCallback((name: string) => {
     setBot(name);
     setWorkerId(null);
+    setDocsOpen(false);
     setMenuOpen(false);
     setLoading(false);
     setLoadingStatus(undefined);
   }, []);
 
+  const handleSelectDocs = useCallback(() => {
+    setDocsOpen(true);
+    setWorkerId(null);
+    setMenuOpen(false);
+  }, []);
+
   const handleSelectWorker = useCallback((id: string) => {
     setWorkerId(id);
+    setDocsOpen(false);
     setMenuOpen(false);
     if (workspace) {
       api.getWorkerDetail(workspace, id).then(setWorkerDetail).catch(() => setWorkerDetail(null));
@@ -364,14 +374,18 @@ export default function App() {
         <BotNav
           bots={bots}
           workers={workers}
-          activeBot={workerId ? null : bot}
+          activeBot={docsOpen || workerId ? null : bot}
           activeWorkerId={workerId}
           onSelectBot={handleSelectBot}
           onSelectWorker={handleSelectWorker}
           mobileOpen={menuOpen}
           unread={unread}
+          docsOpen={docsOpen}
+          onSelectDocs={handleSelectDocs}
         />
-        {workerId && selectedWorker ? (
+        {docsOpen ? (
+          <DocsPanel workspace={workspace} />
+        ) : workerId && selectedWorker ? (
           <WorkerDetail
             worker={selectedWorker}
             detail={workerDetail}

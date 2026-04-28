@@ -1,3 +1,4 @@
+import { FileText } from "lucide-react";
 import type { Bot, Worker } from "../types";
 import styles from "./BotNav.module.css";
 
@@ -10,6 +11,8 @@ interface Props {
   onSelectWorker: (id: string) => void;
   mobileOpen?: boolean;
   unread?: Record<string, number>;
+  docsOpen?: boolean;
+  onSelectDocs?: () => void;
 }
 
 const BOT_COLORS: Record<string, string> = {
@@ -30,6 +33,8 @@ export function BotNav({
   onSelectBot,
   mobileOpen,
   unread,
+  docsOpen,
+  onSelectDocs,
 }: Props) {
   return (
     <div className={`${styles.panel} ${mobileOpen ? styles.mobileOpen : ""}`}>
@@ -56,6 +61,20 @@ export function BotNav({
           </button>
         );
       })}
+      {onSelectDocs && (
+        <>
+          <div className={styles.divider} />
+          <button
+            className={`${styles.botBtn} ${docsOpen ? styles.active : ""}`}
+            onClick={onSelectDocs}
+          >
+            <FileText size={16} style={{ color: docsOpen ? "var(--accent)" : "var(--text-faint)", flexShrink: 0 }} />
+            <span className={styles.nameGroup}>
+              <span className={styles.name}>Docs</span>
+            </span>
+          </button>
+        </>
+      )}
     </div>
   );
 }
