@@ -399,7 +399,14 @@ fn build_docs_instructions(ws_id: &str) -> String {
     )
 }
 
-fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str) -> String {
+struct BuiltPrompt {
+    /// Full prompt sent to the LLM (includes docs index)
+    full: String,
+    /// Stable portion used for hashing (excludes docs index/instructions)
+    stable: String,
+}
+
+fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str) -> BuiltPrompt {
     let ws = ws_config.workspace.clone().unwrap_or_default();
     let ws_name = ws.name.as_deref().unwrap_or("unknown");
     let ws_desc = ws.description.as_deref().unwrap_or("");
@@ -408,6 +415,10 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         .bots
         .as_ref()
         .and_then(|bots| bots.iter().find(|b| b.name == bot_name));
+
+    // Dynamic docs content — excluded from the session hash so that
+    // creating/editing/deleting docs doesn't reset bot sessions.
+    let mut docs_dynamic = String::new();
 
     // Check for a bot-level prompt file (replaces the default identity section)
     if let Some(ref prompt_file) = bot_config.and_then(|b| b.prompt_file.clone()) {
@@ -424,11 +435,6 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
             if let Some(ref root) = ws.root {
                 prompt.push_str(&format!("Working directory: {root}\n"));
             }
-            // Inject docs index and management instructions for custom prompt bots
-            if let Some(docs_index) = build_docs_index(root_path) {
-                prompt.push_str(&docs_index);
-            }
-            prompt.push_str(&build_docs_instructions(ws_id));
 
             // Inject service credentials even for custom prompt bots
             if let Some(bot) = bot_config {
@@ -437,7 +443,20 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                     prompt.push_str(&services_prompt);
                 }
             }
-            return prompt;
+
+            // Stable portion captured before docs (dynamic content)
+            let stable = prompt.clone();
+
+            // Inject docs index and management instructions (dynamic — excluded from hash)
+            if let Some(docs_index) = build_docs_index(root_path) {
+                prompt.push_str(&docs_index);
+            }
+            prompt.push_str(&build_docs_instructions(ws_id));
+
+            return BuiltPrompt {
+                full: prompt,
+                stable,
+            };
         }
     }
 
@@ -476,14 +495,6 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
             }
         }
 
-        // Docs index from .apiari/docs/
-        if let Some(docs_index) = build_docs_index(root_path) {
-            prompt.push_str(&docs_index);
-        }
-
-        // Docs management instructions (always injected so bots know they can create docs)
-        prompt.push_str(&build_docs_instructions(ws_id));
-
         // Swarm worker dispatch instructions
         let has_swarm = root_path.join(".swarm").exists();
         if has_swarm {
@@ -517,10 +528,17 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                 prompt.push_str(&services_prompt);
             }
         }
+
+        // Docs index and instructions are dynamic (excluded from hash).
+        // Capture them separately to append only to the full prompt.
+        if let Some(docs_index) = build_docs_index(root_path) {
+            docs_dynamic.push_str(&docs_index);
+        }
+        docs_dynamic.push_str(&build_docs_instructions(ws_id));
     }
 
     // Hive configuration reference — helps bots answer config questions
-    prompt.push_str(
+    let hive_ref = format!(
         "\n## Hive Configuration Reference\n\
          You are running inside Hive, a workspace chat hub. The user may ask about configuring their workspace.\n\n\
          Workspace config: ~/.config/hive/workspaces/<workspace-id>.toml\n\
@@ -550,12 +568,8 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          - .apiari/services.toml — service credentials (sentry, grafana)\n\n\
          To initialize a new workspace: `hive init <name> [--root /path]`\n\
          The user can edit these files directly. If they ask you to help configure, \
-         explain the options and suggest what to add to their TOML or context files.\n",
-    );
-
-    // Chat history — bot can query the local DB directly
-    prompt.push_str(&format!(
-        "\n## Chat History\n\
+         explain the options and suggest what to add to their TOML or context files.\n\
+         \n## Chat History\n\
          Your conversation history is stored in a local SQLite database.\n\
          To look up previous conversations:\n\
          - Recent messages: `sqlite3 ~/.config/hive/hive.db \"SELECT role, content FROM conversations WHERE workspace='{ws_name}' AND bot='{bot_name}' ORDER BY id DESC LIMIT 20\"`\n\
@@ -563,9 +577,27 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          \n\
          Use this when the user references something from a previous conversation \
          or when you need context about what was discussed before.\n"
-    ));
+    );
 
-    prompt
+    if docs_dynamic.is_empty() {
+        // No dynamic docs — stable and full are identical, no clone needed
+        prompt.push_str(&hive_ref);
+        BuiltPrompt {
+            stable: prompt.clone(),
+            full: prompt,
+        }
+    } else {
+        // Clone prompt (before hive_ref) as the base for stable,
+        // then build full by appending docs + hive_ref to the original prompt
+        let mut stable = prompt.clone();
+        stable.push_str(&hive_ref);
+        prompt.push_str(&docs_dynamic);
+        prompt.push_str(&hive_ref);
+        BuiltPrompt {
+            full: prompt,
+            stable,
+        }
+    }
 }
 
 // ── Conversations ──
@@ -684,9 +716,10 @@ async fn send_message(
         .unwrap_or_else(|| "claude".to_string());
     let model = bot_config.as_ref().and_then(|b| b.model.clone());
 
-    // Build system prompt and hash it — if prompt changed, start fresh session
-    let full_prompt = build_system_prompt(&ws_config, &bot, &workspace);
-    let prompt_hash = simple_hash(&full_prompt);
+    // Build system prompt and hash it — if prompt changed, start fresh session.
+    // Only the stable portion is hashed so that docs index changes don't reset sessions.
+    let built = build_system_prompt(&ws_config, &bot, &workspace);
+    let prompt_hash = simple_hash(&built.stable);
 
     let resume_id = state
         .db
@@ -697,7 +730,7 @@ async fn send_message(
     }
 
     let system_prompt = if resume_id.is_none() {
-        Some(full_prompt)
+        Some(built.full)
     } else {
         None
     };
@@ -2507,7 +2540,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main", "test");
+        let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(prompt.contains("Main"));
         assert!(prompt.contains("test"));
         assert!(prompt.contains("A test workspace"));
@@ -2535,7 +2568,7 @@ mod tests {
                 services: vec![],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Customer", "test");
+        let prompt = build_system_prompt(&config, "Customer", "test").full;
         assert!(prompt.contains("Handles errors"));
     }
 
@@ -2553,7 +2586,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main", "test");
+        let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(prompt.contains("Swarm Workers"));
         assert!(prompt.contains("swarm"));
     }
@@ -2571,7 +2604,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main", "test");
+        let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(!prompt.contains("Swarm Workers"));
     }
 
@@ -2594,7 +2627,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main", "test");
+        let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(prompt.contains("This is a Rust project"));
     }
 
@@ -2613,7 +2646,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main", "test");
+        let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(prompt.contains("Be concise"));
     }
 
@@ -2628,7 +2661,7 @@ mod tests {
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main", "test");
+        let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(prompt.contains("sqlite3"));
         assert!(prompt.contains("Chat History"));
     }
@@ -2959,7 +2992,7 @@ mod tests {
                 services: vec!["sentry".to_string()],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Monitor", "test");
+        let prompt = build_system_prompt(&config, "Monitor", "test").full;
         assert!(prompt.contains("Sentry Access"));
         assert!(prompt.contains("tok"));
     }
@@ -2993,7 +3026,7 @@ mod tests {
                 services: vec![],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Plain", "test");
+        let prompt = build_system_prompt(&config, "Plain", "test").full;
         assert!(!prompt.contains("Sentry Access"));
     }
 
@@ -3055,7 +3088,7 @@ services = ["sentry", "grafana"]
                 services: vec!["sentry".to_string()],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Custom", "test");
+        let prompt = build_system_prompt(&config, "Custom", "test").full;
         assert!(prompt.contains("You are a custom bot."));
         assert!(prompt.contains("Sentry Access"));
     }
@@ -3163,7 +3196,7 @@ role = "Chat"
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main", "test");
+        let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(prompt.contains("Workspace Docs (.apiari/docs/)"));
         assert!(prompt.contains("overview.md — Project Overview"));
         // Management instructions should reference hive docs commands
@@ -3201,7 +3234,7 @@ role = "Chat"
                 services: vec![],
             }]),
         };
-        let prompt = build_system_prompt(&config, "Custom", "test");
+        let prompt = build_system_prompt(&config, "Custom", "test").full;
         assert!(prompt.contains("You are a custom bot."));
         assert!(prompt.contains("Workspace Docs (.apiari/docs/)"));
         assert!(prompt.contains("guide.md — User Guide"));
@@ -3224,12 +3257,118 @@ role = "Chat"
             }),
             bots: None,
         };
-        let prompt = build_system_prompt(&config, "Main", "test");
+        let prompt = build_system_prompt(&config, "Main", "test").full;
         // Even without docs, management instructions should be present
         assert!(prompt.contains("## Workspace Docs"));
         assert!(prompt.contains("hive docs list --workspace test"));
         // But the docs index should NOT be present (no docs dir)
         assert!(!prompt.contains("Workspace Docs (.apiari/docs/)"));
+    }
+
+    // ── prompt hash stability (docs should NOT affect hash) ──
+
+    #[test]
+    fn test_docs_change_does_not_affect_prompt_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+                ..Default::default()
+            }),
+            bots: None,
+        };
+
+        // Hash with no docs
+        let hash1 = simple_hash(&build_system_prompt(&config, "Main", "test").stable);
+
+        // Add a doc file — hash should stay the same
+        std::fs::write(docs.join("new-doc.md"), "# New Document\nSome content").unwrap();
+        let built2 = build_system_prompt(&config, "Main", "test");
+        let hash2 = simple_hash(&built2.stable);
+
+        assert_eq!(
+            hash1, hash2,
+            "Adding a doc should not change the prompt hash"
+        );
+        // But the full prompt should contain the doc
+        assert!(built2.full.contains("new-doc.md"));
+    }
+
+    #[test]
+    fn test_context_md_change_does_affect_prompt_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+                ..Default::default()
+            }),
+            bots: None,
+        };
+
+        let hash1 = simple_hash(&build_system_prompt(&config, "Main", "test").stable);
+
+        // Add context.md — hash should change
+        std::fs::write(
+            dir.path().join(".apiari/context.md"),
+            "This is a Rust project",
+        )
+        .unwrap();
+        let hash2 = simple_hash(&build_system_prompt(&config, "Main", "test").stable);
+
+        assert_ne!(
+            hash1, hash2,
+            "Changing context.md should change the prompt hash"
+        );
+    }
+
+    #[test]
+    fn test_docs_change_does_not_affect_hash_custom_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join(".apiari/docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(dir.path().join("custom.md"), "You are a custom bot.").unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                description: None,
+                ..Default::default()
+            }),
+            bots: Some(vec![BotInfo {
+                name: "Custom".into(),
+                color: None,
+                role: None,
+                description: None,
+                provider: "claude".into(),
+                model: None,
+                prompt_file: Some("custom.md".to_string()),
+                watch: vec![],
+                services: vec![],
+            }]),
+        };
+
+        let hash1 = simple_hash(&build_system_prompt(&config, "Custom", "test").stable);
+
+        // Add a doc — hash should stay the same
+        std::fs::write(docs.join("guide.md"), "# Guide\nContent").unwrap();
+        let built2 = build_system_prompt(&config, "Custom", "test");
+        let hash2 = simple_hash(&built2.stable);
+
+        assert_eq!(
+            hash1, hash2,
+            "Adding a doc should not change hash for custom prompt bots"
+        );
+        assert!(built2.full.contains("guide.md"));
     }
 
     // ── serve_frontend ──
