@@ -63,6 +63,9 @@ const SCHEMA: &str = "
         message_id INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (workspace, bot)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_conversations_ws_bot_role
+        ON conversations(workspace, bot, role);
 ";
 
 fn open_conn(path: &Path) -> Result<Connection> {
@@ -187,6 +190,16 @@ impl Db {
         let mut rows = rows;
         rows.reverse();
         Ok(rows)
+    }
+
+    pub fn count_assistant_messages(&self, workspace: &str, bot: &str) -> Result<i64> {
+        let conn = self.reader()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversations WHERE workspace = ?1 AND bot = ?2 AND role = 'assistant'",
+            params![workspace, bot],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 
     pub fn get_message_content(&self, message_id: i64) -> Result<Option<String>> {
