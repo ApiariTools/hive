@@ -6,6 +6,7 @@ use tracing::info;
 
 mod config_watcher;
 mod db;
+mod docs;
 mod events;
 mod init;
 mod pr_feedback;
@@ -45,6 +46,8 @@ enum Command {
     },
     /// Publish a report from a specialty bot
     Publish(publish::PublishArgs),
+    /// Manage workspace reference docs
+    Docs(docs::DocsArgs),
 }
 
 #[tokio::main]
@@ -82,6 +85,9 @@ async fn main() -> Result<()> {
             Command::Publish(args) => {
                 let db_path = config_dir.join("hive.db");
                 return publish::run(args, &db_path);
+            }
+            Command::Docs(args) => {
+                return docs::run(args, &config_dir);
             }
         }
     }
