@@ -8,6 +8,7 @@ import { WorkerDetail } from "./components/WorkerDetail";
 import { DocsPanel } from "./components/DocsPanel";
 import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData, CrossWorkspaceBot } from "./types";
 import * as api from "./api";
+import { initWakeLock } from "./wakeLock";
 
 // ── Route parsing ──
 
@@ -84,6 +85,9 @@ export default function App() {
 
   // Keep loadingRef in sync
   useEffect(() => { loadingRef.current = loading; }, [loading]);
+
+  // Keep screen awake on mobile/iPad
+  useEffect(() => { initWakeLock(); }, []);
 
   // Load workspaces on mount
   useEffect(() => {
