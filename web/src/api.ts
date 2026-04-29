@@ -1,4 +1,4 @@
-import type { Workspace, Bot, Worker, WorkerDetail, Message, Repo, Doc } from "./types";
+import type { Workspace, Bot, Worker, WorkerDetail, Message, Repo, Doc, ResearchTask } from "./types";
 
 const BASE = "/api";
 
@@ -169,6 +169,23 @@ export async function deleteDoc(
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`DELETE docs/${filename}: ${res.status}`);
+  return res.json();
+}
+
+export function getResearchTasks(workspace: string): Promise<ResearchTask[]> {
+  return get(`/workspaces/${workspace}/research`);
+}
+
+export async function startResearch(
+  workspace: string,
+  topic: string,
+): Promise<{ id: string; topic: string; status: string }> {
+  const res = await fetch(`${BASE}/workspaces/${workspace}/research`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ topic }),
+  });
+  if (!res.ok) throw new Error(`POST research: ${res.status}`);
   return res.json();
 }
 

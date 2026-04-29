@@ -15,6 +15,7 @@ interface Props {
   onSelectWorker: (id: string) => void;
   otherWorkspaceBots: CrossWorkspaceBot[];
   onSelectWorkspaceBot: (workspace: string, botName: string) => void;
+  onStartResearch?: () => void;
 }
 
 export function CommandPalette({
@@ -30,6 +31,7 @@ export function CommandPalette({
   onSelectWorker,
   otherWorkspaceBots,
   onSelectWorkspaceBot,
+  onStartResearch,
 }: Props) {
   return (
     <Command.Dialog
@@ -90,6 +92,19 @@ export function CommandPalette({
                 {entry.workspace} / {entry.bot.name}
               </Command.Item>
             ))}
+          </Command.Group>
+        )}
+        {onStartResearch && (
+          <Command.Group heading="Actions">
+            <Command.Item
+              value="start research"
+              onSelect={() => {
+                onStartResearch();
+                onOpenChange(false);
+              }}
+            >
+              Start Research...
+            </Command.Item>
           </Command.Group>
         )}
         <Command.Group heading="Workers">

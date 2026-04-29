@@ -336,6 +336,70 @@ impl Db {
         Ok(rows)
     }
 
+    /// Execute a raw SQL batch (for schema migrations from other modules).
+    pub fn execute_batch(&self, sql: &str) -> Result<()> {
+        let conn = self.writer.lock().unwrap();
+        conn.execute_batch(sql)?;
+        Ok(())
+    }
+
+    /// Execute a parameterized SQL statement (for inserts/updates from other modules).
+    pub fn execute_sql(&self, sql: &str, params_slice: &[&str]) -> Result<()> {
+        let conn = self.writer.lock().unwrap();
+        conn.execute(sql, rusqlite::params_from_iter(params_slice))?;
+        Ok(())
+    }
+
+    /// Query research tasks for a workspace.
+    pub fn query_research_tasks(
+        &self,
+        workspace: &str,
+    ) -> Result<Vec<crate::research::ResearchTask>> {
+        let conn = self.reader()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace, topic, status, error, started_at, completed_at, output_file
+             FROM research_tasks WHERE workspace = ?1 ORDER BY started_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![workspace], |row| {
+                Ok(crate::research::ResearchTask {
+                    id: row.get(0)?,
+                    workspace: row.get(1)?,
+                    topic: row.get(2)?,
+                    status: row.get(3)?,
+                    error: row.get(4)?,
+                    started_at: row.get(5)?,
+                    completed_at: row.get(6)?,
+                    output_file: row.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Query a single research task by ID.
+    pub fn query_research_task(&self, id: &str) -> Option<crate::research::ResearchTask> {
+        let conn = self.reader().ok()?;
+        conn.query_row(
+            "SELECT id, workspace, topic, status, error, started_at, completed_at, output_file
+             FROM research_tasks WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(crate::research::ResearchTask {
+                    id: row.get(0)?,
+                    workspace: row.get(1)?,
+                    topic: row.get(2)?,
+                    status: row.get(3)?,
+                    error: row.get(4)?,
+                    started_at: row.get(5)?,
+                    completed_at: row.get(6)?,
+                    output_file: row.get(7)?,
+                })
+            },
+        )
+        .ok()
+    }
+
     pub fn get_all_conversations(&self, workspace: &str, limit: i64) -> Result<Vec<MessageRow>> {
         let conn = self.reader()?;
         let mut stmt = conn.prepare(

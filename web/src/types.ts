@@ -70,3 +70,14 @@ export interface Doc {
   content?: string;
   updated_at: string;
 }
+
+export interface ResearchTask {
+  id: string;
+  workspace: string;
+  topic: string;
+  status: string;
+  error: string | null;
+  started_at: string;
+  completed_at: string | null;
+  output_file: string | null;
+}

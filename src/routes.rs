@@ -119,6 +119,14 @@ pub fn router_with_http_client(
             "/api/workspaces/{workspace}/docs/{filename}",
             get(get_doc).put(put_doc).delete(delete_doc),
         )
+        .route(
+            "/api/workspaces/{workspace}/research",
+            get(list_research).post(start_research),
+        )
+        .route(
+            "/api/workspaces/{workspace}/research/{task_id}",
+            get(get_research_task),
+        )
         .fallback(get(serve_frontend))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB for image attachments
         .layer(CorsLayer::permissive())
@@ -2467,6 +2475,75 @@ async fn serve_frontend(uri: axum::http::Uri) -> axum::response::Response {
     }
 
     StatusCode::NOT_FOUND.into_response()
+}
+
+// ── Research ──
+
+#[derive(Deserialize)]
+struct ResearchRequest {
+    topic: String,
+}
+
+async fn start_research(
+    State(state): State<AppState>,
+    Path(workspace): Path<String>,
+    Json(body): Json<ResearchRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let topic = body.topic.trim().to_string();
+    if topic.is_empty() || topic.len() > 500 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let root = resolve_workspace_root(&state, &workspace).ok_or(StatusCode::NOT_FOUND)?;
+
+    crate::research::ensure_schema(&state.db);
+
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let rand: u32 = (millis as u32).wrapping_mul(2654435761); // simple hash spread
+    let task_id = format!("research-{millis:x}-{rand:04x}");
+
+    crate::research::insert_task(&state.db, &task_id, &workspace, &topic)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    info!("[research] spawning task {task_id}: {topic}");
+
+    crate::research::spawn_research(
+        state.db.clone(),
+        state.events.clone(),
+        task_id.clone(),
+        workspace,
+        topic.clone(),
+        root,
+    );
+
+    Ok(Json(serde_json::json!({
+        "id": task_id,
+        "topic": topic,
+        "status": "running",
+    })))
+}
+
+async fn list_research(
+    State(state): State<AppState>,
+    Path(workspace): Path<String>,
+) -> Json<Vec<crate::research::ResearchTask>> {
+    crate::research::ensure_schema(&state.db);
+    Json(crate::research::list_tasks(&state.db, &workspace))
+}
+
+async fn get_research_task(
+    State(state): State<AppState>,
+    Path((workspace, task_id)): Path<(String, String)>,
+) -> Result<Json<crate::research::ResearchTask>, StatusCode> {
+    crate::research::ensure_schema(&state.db);
+    let task = crate::research::get_task(&state.db, &task_id).ok_or(StatusCode::NOT_FOUND)?;
+    if task.workspace != workspace {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(task))
 }
 
 #[cfg(test)]
