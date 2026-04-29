@@ -98,9 +98,14 @@ export async function markSeen(workspace: string, bot: string, remote?: string):
   await fetch(`${BASE}${wsPath(workspace, remote)}/seen/${bot}`, { method: "POST" });
 }
 
+export interface ManagedWebSocket {
+  close(): void;
+}
+
 export function connectWebSocket(
   onEvent: (event: { type: string; workspace: string; bot: string; [key: string]: unknown }) => void,
-): WebSocket {
+): ManagedWebSocket {
+  let intentionalClose = false;
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${protocol}//${window.location.host}/ws`;
   const ws = new WebSocket(wsUrl);
@@ -111,10 +116,17 @@ export function connectWebSocket(
     } catch {}
   };
   ws.onclose = () => {
-    // Reconnect after 3s
-    setTimeout(() => connectWebSocket(onEvent), 3000);
+    if (!intentionalClose) {
+      // Reconnect after 3s only if not intentionally closed
+      setTimeout(() => connectWebSocket(onEvent), 3000);
+    }
   };
-  return ws;
+  return {
+    close() {
+      intentionalClose = true;
+      ws.close();
+    },
+  };
 }
 
 export async function textToSpeech(text: string, voice?: string): Promise<ArrayBuffer | null> {

@@ -27,6 +27,15 @@ pub struct RemoteEntry {
     pub url: String,
 }
 
+/// Validate that a remote name is safe for use in URL path segments and JSON.
+fn is_valid_remote_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 pub fn load_remotes_config(config_dir: &StdPath) -> Vec<RemoteEntry> {
     let path = config_dir.join("remotes.toml");
     let content = match std::fs::read_to_string(&path) {
@@ -40,7 +49,20 @@ pub fn load_remotes_config(config_dir: &StdPath) -> Vec<RemoteEntry> {
             return Vec::new();
         }
     };
-    config.remotes
+    config
+        .remotes
+        .into_iter()
+        .filter(|r| {
+            if !is_valid_remote_name(&r.name) {
+                warn!(
+                    "skipping remote with invalid name {:?} (must be alphanumeric, hyphens, underscores, max 64 chars)",
+                    r.name
+                );
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 // ── Shared state ──
@@ -67,26 +89,24 @@ pub fn spawn_discovery(
     events: EventHub,
     http_client: reqwest::Client,
 ) {
+    // Initialize all remotes synchronously so the registry is populated
+    // before any discovery or proxy requests arrive.
+    {
+        let mut reg = registry.blocking_write();
+        for remote in &remotes {
+            reg.push(RemoteState {
+                name: remote.name.clone(),
+                url: remote.url.clone(),
+                online: false,
+                workspaces: Vec::new(),
+            });
+        }
+    }
+
     for remote in remotes {
         let registry = registry.clone();
         let events = events.clone();
         let client = http_client.clone();
-
-        // Initialize as offline
-        {
-            let registry = registry.clone();
-            let name = remote.name.clone();
-            let url = remote.url.clone();
-            tokio::spawn(async move {
-                let mut reg = registry.write().await;
-                reg.push(RemoteState {
-                    name: name.clone(),
-                    url: url.clone(),
-                    online: false,
-                    workspaces: Vec::new(),
-                });
-            });
-        }
 
         // Spawn discovery poller
         let disc_registry = registry.clone();
@@ -271,6 +291,40 @@ url = "http://100.64.0.3:4200"
         std::fs::write(dir.path().join("remotes.toml"), "not valid toml {{{{").unwrap();
         let remotes = load_remotes_config(dir.path());
         assert!(remotes.is_empty());
+    }
+
+    #[test]
+    fn test_valid_remote_names() {
+        assert!(is_valid_remote_name("mini-office"));
+        assert!(is_valid_remote_name("mini_home"));
+        assert!(is_valid_remote_name("server1"));
+        assert!(!is_valid_remote_name(""));
+        assert!(!is_valid_remote_name("has spaces"));
+        assert!(!is_valid_remote_name("path/traversal"));
+        assert!(!is_valid_remote_name("special!chars"));
+        assert!(!is_valid_remote_name(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn test_load_config_skips_invalid_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"
+[[remotes]]
+name = "valid-name"
+url = "http://10.0.0.1:4200"
+
+[[remotes]]
+name = "has spaces"
+url = "http://10.0.0.2:4200"
+
+[[remotes]]
+name = "also/invalid"
+url = "http://10.0.0.3:4200"
+"#;
+        std::fs::write(dir.path().join("remotes.toml"), config).unwrap();
+        let remotes = load_remotes_config(dir.path());
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].name, "valid-name");
     }
 
     #[test]

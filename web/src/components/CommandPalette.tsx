@@ -9,6 +9,7 @@ interface Props {
   bots: Bot[];
   workers: Worker[];
   currentWorkspace: string;
+  currentRemote?: string;
   currentBot: string;
   onSelectWorkspace: (name: string, remote?: string) => void;
   onSelectBot: (name: string) => void;
@@ -25,6 +26,7 @@ export function CommandPalette({
   bots,
   workers,
   currentWorkspace,
+  currentRemote,
   currentBot,
   onSelectWorkspace,
   onSelectBot,
@@ -56,7 +58,7 @@ export function CommandPalette({
             >
               {ws.name}
               {ws.remote && <span className={styles.remoteBadge}>{ws.remote}</span>}
-              {ws.name === currentWorkspace && !ws.remote && (
+              {ws.name === currentWorkspace && ws.remote === currentRemote && (
                 <span className={styles.current}>current</span>
               )}
             </Command.Item>

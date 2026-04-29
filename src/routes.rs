@@ -136,7 +136,10 @@ pub fn router_with_http_client(
         .route("/api/remotes", get(list_remotes))
         .route(
             "/api/remotes/{remote}/workspaces/{workspace}/{*rest}",
-            get(proxy_remote_get).post(proxy_remote_post),
+            get(proxy_remote_get)
+                .post(proxy_remote_post)
+                .put(proxy_remote_put)
+                .delete(proxy_remote_delete),
         )
         .fallback(get(serve_frontend))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB for image attachments
@@ -983,12 +986,14 @@ async fn list_remotes(State(state): State<AppState>) -> Json<Vec<crate::remote::
 
 async fn proxy_remote_get(
     Path((remote_name, workspace, rest)): Path<(String, String, String)>,
+    query: axum::extract::RawQuery,
     State(state): State<AppState>,
 ) -> axum::response::Response {
     proxy_remote_request(
         remote_name,
         workspace,
         rest,
+        query.0,
         state,
         reqwest::Method::GET,
         None,
@@ -999,6 +1004,7 @@ async fn proxy_remote_get(
 
 async fn proxy_remote_post(
     Path((remote_name, workspace, rest)): Path<(String, String, String)>,
+    query: axum::extract::RawQuery,
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> axum::response::Response {
@@ -1018,6 +1024,7 @@ async fn proxy_remote_post(
         remote_name,
         workspace,
         rest,
+        query.0,
         state,
         reqwest::Method::POST,
         Some(body_bytes),
@@ -1026,10 +1033,60 @@ async fn proxy_remote_post(
     .await
 }
 
+async fn proxy_remote_put(
+    Path((remote_name, workspace, rest)): Path<(String, String, String)>,
+    query: axum::extract::RawQuery,
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let content_type = request
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let body_bytes = match axum::body::to_bytes(request.into_body(), 50 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "Failed to read body").into_response();
+        }
+    };
+    proxy_remote_request(
+        remote_name,
+        workspace,
+        rest,
+        query.0,
+        state,
+        reqwest::Method::PUT,
+        Some(body_bytes),
+        content_type,
+    )
+    .await
+}
+
+async fn proxy_remote_delete(
+    Path((remote_name, workspace, rest)): Path<(String, String, String)>,
+    query: axum::extract::RawQuery,
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    proxy_remote_request(
+        remote_name,
+        workspace,
+        rest,
+        query.0,
+        state,
+        reqwest::Method::DELETE,
+        None,
+        None,
+    )
+    .await
+}
+
 async fn proxy_remote_request(
     remote_name: String,
     workspace: String,
     rest: String,
+    query_string: Option<String>,
     state: AppState,
     method: reqwest::Method,
     body: Option<axum::body::Bytes>,
@@ -1050,7 +1107,11 @@ async fn proxy_remote_request(
         }
     };
 
-    let target_url = format!("{base_url}/api/workspaces/{workspace}/{rest}");
+    let mut target_url = format!("{base_url}/api/workspaces/{workspace}/{rest}");
+    if let Some(qs) = query_string {
+        target_url.push('?');
+        target_url.push_str(&qs);
+    }
     let mut req_builder = state.http_client.request(method, &target_url);
 
     if let Some(ct) = content_type {
