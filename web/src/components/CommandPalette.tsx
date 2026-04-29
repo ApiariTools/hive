@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Command } from "cmdk";
 import type { Workspace, Bot, Worker, CrossWorkspaceBot } from "../types";
 import styles from "./CommandPalette.module.css";
@@ -17,6 +18,8 @@ interface Props {
   otherWorkspaceBots: CrossWorkspaceBot[];
   onSelectWorkspaceBot: (workspace: string, botName: string, remote?: string) => void;
   onStartResearch?: () => void;
+  unread?: Record<string, number>;
+  otherWorkspaceUnreads?: Record<string, Record<string, number>>;
 }
 
 export function CommandPalette({
@@ -34,7 +37,34 @@ export function CommandPalette({
   otherWorkspaceBots,
   onSelectWorkspaceBot,
   onStartResearch,
+  unread = {},
+  otherWorkspaceUnreads = {},
 }: Props) {
+  // Sort current workspace bots: unreads first (highest count first), then original order
+  const sortedBots = useMemo(() => {
+    return [...bots].sort((a, b) => {
+      const ua = unread[a.name] || 0;
+      const ub = unread[b.name] || 0;
+      if (ua > 0 && ub === 0) return -1;
+      if (ua === 0 && ub > 0) return 1;
+      if (ua !== ub) return ub - ua;
+      return 0;
+    });
+  }, [bots, unread]);
+
+  // Sort other workspace bots: unreads first
+  const sortedOtherBots = useMemo(() => {
+    return [...otherWorkspaceBots].sort((a, b) => {
+      const keyA = `${a.remote || "local"}/${a.workspace}`;
+      const keyB = `${b.remote || "local"}/${b.workspace}`;
+      const ua = otherWorkspaceUnreads[keyA]?.[a.bot.name] || 0;
+      const ub = otherWorkspaceUnreads[keyB]?.[b.bot.name] || 0;
+      if (ua > 0 && ub === 0) return -1;
+      if (ua === 0 && ub > 0) return 1;
+      if (ua !== ub) return ub - ua;
+      return 0;
+    });
+  }, [otherWorkspaceBots, otherWorkspaceUnreads]);
   return (
     <Command.Dialog
       open={open}
@@ -65,7 +95,7 @@ export function CommandPalette({
           ))}
         </Command.Group>
         <Command.Group heading="Bots">
-          {bots.map((b) => (
+          {sortedBots.map((b) => (
             <Command.Item
               key={b.name}
               value={`bot ${b.name}`}
@@ -75,27 +105,37 @@ export function CommandPalette({
               }}
             >
               {b.name}
+              {(unread[b.name] || 0) > 0 && (
+                <span className={styles.unreadBadge}>{unread[b.name]}</span>
+              )}
               {b.name === currentBot && (
                 <span className={styles.current}>current</span>
               )}
             </Command.Item>
           ))}
         </Command.Group>
-        {otherWorkspaceBots.length > 0 && (
+        {sortedOtherBots.length > 0 && (
           <Command.Group heading="Other Workspace Bots">
-            {otherWorkspaceBots.map((entry) => (
-              <Command.Item
-                key={`${entry.remote || "local"}/${entry.workspace}/${entry.bot.name}`}
-                value={`bot ${entry.workspace} ${entry.bot.name} ${entry.remote || ""}`}
-                onSelect={() => {
-                  onSelectWorkspaceBot(entry.workspace, entry.bot.name, entry.remote);
-                  onOpenChange(false);
-                }}
-              >
-                {entry.workspace} / {entry.bot.name}
-                {entry.remote && <span className={styles.remoteBadge}>{entry.remote}</span>}
-              </Command.Item>
-            ))}
+            {sortedOtherBots.map((entry) => {
+              const key = `${entry.remote || "local"}/${entry.workspace}`;
+              const count = otherWorkspaceUnreads[key]?.[entry.bot.name] || 0;
+              return (
+                <Command.Item
+                  key={`${entry.remote || "local"}/${entry.workspace}/${entry.bot.name}`}
+                  value={`bot ${entry.workspace} ${entry.bot.name} ${entry.remote || ""}`}
+                  onSelect={() => {
+                    onSelectWorkspaceBot(entry.workspace, entry.bot.name, entry.remote);
+                    onOpenChange(false);
+                  }}
+                >
+                  {entry.workspace} / {entry.bot.name}
+                  {count > 0 && (
+                    <span className={styles.unreadBadge}>{count}</span>
+                  )}
+                  {entry.remote && <span className={styles.remoteBadge}>{entry.remote}</span>}
+                </Command.Item>
+              );
+            })}
           </Command.Group>
         )}
         {onStartResearch && (

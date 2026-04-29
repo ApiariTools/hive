@@ -79,4 +79,36 @@ describe("CommandPalette", () => {
     await user.click(screen.getByText("Social"));
     expect(onSelectBot).toHaveBeenCalledWith("Social");
   });
+
+  it("shows unread badge for bots with unreads", () => {
+    render(<CommandPalette {...defaultProps} unread={{ Social: 3 }} />);
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("does not show unread badge when count is zero", () => {
+    render(<CommandPalette {...defaultProps} unread={{ Social: 0 }} />);
+    // Only "Social" text, no badge number
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+  });
+
+  it("sorts bots with unreads before bots without", () => {
+    render(
+      <CommandPalette {...defaultProps} unread={{ Social: 5 }} />
+    );
+    // Social (with unreads) should appear before Main in DOM order
+    const social = screen.getByText("Social");
+    const main = screen.getByText("Main");
+    // compareDocumentPosition bit 4 = DOCUMENT_POSITION_FOLLOWING
+    expect(social.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("shows unread badge for other workspace bots", () => {
+    render(
+      <CommandPalette
+        {...defaultProps}
+        otherWorkspaceUnreads={{ "local/mgm": { Analytics: 7 } }}
+      />
+    );
+    expect(screen.getByText("7")).toBeInTheDocument();
+  });
 });
