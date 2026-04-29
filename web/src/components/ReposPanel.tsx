@@ -103,7 +103,7 @@ export function ReposPanel({ repos, researchTasks, onSelectWorker, mobileOpen, o
             </div>
           ))
         ) : (
-          <div className={styles.empty}>Use /research &lt;topic&gt; to start</div>
+          <div className={styles.emptyHint}>Use /research &lt;topic&gt; to start</div>
         )}
       </div>
     </>
