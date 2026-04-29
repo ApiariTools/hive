@@ -121,6 +121,12 @@
   margin-top: 40px;
 }
 
+.emptyHint {
+  color: var(--text-faint);
+  font-size: 13px;
+  padding: 10px 16px;
+}
+
 .reviewBadge {
   font-size: 10px;
   padding: 1px 6px;

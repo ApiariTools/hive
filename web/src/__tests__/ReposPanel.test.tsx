@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { ReposPanel } from "../components/ReposPanel";
-import type { Repo } from "../types";
+import type { Repo, ResearchTask } from "../types";
 
 const repos: Repo[] = [
   { name: "hive", path: "/dev/hive", has_swarm: true, is_clean: true, branch: "main", workers: [] },
@@ -70,5 +70,24 @@ describe("ReposPanel", () => {
   it("shows Repos title", () => {
     render(<ReposPanel {...defaultProps} />);
     expect(screen.getByText("Repos")).toBeInTheDocument();
+  });
+
+  it("always shows Research header even with no tasks", () => {
+    render(<ReposPanel {...defaultProps} />);
+    expect(screen.getByText("Research")).toBeInTheDocument();
+    expect(screen.getByText("Use /research <topic> to start")).toBeInTheDocument();
+  });
+
+  it("shows research tasks when provided", () => {
+    const tasks: ResearchTask[] = [
+      { id: "r1", topic: "auth patterns", status: "running" },
+      { id: "r2", topic: "caching strategies", status: "complete", output_file: "caching.md" },
+    ];
+    render(<ReposPanel {...defaultProps} researchTasks={tasks} />);
+    expect(screen.getByText("Research")).toBeInTheDocument();
+    expect(screen.getByText("auth patterns")).toBeInTheDocument();
+    expect(screen.getByText("caching strategies")).toBeInTheDocument();
+    expect(screen.getByText("caching.md")).toBeInTheDocument();
+    expect(screen.queryByText("Use /research <topic> to start")).not.toBeInTheDocument();
   });
 });
