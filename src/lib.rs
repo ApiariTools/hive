@@ -7,6 +7,7 @@ pub mod init;
 pub mod pr_feedback;
 pub mod pr_review;
 pub mod publish;
+pub mod remote;
 pub mod research;
 pub mod routes;
 pub mod stt;

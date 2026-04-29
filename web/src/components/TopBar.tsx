@@ -6,7 +6,8 @@ import styles from "./TopBar.module.css";
 interface Props {
   workspaces: Workspace[];
   active: string;
-  onSelect: (name: string) => void;
+  activeRemote?: string;
+  onSelect: (name: string, remote?: string) => void;
   onMenuToggle?: () => void;
   onOpenPalette?: () => void;
   usage?: UsageData;
@@ -28,7 +29,7 @@ function dotTitle(p: { name: string; status: string; usage_percent: number | nul
   return t;
 }
 
-export function TopBar({ workspaces, active, onSelect, onMenuToggle, onOpenPalette, usage }: Props) {
+export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggle, onOpenPalette, usage }: Props) {
   const showDots = usage?.installed && usage.providers.length > 0;
   const showInstallHint = usage && !usage.installed;
 
@@ -38,15 +39,19 @@ export function TopBar({ workspaces, active, onSelect, onMenuToggle, onOpenPalet
         <span /><span /><span />
       </button>
       <div className={styles.logo}>hive</div>
-      {workspaces.map((ws) => (
-        <button
-          key={ws.name}
-          className={`${styles.tab} ${ws.name === active ? styles.active : ""}`}
-          onClick={() => onSelect(ws.name)}
-        >
-          {ws.name}
-        </button>
-      ))}
+      {workspaces.map((ws) => {
+        const isActive = ws.name === active && ws.remote === activeRemote;
+        return (
+          <button
+            key={`${ws.remote || "local"}/${ws.name}`}
+            className={`${styles.tab} ${isActive ? styles.active : ""}`}
+            onClick={() => onSelect(ws.name, ws.remote)}
+          >
+            {ws.name}
+            {ws.remote && <span className={styles.remoteBadge}>{ws.remote}</span>}
+          </button>
+        );
+      })}
       {showDots && (
         <div className={styles.usageDots}>
           {usage.providers.map((p) => (

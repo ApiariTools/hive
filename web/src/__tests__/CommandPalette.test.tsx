@@ -68,7 +68,7 @@ describe("CommandPalette", () => {
       />
     );
     await user.click(screen.getByText("mgm / Analytics"));
-    expect(onSelectWorkspaceBot).toHaveBeenCalledWith("mgm", "Analytics");
+    expect(onSelectWorkspaceBot).toHaveBeenCalledWith("mgm", "Analytics", undefined);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 

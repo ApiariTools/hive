@@ -77,7 +77,7 @@ describe("App", () => {
     const user = userEvent.setup();
     await user.click(screen.getByText("Main"));
     await waitFor(() => {
-      expect(api.markSeen).toHaveBeenCalledWith("apiari", "Main");
+      expect(api.markSeen).toHaveBeenCalledWith("apiari", "Main", undefined);
     });
   });
 
@@ -217,7 +217,7 @@ describe("WebSocket message dedup", () => {
 
     // Should trigger getConversations fetch (not a direct append)
     await waitFor(() => {
-      expect(api.getConversations).toHaveBeenCalledWith("apiari", "Main", 30);
+      expect(api.getConversations).toHaveBeenCalledWith("apiari", "Main", 30, undefined);
     });
 
     // The new message should appear exactly once
@@ -239,7 +239,7 @@ describe("Research command", () => {
     await user.keyboard("{Enter}");
 
     await waitFor(() => {
-      expect(api.startResearch).toHaveBeenCalledWith("apiari", "test topic");
+      expect(api.startResearch).toHaveBeenCalledWith("apiari", "test topic", undefined);
     });
     // Should NOT call sendMessage for /research commands
     const sendMock = api.sendMessage as ReturnType<typeof vi.fn>;

@@ -46,6 +46,7 @@ export default function App() {
   const initial = parseHash();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspace, setWorkspace] = useState(initial.workspace);
+  const [remote, setRemote] = useState<string | undefined>();
   const [bot, setBot] = useState(initial.bot);
   const [workerId, setWorkerId] = useState<string | null>(initial.workerId);
   const [bots, setBots] = useState<Bot[]>([]);
@@ -69,6 +70,8 @@ export default function App() {
   const lastMsgId = useRef<number>(0);
   const loadingRef = useRef(false);
   const tabHiddenRef = useRef(document.hidden);
+  const remoteRef = useRef(remote);
+  useEffect(() => { remoteRef.current = remote; }, [remote]);
 
   // Track mobile state
   useEffect(() => {
@@ -105,9 +108,13 @@ export default function App() {
 
   // WebSocket for real-time updates
   useEffect(() => {
-    const ws = api.connectWebSocket((event) => {
+    const wsConn = api.connectWebSocket((event) => {
+      // Match remote events: remote field must match current remote
+      const eventRemote = (event.remote as string) || undefined;
+      const isCurrentWs = event.workspace === workspace && eventRemote === remote;
+
       if (event.type === "bot_status") {
-        if (event.workspace === workspace && event.bot === bot) {
+        if (isCurrentWs && event.bot === bot) {
           if (event.status === "idle") {
             setLoading(false);
             setLoadingStatus(undefined);
@@ -121,8 +128,8 @@ export default function App() {
         }
       }
       if (event.type === "research_update") {
-        if (event.workspace === workspace) {
-          api.getResearchTasks(workspace).then(setResearchTasks);
+        if (isCurrentWs) {
+          api.getResearchTasks(workspace, remote).then(setResearchTasks);
           if (event.status === "complete") {
             setMessages((prev) => [
               ...prev,
@@ -141,11 +148,11 @@ export default function App() {
       }
       if (event.type === "message") {
         // Refresh unread counts
-        if (workspace) api.getUnread(workspace).then(setUnread);
+        if (workspace) api.getUnread(workspace, remote).then(setUnread);
         // Trigger an immediate fetch instead of appending directly —
         // this avoids duplicates from WS + poll both adding the same message
-        if (event.workspace === workspace && event.bot === bot) {
-          api.getConversations(workspace, bot, 30).then((msgs) => {
+        if (isCurrentWs && event.bot === bot) {
+          api.getConversations(workspace, bot, 30, remote).then((msgs) => {
             const latestId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
             if (latestId > lastMsgId.current) {
               lastMsgId.current = latestId;
@@ -155,18 +162,18 @@ export default function App() {
         }
       }
     });
-    return () => ws.close();
-  }, [workspace, bot]);
+    return () => wsConn.close();
+  }, [workspace, bot, remote]);
 
   // Load bots + workers when workspace changes
   useEffect(() => {
     if (!workspace) return;
-    api.getBots(workspace).then(setBots);
-    api.getWorkers(workspace).then(setWorkers);
-    api.getRepos(workspace).then(setRepos);
-    api.getUnread(workspace).then(setUnread);
-    api.getResearchTasks(workspace).then(setResearchTasks);
-  }, [workspace]);
+    api.getBots(workspace, remote).then(setBots);
+    api.getWorkers(workspace, remote).then(setWorkers);
+    api.getRepos(workspace, remote).then(setRepos);
+    api.getUnread(workspace, remote).then(setUnread);
+    api.getResearchTasks(workspace, remote).then(setResearchTasks);
+  }, [workspace, remote]);
 
   // Load conversations + initial status when workspace or bot changes
   useEffect(() => {
@@ -178,13 +185,13 @@ export default function App() {
     setLoadingStatus(undefined);
     setStreamingContent("");
     lastMsgId.current = 0;
-    api.getConversations(workspace, bot, 30).then((msgs) => {
+    api.getConversations(workspace, bot, 30, remote).then((msgs) => {
       if (cancelled) return;
       setMessages(msgs);
       setMessagesLoading(false);
       if (msgs.length > 0) lastMsgId.current = msgs[msgs.length - 1].id;
     });
-    api.getBotStatus(workspace, bot).then((s) => {
+    api.getBotStatus(workspace, bot, remote).then((s) => {
       if (cancelled) return;
       if (s.status !== "idle") {
         setLoading(true);
@@ -194,13 +201,13 @@ export default function App() {
     });
     // Mark current bot as seen after a brief delay (so badges show first on load)
     const seenTimer = setTimeout(() => {
-      api.markSeen(workspace, bot);
+      api.markSeen(workspace, bot, remote);
     }, 500);
     return () => {
       cancelled = true;
       clearTimeout(seenTimer);
     };
-  }, [workspace, bot]);
+  }, [workspace, bot, remote]);
 
   // Adaptive polling: 2s when active, 10s when idle, 30s when tab hidden
   useEffect(() => {
@@ -215,7 +222,8 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout>;
     let cancelled = false;
     function poll() {
-      const convP = api.getConversations(workspace, bot, 30).then((msgs) => {
+      const r = remoteRef.current;
+      const convP = api.getConversations(workspace, bot, 30, r).then((msgs) => {
         if (cancelled) return;
         const latestId = msgs.length > 0 ? msgs[msgs.length - 1].id : 0;
         if (latestId > lastMsgId.current) {
@@ -223,7 +231,7 @@ export default function App() {
           setMessages(msgs);
         }
       });
-      const statusP = api.getBotStatus(workspace, bot).then((s) => {
+      const statusP = api.getBotStatus(workspace, bot, r).then((s) => {
         if (cancelled) return;
         if (s.status === "idle") {
           setLoading(false);
@@ -250,20 +258,20 @@ export default function App() {
   useEffect(() => {
     if (!workspace) return;
     const workerInterval = setInterval(() => {
-      api.getWorkers(workspace).then(setWorkers);
+      api.getWorkers(workspace, remote).then(setWorkers);
     }, 5000);
     const repoInterval = setInterval(() => {
-      api.getRepos(workspace).then(setRepos);
+      api.getRepos(workspace, remote).then(setRepos);
     }, 30000);
     const researchInterval = setInterval(() => {
-      api.getResearchTasks(workspace).then(setResearchTasks);
+      api.getResearchTasks(workspace, remote).then(setResearchTasks);
     }, 10000);
     return () => {
       clearInterval(workerInterval);
       clearInterval(repoInterval);
       clearInterval(researchInterval);
     };
-  }, [workspace]);
+  }, [workspace, remote]);
 
   // Poll usage every 2 minutes
   useEffect(() => {
@@ -296,11 +304,11 @@ export default function App() {
     if (!paletteOpen || workspaces.length === 0) return;
     let cancelled = false;
     setOtherWorkspaceBots([]);
-    const others = workspaces.filter((ws) => ws.name !== workspace);
+    const others = workspaces.filter((ws) => ws.name !== workspace || ws.remote !== remote);
     Promise.allSettled(
       others.map((ws) =>
-        api.getBots(ws.name).then((bots) =>
-          bots.map((b) => ({ workspace: ws.name, bot: b }))
+        api.getBots(ws.name, ws.remote).then((bots) =>
+          bots.map((b) => ({ workspace: ws.name, bot: b, remote: ws.remote }))
         )
       )
     ).then((results) => {
@@ -332,16 +340,18 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, []);
 
-  const handleSelectWorkspace = useCallback((ws: string) => {
+  const handleSelectWorkspace = useCallback((ws: string, wsRemote?: string) => {
     setWorkspace(ws);
+    setRemote(wsRemote);
     setBot(isMobile ? "Main" : "");
     setWorkerId(null);
     setLoading(false);
     setLoadingStatus(undefined);
   }, [isMobile]);
 
-  const handleSelectWorkspaceBot = useCallback((ws: string, botName: string) => {
+  const handleSelectWorkspaceBot = useCallback((ws: string, botName: string, wsRemote?: string) => {
     setWorkspace(ws);
+    setRemote(wsRemote);
     setBot(botName);
     setWorkerId(null);
     setDocsOpen(false);
@@ -370,18 +380,18 @@ export default function App() {
     setDocsOpen(false);
     setMenuOpen(false);
     if (workspace) {
-      api.getWorkerDetail(workspace, id).then(setWorkerDetail).catch(() => setWorkerDetail(null));
+      api.getWorkerDetail(workspace, id, remote).then(setWorkerDetail).catch(() => setWorkerDetail(null));
     }
-  }, [workspace]);
+  }, [workspace, remote]);
 
   // Poll worker detail while viewing a worker
   useEffect(() => {
     if (!workspace || !workerId) return;
     const interval = setInterval(() => {
-      api.getWorkerDetail(workspace, workerId).then(setWorkerDetail).catch(() => {});
+      api.getWorkerDetail(workspace, workerId, remote).then(setWorkerDetail).catch(() => {});
     }, 3000);
     return () => clearInterval(interval);
-  }, [workspace, workerId]);
+  }, [workspace, workerId, remote]);
 
   const handleBackFromWorker = useCallback(() => {
     setWorkerId(null);
@@ -394,7 +404,7 @@ export default function App() {
         const topic = text.slice("/research ".length).trim();
         if (topic) {
           try {
-            await api.startResearch(workspace, topic);
+            await api.startResearch(workspace, topic, remote);
             // Add a local system-style message to show it was started
             setMessages((prev) => [
               ...prev,
@@ -409,7 +419,7 @@ export default function App() {
               },
             ]);
             // Refresh research tasks
-            api.getResearchTasks(workspace).then(setResearchTasks);
+            api.getResearchTasks(workspace, remote).then(setResearchTasks);
           } catch (e) {
             console.error("Failed to start research:", e);
           }
@@ -426,10 +436,10 @@ export default function App() {
       // Fire and forget — daemon handles everything
       setLoading(true);
       setLoadingStatus("Thinking...");
-      await api.sendMessage(workspace, bot, text, apiAttachments);
+      await api.sendMessage(workspace, bot, text, apiAttachments, remote);
       // Polling will pick up the user message + bot response from DB
     },
-    [workspace, bot],
+    [workspace, bot, remote],
   );
 
   // Merge fresh worker data (5s poll) into repos (30s poll) so worker status stays current
@@ -450,6 +460,7 @@ export default function App() {
       <TopBar
         workspaces={workspaces}
         active={workspace}
+        activeRemote={remote}
         onSelect={handleSelectWorkspace}
         onMenuToggle={() => setMenuOpen((v) => !v)}
         onOpenPalette={() => setPaletteOpen(true)}
@@ -476,12 +487,13 @@ export default function App() {
           onSelectDocs={handleSelectDocs}
         />
         {docsOpen ? (
-          <DocsPanel workspace={workspace} />
+          <DocsPanel workspace={workspace} remote={remote} />
         ) : workerId && selectedWorker ? (
           <WorkerDetail
             worker={selectedWorker}
             detail={workerDetail}
             workspace={workspace}
+            remote={remote}
             onBack={handleBackFromWorker}
           />
         ) : bot ? (
@@ -496,7 +508,7 @@ export default function App() {
             onSend={handleSend}
             workerCount={workers.length}
             onWorkersToggle={() => setWorkersOpen((v) => !v)}
-            onCancel={loading ? () => api.cancelBot(workspace, bot) : undefined}
+            onCancel={loading ? () => api.cancelBot(workspace, bot, remote) : undefined}
             ttsVoice={workspaces.find((w) => w.name === workspace)?.tts_voice}
             ttsSpeed={workspaces.find((w) => w.name === workspace)?.tts_speed}
           />
@@ -532,8 +544,8 @@ export default function App() {
         onStartResearch={() => {
           const topic = prompt("Research topic:");
           if (topic?.trim()) {
-            api.startResearch(workspace, topic.trim()).then(() => {
-              api.getResearchTasks(workspace).then(setResearchTasks);
+            api.startResearch(workspace, topic.trim(), remote).then(() => {
+              api.getResearchTasks(workspace, remote).then(setResearchTasks);
               setMessages((prev) => [
                 ...prev,
                 {

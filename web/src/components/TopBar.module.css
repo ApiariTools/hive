@@ -72,6 +72,18 @@
   border-radius: 1px;
 }
 
+.remoteBadge {
+  font-size: 10px;
+  color: var(--text-faint);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: middle;
+  font-weight: 400;
+}
+
 .usageDots {
   display: flex;
   gap: 4px;

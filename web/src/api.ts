@@ -8,45 +8,54 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
+/** Build the workspace path prefix, routing through the proxy for remote workspaces */
+function wsPath(workspace: string, remote?: string): string {
+  if (remote) return `/remotes/${remote}/workspaces/${workspace}`;
+  return `/workspaces/${workspace}`;
+}
+
 export function getWorkspaces(): Promise<Workspace[]> {
   return get("/workspaces");
 }
 
-export function getBots(workspace: string): Promise<Bot[]> {
-  return get(`/workspaces/${workspace}/bots`);
+export function getBots(workspace: string, remote?: string): Promise<Bot[]> {
+  return get(`${wsPath(workspace, remote)}/bots`);
 }
 
-export function getWorkers(workspace: string): Promise<Worker[]> {
-  return get(`/workspaces/${workspace}/workers`);
+export function getWorkers(workspace: string, remote?: string): Promise<Worker[]> {
+  return get(`${wsPath(workspace, remote)}/workers`);
 }
 
-export function getRepos(workspace: string): Promise<Repo[]> {
-  return get(`/workspaces/${workspace}/repos`);
+export function getRepos(workspace: string, remote?: string): Promise<Repo[]> {
+  return get(`${wsPath(workspace, remote)}/repos`);
 }
 
 export function getConversations(
   workspace: string,
   bot: string,
   limit?: number,
+  remote?: string,
 ): Promise<Message[]> {
   const params = limit ? `?limit=${limit}` : "";
-  return get(`/workspaces/${workspace}/conversations/${bot}${params}`);
+  return get(`${wsPath(workspace, remote)}/conversations/${bot}${params}`);
 }
 
 export function getWorkerDetail(
   workspace: string,
   workerId: string,
+  remote?: string,
 ): Promise<WorkerDetail> {
-  return get(`/workspaces/${workspace}/workers/${workerId}`);
+  return get(`${wsPath(workspace, remote)}/workers/${workerId}`);
 }
 
 export async function sendWorkerMessage(
   workspace: string,
   workerId: string,
   message: string,
+  remote?: string,
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch(
-    `${BASE}/workspaces/${workspace}/workers/${workerId}/send`,
+    `${BASE}${wsPath(workspace, remote)}/workers/${workerId}/send`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -65,26 +74,28 @@ export interface BotStatus {
 export function getBotStatus(
   workspace: string,
   bot: string,
+  remote?: string,
 ): Promise<BotStatus> {
-  return get(`/workspaces/${workspace}/bots/${bot}/status`);
+  return get(`${wsPath(workspace, remote)}/bots/${bot}/status`);
 }
 
 export async function cancelBot(
   workspace: string,
   bot: string,
+  remote?: string,
 ): Promise<{ ok: boolean }> {
-  const res = await fetch(`${BASE}/workspaces/${workspace}/bots/${bot}/cancel`, {
+  const res = await fetch(`${BASE}${wsPath(workspace, remote)}/bots/${bot}/cancel`, {
     method: "POST",
   });
   return res.json();
 }
 
-export function getUnread(workspace: string): Promise<Record<string, number>> {
-  return get(`/workspaces/${workspace}/unread`);
+export function getUnread(workspace: string, remote?: string): Promise<Record<string, number>> {
+  return get(`${wsPath(workspace, remote)}/unread`);
 }
 
-export async function markSeen(workspace: string, bot: string): Promise<void> {
-  await fetch(`${BASE}/workspaces/${workspace}/seen/${bot}`, { method: "POST" });
+export async function markSeen(workspace: string, bot: string, remote?: string): Promise<void> {
+  await fetch(`${BASE}${wsPath(workspace, remote)}/seen/${bot}`, { method: "POST" });
 }
 
 export function connectWebSocket(
@@ -139,20 +150,21 @@ export function getUsage(): Promise<UsageData> {
   return get("/usage");
 }
 
-export function getDocs(workspace: string): Promise<Doc[]> {
-  return get(`/workspaces/${workspace}/docs`);
+export function getDocs(workspace: string, remote?: string): Promise<Doc[]> {
+  return get(`${wsPath(workspace, remote)}/docs`);
 }
 
-export function getDoc(workspace: string, filename: string): Promise<Doc> {
-  return get(`/workspaces/${workspace}/docs/${encodeURIComponent(filename)}`);
+export function getDoc(workspace: string, filename: string, remote?: string): Promise<Doc> {
+  return get(`${wsPath(workspace, remote)}/docs/${encodeURIComponent(filename)}`);
 }
 
 export async function saveDoc(
   workspace: string,
   filename: string,
   content: string,
+  remote?: string,
 ): Promise<{ ok: boolean }> {
-  const res = await fetch(`${BASE}/workspaces/${workspace}/docs/${encodeURIComponent(filename)}`, {
+  const res = await fetch(`${BASE}${wsPath(workspace, remote)}/docs/${encodeURIComponent(filename)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
@@ -164,23 +176,25 @@ export async function saveDoc(
 export async function deleteDoc(
   workspace: string,
   filename: string,
+  remote?: string,
 ): Promise<{ ok: boolean }> {
-  const res = await fetch(`${BASE}/workspaces/${workspace}/docs/${encodeURIComponent(filename)}`, {
+  const res = await fetch(`${BASE}${wsPath(workspace, remote)}/docs/${encodeURIComponent(filename)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`DELETE docs/${filename}: ${res.status}`);
   return res.json();
 }
 
-export function getResearchTasks(workspace: string): Promise<ResearchTask[]> {
-  return get(`/workspaces/${workspace}/research`);
+export function getResearchTasks(workspace: string, remote?: string): Promise<ResearchTask[]> {
+  return get(`${wsPath(workspace, remote)}/research`);
 }
 
 export async function startResearch(
   workspace: string,
   topic: string,
+  remote?: string,
 ): Promise<{ id: string; topic: string; status: string }> {
-  const res = await fetch(`${BASE}/workspaces/${workspace}/research`, {
+  const res = await fetch(`${BASE}${wsPath(workspace, remote)}/research`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ topic }),
@@ -194,8 +208,9 @@ export async function sendMessage(
   bot: string,
   message: string,
   attachments?: Array<{ name: string; type: string; dataUrl: string }>,
+  remote?: string,
 ): Promise<{ ok: boolean }> {
-  const res = await fetch(`${BASE}/workspaces/${workspace}/chat/${bot}`, {
+  const res = await fetch(`${BASE}${wsPath(workspace, remote)}/chat/${bot}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, attachments }),

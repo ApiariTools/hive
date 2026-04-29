@@ -10,11 +10,11 @@ interface Props {
   workers: Worker[];
   currentWorkspace: string;
   currentBot: string;
-  onSelectWorkspace: (name: string) => void;
+  onSelectWorkspace: (name: string, remote?: string) => void;
   onSelectBot: (name: string) => void;
   onSelectWorker: (id: string) => void;
   otherWorkspaceBots: CrossWorkspaceBot[];
-  onSelectWorkspaceBot: (workspace: string, botName: string) => void;
+  onSelectWorkspaceBot: (workspace: string, botName: string, remote?: string) => void;
   onStartResearch?: () => void;
 }
 
@@ -47,15 +47,16 @@ export function CommandPalette({
         <Command.Group heading="Workspaces">
           {workspaces.map((ws) => (
             <Command.Item
-              key={ws.name}
-              value={`workspace ${ws.name}`}
+              key={`${ws.remote || "local"}/${ws.name}`}
+              value={`workspace ${ws.name} ${ws.remote || ""}`}
               onSelect={() => {
-                onSelectWorkspace(ws.name);
+                onSelectWorkspace(ws.name, ws.remote);
                 onOpenChange(false);
               }}
             >
               {ws.name}
-              {ws.name === currentWorkspace && (
+              {ws.remote && <span className={styles.remoteBadge}>{ws.remote}</span>}
+              {ws.name === currentWorkspace && !ws.remote && (
                 <span className={styles.current}>current</span>
               )}
             </Command.Item>
@@ -82,14 +83,15 @@ export function CommandPalette({
           <Command.Group heading="Other Workspace Bots">
             {otherWorkspaceBots.map((entry) => (
               <Command.Item
-                key={`${entry.workspace}/${entry.bot.name}`}
-                value={`bot ${entry.workspace} ${entry.bot.name}`}
+                key={`${entry.remote || "local"}/${entry.workspace}/${entry.bot.name}`}
+                value={`bot ${entry.workspace} ${entry.bot.name} ${entry.remote || ""}`}
                 onSelect={() => {
-                  onSelectWorkspaceBot(entry.workspace, entry.bot.name);
+                  onSelectWorkspaceBot(entry.workspace, entry.bot.name, entry.remote);
                   onOpenChange(false);
                 }}
               >
                 {entry.workspace} / {entry.bot.name}
+                {entry.remote && <span className={styles.remoteBadge}>{entry.remote}</span>}
               </Command.Item>
             ))}
           </Command.Group>

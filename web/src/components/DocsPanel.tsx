@@ -8,9 +8,10 @@ import styles from "./DocsPanel.module.css";
 
 interface Props {
   workspace: string;
+  remote?: string;
 }
 
-export function DocsPanel({ workspace }: Props) {
+export function DocsPanel({ workspace, remote }: Props) {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [content, setContent] = useState("");
@@ -23,8 +24,8 @@ export function DocsPanel({ workspace }: Props) {
   const edited = content !== savedContent;
 
   const loadDocs = useCallback(() => {
-    api.getDocs(workspace).then(setDocs);
-  }, [workspace]);
+    api.getDocs(workspace, remote).then(setDocs);
+  }, [workspace, remote]);
 
   useEffect(() => {
     loadDocs();
@@ -47,7 +48,7 @@ export function DocsPanel({ workspace }: Props) {
       setSelected(filename);
       selectedRef.current = filename;
       setPreview(false);
-      api.getDoc(workspace, filename).then((doc) => {
+      api.getDoc(workspace, filename, remote).then((doc) => {
         // Guard against out-of-order responses
         if (selectedRef.current !== filename) return;
         setContent(doc.content || "");
@@ -61,7 +62,7 @@ export function DocsPanel({ workspace }: Props) {
     if (!selected) return;
     setSaving(true);
     try {
-      await api.saveDoc(workspace, selected, content);
+      await api.saveDoc(workspace, selected, content, remote);
       setSavedContent(content);
       loadDocs();
     } finally {
@@ -72,7 +73,7 @@ export function DocsPanel({ workspace }: Props) {
   const handleDelete = useCallback(async () => {
     if (!selected) return;
     if (!window.confirm(`Delete ${selected}?`)) return;
-    await api.deleteDoc(workspace, selected);
+    await api.deleteDoc(workspace, selected, remote);
     setSelected(null);
     selectedRef.current = null;
     setContent("");
@@ -84,7 +85,7 @@ export function DocsPanel({ workspace }: Props) {
     let name = window.prompt("New document filename:");
     if (!name) return;
     if (!name.endsWith(".md")) name += ".md";
-    api.saveDoc(workspace, name, "").then(() => {
+    api.saveDoc(workspace, name, "", remote).then(() => {
       loadDocs();
       selectDoc(name);
     });
@@ -97,7 +98,7 @@ export function DocsPanel({ workspace }: Props) {
       const currentSelected = selected;
       debounceRef.current = setTimeout(() => {
         if (currentSelected && selectedRef.current === currentSelected) {
-          api.saveDoc(workspace, currentSelected, value).then(() => {
+          api.saveDoc(workspace, currentSelected, value, remote).then(() => {
             if (selectedRef.current === currentSelected) {
               setSavedContent(value);
             }

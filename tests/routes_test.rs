@@ -19,6 +19,7 @@ fn test_app_with_workspace(workspace_toml: &str) -> (axum::Router, tempfile::Tem
         events,
         Default::default(),
         Default::default(),
+        apiari_hive::remote::new_registry(),
     );
     (app, dir)
 }
@@ -77,6 +78,7 @@ async fn test_multiple_workspaces() {
         events,
         Default::default(),
         Default::default(),
+        apiari_hive::remote::new_registry(),
     );
 
     let (_, body) = get(&app, "/api/workspaces").await;
@@ -163,6 +165,7 @@ async fn test_unread_per_bot() {
         events,
         Default::default(),
         Default::default(),
+        apiari_hive::remote::new_registry(),
     );
 
     let (_, body) = get(&app, "/api/workspaces/test/unread").await;
@@ -209,6 +212,7 @@ async fn test_cancel_resets_status() {
         events,
         Default::default(),
         Default::default(),
+        apiari_hive::remote::new_registry(),
     );
 
     // Cancel
@@ -273,6 +277,7 @@ async fn test_search_endpoint() {
         events,
         Default::default(),
         Default::default(),
+        apiari_hive::remote::new_registry(),
     );
 
     let (_, body) = get(
@@ -306,6 +311,7 @@ async fn test_non_toml_files_ignored() {
         events,
         Default::default(),
         Default::default(),
+        apiari_hive::remote::new_registry(),
     );
 
     let (_, body) = get(&app, "/api/workspaces").await;

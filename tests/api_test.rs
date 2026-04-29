@@ -26,6 +26,7 @@ fn test_app() -> (axum::Router, tempfile::TempDir) {
         events,
         Default::default(),
         Default::default(),
+        apiari_hive::remote::new_registry(),
     );
     (app, dir)
 }
@@ -54,6 +55,7 @@ fn test_app_with_tts_url(tts_base_url: &str) -> (axum::Router, tempfile::TempDir
         reqwest::Client::new(),
         tts_base_url.to_string(),
         "http://127.0.0.1:4202".to_string(),
+        apiari_hive::remote::new_registry(),
     );
     (app, dir)
 }
@@ -120,6 +122,7 @@ async fn test_list_workspaces_tts_voice() {
         events,
         Default::default(),
         Default::default(),
+        apiari_hive::remote::new_registry(),
     );
 
     let (status, body) = get(&app, "/api/workspaces").await;
