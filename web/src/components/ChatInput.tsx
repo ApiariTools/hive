@@ -18,11 +18,12 @@ interface Props {
   voiceMode?: boolean;
   triggerRecord?: number;
   playTts?: (url: string, onEnd?: () => void) => Promise<void>;
+  queueCount?: number;
 }
 
 const VOICE_CONFIRM_DELAY_MS = 5000;
 
-export function ChatInput({ placeholder, disabled, onSend, showAttachments = true, voiceMode, triggerRecord, playTts }: Props) {
+export function ChatInput({ placeholder, disabled, onSend, showAttachments = true, voiceMode, triggerRecord, playTts, queueCount = 0 }: Props) {
   // ── Text input state ──
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -271,7 +272,11 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
 
   // ── VAD lifecycle ──
 
+  const micInitRef = useRef(false);
+
   async function startListening() {
+    if (micState !== "idle" || micInitRef.current) return;
+    micInitRef.current = true;
     setTranscribeError(null);
     clearPartial();
 
@@ -281,7 +286,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
         await vadRef.current.start();
         isListeningRef.current = true;
         setMicState("listening");
-  
+        micInitRef.current = false;
         return;
       }
 
@@ -327,6 +332,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
       await vad.start();
       isListeningRef.current = true;
       setMicState("listening");
+      micInitRef.current = false;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setTranscribeError(
@@ -334,6 +340,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
           ? "Microphone access denied"
           : `Voice init failed: ${msg}`
       );
+      micInitRef.current = false;
     }
   }
 
@@ -427,7 +434,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
 
   function send() {
     const el = textareaRef.current;
-    if (!el || disabled) return;
+    if (!el) return;
     const text = el.value.trim();
     if (!text && attachments.length === 0) return;
     el.value = "";
@@ -516,7 +523,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
           </>
         )}
         <textarea ref={textareaRef} className={styles.inputField} placeholder={placeholder}
-          rows={1} readOnly={disabled} enterKeyHint="send" onInput={autoGrow} onKeyDown={handleKeyDown} />
+          rows={1} enterKeyHint="send" onInput={autoGrow} onKeyDown={handleKeyDown} />
         {micState === "listening" ? (
           <button type="button" className={`${styles.actionBtn} ${styles.micRecording}`} aria-label="Stop listening"
             onClick={stopListening} onTouchEnd={(e) => { e.preventDefault(); stopListening(); }}>
@@ -528,7 +535,6 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
           <button type="button"
             className={`${styles.actionBtn} ${hasText || attachments.length > 0 ? styles.actionBtnSend : ""}`}
             aria-label={hasText || attachments.length > 0 ? "Send message" : "Record voice"}
-            disabled={disabled}
             onMouseDown={(e) => {
               e.preventDefault();
               didLongPress.current = false;
@@ -555,6 +561,11 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
           </button>
         )}
       </div>
+      {queueCount > 0 && (
+        <div className={styles.queueIndicator}>
+          {queueCount} message{queueCount !== 1 ? "s" : ""} queued
+        </div>
+      )}
       {micState === "transcribing" && !partialText && <div className={styles.transcribeStatus}>Transcribing...</div>}
       {transcribeError && <div className={styles.transcribeError}>{transcribeError}</div>}
     </div>

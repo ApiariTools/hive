@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useCallback } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, Loader2, Square, Volume2, AudioLines } from "lucide-react";
@@ -27,15 +27,53 @@ interface Props {
   ttsSpeed?: number;
 }
 
+interface QueuedMessage {
+  text: string;
+  attachments?: Attachment[];
+}
+
 export function ChatPanel({ bot, botDescription, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel, ttsVoice, ttsSpeed }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
   const [playingId, setPlayingId] = useState<number | null>(null);
   const [loadingTtsId, setLoadingTtsId] = useState<number | null>(null);
   const [voiceMode, setVoiceMode] = useState(false);
   const [triggerRecord, setTriggerRecord] = useState(0);
   const voiceModeRef = useRef(false);
   const lastMsgCountRef = useRef(0);
+
+  // ── Message queue ──
+  const handleSendOrQueue = useCallback(
+    (text: string, attachments?: Attachment[]) => {
+      if (loading) {
+        setMessageQueue((q) => [...q, { text, attachments }]);
+      } else {
+        onSend(text, attachments);
+      }
+    },
+    [loading, onSend],
+  );
+
+  // Clear queue on bot switch so queued messages don't leak across bots
+  const prevBotRef = useRef(bot);
+  useEffect(() => {
+    if (prevBotRef.current !== bot) {
+      setMessageQueue([]);
+      prevBotRef.current = bot;
+    }
+  }, [bot]);
+
+  // Drain queue when bot finishes responding
+  const prevLoadingRef = useRef(loading);
+  useEffect(() => {
+    if (prevLoadingRef.current && !loading && messageQueue.length > 0) {
+      const [next, ...rest] = messageQueue;
+      setMessageQueue(rest);
+      onSend(next.text, next.attachments);
+    }
+    prevLoadingRef.current = loading;
+  }, [loading, messageQueue, onSend]);
 
   // ── TTS playback (Howler — for user-tapped play buttons) ──
   const howlRef = useRef<Howl | null>(null);
@@ -373,12 +411,13 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       </div>
 
       <ChatInput
-        placeholder={loading ? `${bot} is thinking...` : `Message ${bot}...`}
+        placeholder={`Message ${bot}...`}
         disabled={loading}
-        onSend={onSend}
+        onSend={handleSendOrQueue}
         voiceMode={voiceMode}
         triggerRecord={triggerRecord}
         playTts={voiceMode ? playViaCx : undefined}
+        queueCount={messageQueue.length}
       />
     </div>
   );
