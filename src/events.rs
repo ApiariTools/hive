@@ -28,6 +28,14 @@ pub enum HiveEvent {
         worker_id: String,
         status: String,
     },
+    /// Research task status changed
+    ResearchUpdate {
+        workspace: String,
+        task_id: String,
+        status: String,
+        topic: String,
+        output_file: Option<String>,
+    },
 }
 
 #[derive(Clone)]

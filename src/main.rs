@@ -12,6 +12,7 @@ mod init;
 mod pr_feedback;
 mod pr_review;
 mod publish;
+mod research;
 mod routes;
 mod setup;
 mod stt;
@@ -100,6 +101,7 @@ async fn main() -> Result<()> {
 
     let db_path = config_dir.join("hive.db");
     let db = db::Db::open(&db_path)?;
+    research::ensure_schema(&db);
 
     // Build unified tick engine
     let watched_bots = load_watched_bots(&config_dir);

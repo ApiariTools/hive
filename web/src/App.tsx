@@ -6,7 +6,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { ReposPanel } from "./components/ReposPanel";
 import { WorkerDetail } from "./components/WorkerDetail";
 import { DocsPanel } from "./components/DocsPanel";
-import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData, CrossWorkspaceBot } from "./types";
+import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData, CrossWorkspaceBot, ResearchTask } from "./types";
 import * as api from "./api";
 import { initWakeLock } from "./wakeLock";
 
@@ -63,6 +63,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [otherWorkspaceBots, setOtherWorkspaceBots] = useState<CrossWorkspaceBot[]>([]);
   const [docsOpen, setDocsOpen] = useState(false);
+  const [researchTasks, setResearchTasks] = useState<ResearchTask[]>([]);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [usage, setUsage] = useState<api.UsageData>({ installed: false, providers: [], updated_at: null });
   const lastMsgId = useRef<number>(0);
@@ -119,6 +120,26 @@ export default function App() {
           }
         }
       }
+      if (event.type === "research_update") {
+        if (event.workspace === workspace) {
+          api.getResearchTasks(workspace).then(setResearchTasks);
+          if (event.status === "complete" && event.bot === bot) {
+            // Show completion in chat
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                workspace,
+                bot,
+                role: "system",
+                content: `Research complete: ${event.topic} → docs/${event.output_file}`,
+                attachments: null,
+                created_at: new Date().toISOString(),
+              },
+            ]);
+          }
+        }
+      }
       if (event.type === "message") {
         // Refresh unread counts
         if (workspace) api.getUnread(workspace).then(setUnread);
@@ -145,6 +166,7 @@ export default function App() {
     api.getWorkers(workspace).then(setWorkers);
     api.getRepos(workspace).then(setRepos);
     api.getUnread(workspace).then(setUnread);
+    api.getResearchTasks(workspace).then(setResearchTasks);
   }, [workspace]);
 
   // Load conversations + initial status when workspace or bot changes
@@ -225,7 +247,7 @@ export default function App() {
     };
   }, [workspace, bot]);
 
-  // Poll workers every 5s, repos every 30s
+  // Poll workers every 5s, repos every 30s, research every 10s
   useEffect(() => {
     if (!workspace) return;
     const workerInterval = setInterval(() => {
@@ -234,9 +256,13 @@ export default function App() {
     const repoInterval = setInterval(() => {
       api.getRepos(workspace).then(setRepos);
     }, 30000);
+    const researchInterval = setInterval(() => {
+      api.getResearchTasks(workspace).then(setResearchTasks);
+    }, 10000);
     return () => {
       clearInterval(workerInterval);
       clearInterval(repoInterval);
+      clearInterval(researchInterval);
     };
   }, [workspace]);
 
@@ -364,6 +390,34 @@ export default function App() {
 
   const handleSend = useCallback(
     async (text: string, attachments?: import("./components/ChatPanel").Attachment[]) => {
+      // Intercept /research command
+      if (text.startsWith("/research ")) {
+        const topic = text.slice("/research ".length).trim();
+        if (topic) {
+          try {
+            await api.startResearch(workspace, topic);
+            // Add a local system-style message to show it was started
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                workspace,
+                bot,
+                role: "system",
+                content: `Research started: ${topic}`,
+                attachments: null,
+                created_at: new Date().toISOString(),
+              },
+            ]);
+            // Refresh research tasks
+            api.getResearchTasks(workspace).then(setResearchTasks);
+          } catch (e) {
+            console.error("Failed to start research:", e);
+          }
+        }
+        return;
+      }
+
       const apiAttachments = attachments?.map((a) => ({
         name: a.name,
         type: a.type,
@@ -454,6 +508,7 @@ export default function App() {
         )}
         <ReposPanel
           repos={reposWithFreshWorkers}
+          researchTasks={researchTasks}
           onSelectWorker={(id) => {
             setWorkersOpen(false);
             handleSelectWorker(id);
@@ -475,6 +530,26 @@ export default function App() {
         onSelectWorker={handleSelectWorker}
         otherWorkspaceBots={otherWorkspaceBots}
         onSelectWorkspaceBot={handleSelectWorkspaceBot}
+        onStartResearch={() => {
+          const topic = prompt("Research topic:");
+          if (topic?.trim()) {
+            api.startResearch(workspace, topic.trim()).then(() => {
+              api.getResearchTasks(workspace).then(setResearchTasks);
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: Date.now(),
+                  workspace,
+                  bot,
+                  role: "system",
+                  content: `Research started: ${topic.trim()}`,
+                  attachments: null,
+                  created_at: new Date().toISOString(),
+                },
+              ]);
+            });
+          }
+        }}
       />
     </>
   );

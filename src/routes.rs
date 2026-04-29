@@ -119,6 +119,14 @@ pub fn router_with_http_client(
             "/api/workspaces/{workspace}/docs/{filename}",
             get(get_doc).put(put_doc).delete(delete_doc),
         )
+        .route(
+            "/api/workspaces/{workspace}/research",
+            get(list_research).post(start_research),
+        )
+        .route(
+            "/api/workspaces/{workspace}/research/{task_id}",
+            get(get_research_task),
+        )
         .fallback(get(serve_frontend))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB for image attachments
         .layer(CorsLayer::permissive())
@@ -2467,6 +2475,70 @@ async fn serve_frontend(uri: axum::http::Uri) -> axum::response::Response {
     }
 
     StatusCode::NOT_FOUND.into_response()
+}
+
+// ── Research ──
+
+#[derive(Deserialize)]
+struct ResearchRequest {
+    topic: String,
+}
+
+async fn start_research(
+    State(state): State<AppState>,
+    Path(workspace): Path<String>,
+    Json(body): Json<ResearchRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let root = resolve_workspace_root(&state, &workspace).ok_or(StatusCode::NOT_FOUND)?;
+
+    crate::research::ensure_schema(&state.db);
+
+    let task_id = format!(
+        "research-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+
+    crate::research::insert_task(&state.db, &task_id, &workspace, &body.topic);
+
+    info!("[research] spawning task {task_id}: {}", body.topic);
+
+    crate::research::spawn_research(
+        state.db.clone(),
+        state.events.clone(),
+        task_id.clone(),
+        workspace,
+        body.topic.clone(),
+        root,
+    );
+
+    Ok(Json(serde_json::json!({
+        "id": task_id,
+        "topic": body.topic,
+        "status": "running",
+    })))
+}
+
+async fn list_research(
+    State(state): State<AppState>,
+    Path(workspace): Path<String>,
+) -> Json<Vec<crate::research::ResearchTask>> {
+    crate::research::ensure_schema(&state.db);
+    Json(crate::research::list_tasks(&state.db, &workspace))
+}
+
+async fn get_research_task(
+    State(state): State<AppState>,
+    Path((workspace, task_id)): Path<(String, String)>,
+) -> Result<Json<crate::research::ResearchTask>, StatusCode> {
+    crate::research::ensure_schema(&state.db);
+    let task = crate::research::get_task(&state.db, &task_id).ok_or(StatusCode::NOT_FOUND)?;
+    if task.workspace != workspace {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(task))
 }
 
 #[cfg(test)]
