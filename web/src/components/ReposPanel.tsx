@@ -83,27 +83,27 @@ export function ReposPanel({ repos, researchTasks, onSelectWorker, mobileOpen, o
         {repos.length === 0 && (
           <div className={styles.empty}>No repos found</div>
         )}
-        {researchTasks && researchTasks.length > 0 && (
-          <>
-            <div className={styles.title} style={{ marginTop: 16 }}>Research</div>
-            {researchTasks.map((task) => (
-              <div key={task.id} className={styles.repoRow}>
-                <div className={styles.repoHeader}>
-                  {task.status === "running" ? (
-                    <Loader2 size={14} className={styles.spinning} style={{ color: "var(--accent)", flexShrink: 0 }} />
-                  ) : task.status === "complete" ? (
-                    <CheckCircle2 size={14} style={{ color: "var(--green)", flexShrink: 0 }} />
-                  ) : (
-                    <XCircle size={14} style={{ color: "var(--red)", flexShrink: 0 }} />
-                  )}
-                  <span className={styles.repoName}>{task.topic}</span>
-                  {task.output_file && (
-                    <span className={styles.repoBranch}>{task.output_file}</span>
-                  )}
-                </div>
+        <div className={styles.title} style={{ marginTop: 16 }}>Research</div>
+        {researchTasks && researchTasks.length > 0 ? (
+          researchTasks.map((task) => (
+            <div key={task.id} className={styles.repoRow}>
+              <div className={styles.repoHeader}>
+                {task.status === "running" ? (
+                  <Loader2 size={14} className={styles.spinning} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                ) : task.status === "complete" ? (
+                  <CheckCircle2 size={14} style={{ color: "var(--green)", flexShrink: 0 }} />
+                ) : (
+                  <XCircle size={14} style={{ color: "var(--red)", flexShrink: 0 }} />
+                )}
+                <span className={styles.repoName}>{task.topic}</span>
+                {task.output_file && (
+                  <span className={styles.repoBranch}>{task.output_file}</span>
+                )}
               </div>
-            ))}
-          </>
+            </div>
+          ))
+        ) : (
+          <div className={styles.empty}>Use /research &lt;topic&gt; to start</div>
         )}
       </div>
     </>
