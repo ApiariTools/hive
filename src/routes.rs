@@ -621,7 +621,8 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          model = \"...\"                # optional model override\n\
          prompt_file = \"path.md\"      # custom system prompt file\n\
          watch = [\"github\"]            # signal sources: github, sentry\n\
-         schedule_hours = 24           # proactive run interval\n\
+         schedule = \"0 9 * * 1-5\"     # cron expression (min hour dom month dow)\n\
+         schedule_hours = 24           # deprecated: interval in hours (fallback if no schedule)\n\
          proactive_prompt = \"...\"     # task for scheduled runs\n\
          services = [\"sentry\"]        # inject service credentials from .apiari/services.toml\n\n\
          Context files in workspace root:\n\

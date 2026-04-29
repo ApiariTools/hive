@@ -20,6 +20,7 @@ pub struct WatchedBot {
     pub role: String,
     pub watch: Vec<String>,
     pub working_dir: Option<PathBuf>,
+    pub schedule: Option<String>,
     pub schedule_hours: Option<u64>,
     pub proactive_prompt: Option<String>,
     pub services: Vec<String>,
@@ -30,7 +31,8 @@ pub struct WatchedBot {
 pub fn start_watchers(bots: Vec<WatchedBot>, db: Db) {
     for bot in bots {
         let has_watch = !bot.watch.is_empty();
-        let has_schedule = bot.schedule_hours.is_some() && bot.proactive_prompt.is_some();
+        let has_schedule = (bot.schedule.is_some() || bot.schedule_hours.is_some())
+            && bot.proactive_prompt.is_some();
 
         if !has_watch && !has_schedule {
             continue;
@@ -43,11 +45,18 @@ pub fn start_watchers(bots: Vec<WatchedBot>, db: Db) {
             );
         }
         if has_schedule {
-            info!(
-                "[watcher] starting proactive schedule for {} (every {}h)",
-                bot.name,
-                bot.schedule_hours.unwrap_or(24)
-            );
+            if let Some(ref cron) = bot.schedule {
+                info!(
+                    "[watcher] starting proactive schedule for {} (cron: {})",
+                    bot.name, cron
+                );
+            } else {
+                info!(
+                    "[watcher] starting proactive schedule for {} (every {}h)",
+                    bot.name,
+                    bot.schedule_hours.unwrap_or(24)
+                );
+            }
         }
 
         tokio::spawn(run_watcher(bot, db.clone()));
@@ -99,14 +108,16 @@ pub(crate) async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
     // Clean up any old report
     let _ = std::fs::remove_file(&report_path);
 
+    let schedule_desc = if let Some(ref cron) = bot.schedule {
+        format!("cron `{cron}`")
+    } else {
+        format!("every {}h", bot.schedule_hours.unwrap_or(24))
+    };
     let _ = db.add_message(
         &bot.workspace,
         &bot.name,
         "system",
-        &format!(
-            "**Proactive check** — scheduled every {}h",
-            bot.schedule_hours.unwrap_or(24)
-        ),
+        &format!("**Proactive check** — scheduled {schedule_desc}"),
         None,
     );
 

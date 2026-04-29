@@ -133,7 +133,10 @@ async fn main() -> Result<()> {
     if !watched_bots.is_empty() {
         info!("starting {} specialty bot watcher(s)", watched_bots.len());
         engine.add_watcher(Box::new(tick::SignalWatcher::new(watched_bots.clone())));
-        engine.add_watcher(Box::new(tick::ScheduleWatcher::new(watched_bots)));
+        engine.add_watcher(Box::new(tick::ScheduleWatcher::new(
+            watched_bots,
+            db.clone(),
+        )));
     }
 
     if !watched_workspaces.is_empty() {
@@ -261,6 +264,10 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                         })
                         .unwrap_or_default();
 
+                    let schedule = bot
+                        .get("schedule")
+                        .and_then(|s| s.as_str())
+                        .map(String::from);
                     let schedule_hours = bot
                         .get("schedule_hours")
                         .and_then(|s| s.as_integer())
@@ -281,7 +288,8 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                         .unwrap_or_default();
 
                     let has_watch = !watch.is_empty();
-                    let has_schedule = schedule_hours.is_some() && proactive_prompt.is_some();
+                    let has_schedule = (schedule.is_some() || schedule_hours.is_some())
+                        && proactive_prompt.is_some();
 
                     if has_watch || has_schedule {
                         watched.push(watcher::WatchedBot {
@@ -300,6 +308,7 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                                 .to_string(),
                             watch,
                             working_dir: working_dir.clone(),
+                            schedule,
                             schedule_hours,
                             proactive_prompt,
                             services,
