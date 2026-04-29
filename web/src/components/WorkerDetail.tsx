@@ -1,6 +1,9 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { DiffView as GitDiffView, DiffModeEnum } from "@git-diff-view/react";
+import { DiffFile, getLang } from "@git-diff-view/core";
+import "@git-diff-view/react/styles/diff-view-pure.css";
 import type { Worker, WorkerDetail as WorkerDetailData } from "../types";
 import * as api from "../api";
 import { ChatInput } from "./ChatInput";
@@ -20,30 +23,64 @@ function branchName(branch: string): string {
 
 type InfoTab = "output" | "task" | "diff" | "chat";
 
-function DiffView({ diff }: { diff: string }) {
-  const lines = diff.split("\n");
+/** Split a multi-file unified diff into per-file sections */
+function splitDiffByFile(raw: string): { fileName: string; hunks: string[] }[] {
+  const files: { fileName: string; hunks: string[] }[] = [];
+  // Split on "diff --git" boundaries
+  const parts = raw.split(/^(?=diff --git )/m);
+  for (const part of parts) {
+    if (!part.trim()) continue;
+    // Extract filename from "diff --git a/path b/path"
+    const headerMatch = part.match(/^diff --git a\/.+ b\/(.+)/);
+    const fileName = headerMatch?.[1] ?? "unknown";
+    // Extract everything from the first @@ onward as hunk content
+    const hunkStart = part.indexOf("\n@@");
+    if (hunkStart === -1) {
+      files.push({ fileName, hunks: [] });
+      continue;
+    }
+    const hunkContent = part.slice(hunkStart + 1); // skip the \n before @@
+    files.push({ fileName, hunks: [hunkContent] });
+  }
+  return files;
+}
+
+function FileDiffView({ fileName, hunks }: { fileName: string; hunks: string[] }) {
+  const diffFile = useMemo(() => {
+    const lang = getLang(fileName);
+    const instance = DiffFile.createInstance({
+      oldFile: { fileName, fileLang: lang },
+      newFile: { fileName, fileLang: lang },
+      hunks,
+    });
+    instance.initTheme("dark");
+    instance.init();
+    instance.buildUnifiedDiffLines();
+    return instance;
+  }, [fileName, hunks]);
+
   return (
-    <div className={styles.diffView}>
-      {lines.map((line, i) => {
-        let cls = styles.diffLine;
-        if (line.startsWith("diff --git")) {
-          cls = `${styles.diffLine} ${styles.diffFile}`;
-        } else if (line.startsWith("@@")) {
-          cls = `${styles.diffLine} ${styles.diffHunk}`;
-        } else if (line.startsWith("+++") || line.startsWith("---")) {
-          cls = `${styles.diffLine} ${styles.diffMeta}`;
-        } else if (line.startsWith("+")) {
-          cls = `${styles.diffLine} ${styles.diffAdd}`;
-        } else if (line.startsWith("-")) {
-          cls = `${styles.diffLine} ${styles.diffRemove}`;
-        }
-        return (
-          <div key={i} className={cls}>
-            <span className={styles.diffLineNum}>{i + 1}</span>
-            <span className={styles.diffCode}>{line || "\n"}</span>
-          </div>
-        );
-      })}
+    <div className={styles.diffFileSection}>
+      <div className={styles.diffFileName}>{fileName}</div>
+      <GitDiffView
+        diffFile={diffFile}
+        diffViewMode={DiffModeEnum.Unified}
+        diffViewTheme="dark"
+        diffViewHighlight
+        diffViewFontSize={12}
+      />
+    </div>
+  );
+}
+
+function DiffViewer({ diff }: { diff: string }) {
+  const files = useMemo(() => splitDiffByFile(diff), [diff]);
+  if (files.length === 0) return <div className={styles.empty}>Empty diff</div>;
+  return (
+    <div>
+      {files.map((f, i) => (
+        <FileDiffView key={`${f.fileName}-${i}`} fileName={f.fileName} hunks={f.hunks} />
+      ))}
     </div>
   );
 }
@@ -240,7 +277,7 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
             diffContent === undefined ? (
               <div className={styles.empty}>Loading diff...</div>
             ) : diffContent ? (
-              <DiffView diff={diffContent} />
+              <DiffViewer diff={diffContent} />
             ) : (
               <div className={styles.empty}>No diff available</div>
             )
