@@ -447,6 +447,18 @@ struct BuiltPrompt {
     stable: String,
 }
 
+fn research_workers_prompt() -> &'static str {
+    "\n## Research Workers\n\
+     You can start background research tasks that run independently and save findings to workspace docs.\n\
+     To start a research task, tell the user to type `/research <topic>` in the chat input, \
+     or describe what you'd like researched and suggest they use the /research command.\n\
+     Research workers run in the background without blocking chat. \
+     Results are saved to .apiari/docs/ and become available to all bots.\n\n\
+     IMPORTANT: Do NOT use swarm workers or shell commands for research. \
+     Swarm workers are for code changes (branches, PRs). \
+     Research workers are for investigation that produces docs — always use /research for this.\n"
+}
+
 fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str) -> BuiltPrompt {
     let ws = ws_config.workspace.clone().unwrap_or_default();
     let ws_name = ws.name.as_deref().unwrap_or("unknown");
@@ -486,17 +498,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
             }
 
             // Research workers — available for all bots
-            prompt.push_str(
-                "\n## Research Workers\n\
-                 You can start background research tasks that run independently and save findings to workspace docs.\n\
-                 To start a research task, tell the user to type `/research <topic>` in the chat input, \
-                 or describe what you'd like researched and suggest they use the /research command.\n\
-                 Research workers run in the background without blocking chat. \
-                 Results are saved to .apiari/docs/ and become available to all bots.\n\n\
-                 IMPORTANT: Do NOT use swarm workers or shell commands for research. \
-                 Swarm workers are for code changes (branches, PRs). \
-                 Research workers are for investigation that produces docs — always use /research for this.\n"
-            );
+            prompt.push_str(research_workers_prompt());
 
             // Stable portion captured before docs (dynamic content)
             let stable = prompt.clone();
@@ -583,19 +585,6 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
             }
         }
 
-        // Research workers — available for all bots regardless of swarm
-        prompt.push_str(
-            "\n## Research Workers\n\
-             You can start background research tasks that run independently and save findings to workspace docs.\n\
-             To start a research task, tell the user to type `/research <topic>` in the chat input, \
-             or describe what you'd like researched and suggest they use the /research command.\n\
-             Research workers run in the background without blocking chat. \
-             Results are saved to .apiari/docs/ and become available to all bots.\n\n\
-             IMPORTANT: Do NOT use swarm workers or shell commands for research. \
-             Swarm workers are for code changes (branches, PRs). \
-             Research workers are for investigation that produces docs — always use /research for this.\n"
-        );
-
         // Docs index and instructions are dynamic (excluded from hash).
         // Capture them separately to append only to the full prompt.
         if let Some(docs_index) = build_docs_index(root_path) {
@@ -603,6 +592,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         }
         docs_dynamic.push_str(&build_docs_instructions(ws_id));
     }
+
+    // Research workers — available for all bots regardless of workspace root
+    prompt.push_str(research_workers_prompt());
 
     // Hive configuration reference — helps bots answer config questions
     let hive_ref = format!(
@@ -3011,6 +3003,23 @@ mod tests {
         assert!(prompt.contains("Research Workers"));
         assert!(prompt.contains("/research"));
         assert!(prompt.contains(".apiari/docs/"));
+    }
+
+    #[test]
+    fn test_build_prompt_includes_research_workers_without_root() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: Some("A test workspace".into()),
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main", "test").full;
+        // Research workers should be present even without a workspace root
+        assert!(prompt.contains("Research Workers"));
+        assert!(prompt.contains("/research"));
     }
 
     #[test]
