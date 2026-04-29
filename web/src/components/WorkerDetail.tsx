@@ -108,11 +108,16 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [detail?.conversation.length]);
 
+  // Reset cached diff when worker changes
+  useEffect(() => {
+    setDiffContent(undefined);
+  }, [workspace, worker.id, remote]);
+
   useEffect(() => {
     if (infoTab === "diff" && diffContent === undefined) {
-      api.getWorkerDiff(workspace, worker.id, remote).then(setDiffContent);
+      api.getWorkerDiff(workspace, worker.id, remote).then(setDiffContent).catch(() => setDiffContent(null));
     }
-  }, [infoTab]);
+  }, [infoTab, workspace, worker.id, remote, diffContent]);
 
   async function handleWorkerSend(text: string) {
     if (!text || sending) return;

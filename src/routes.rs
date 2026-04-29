@@ -2594,13 +2594,25 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
     messages
 }
 
+/// Max diff output size (2 MB) to avoid unbounded memory usage.
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
 async fn get_worker_diff(
     State(state): State<AppState>,
     Path((workspace, worker_id)): Path<(String, String)>,
-) -> Json<serde_json::Value> {
-    let diff = (|| -> Option<String> {
-        let config_path = state
-            .config_dir
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Validate workspace name: only alphanumeric, hyphens, underscores
+    if workspace.is_empty()
+        || workspace
+            .chars()
+            .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let config_dir = state.config_dir.clone();
+    let diff = tokio::task::spawn_blocking(move || -> Option<String> {
+        let config_path = config_dir
             .join("workspaces")
             .join(format!("{workspace}.toml"));
         let ws_config = load_workspace_config(&config_path);
@@ -2619,22 +2631,34 @@ async fn get_worker_diff(
             .iter()
             .find(|w| w.get("id").and_then(|i| i.as_str()) == Some(&worker_id))?
             .get("worktree_path")?
-            .as_str()?;
+            .as_str()?
+            .to_string();
 
         let output = std::process::Command::new("git")
             .args(["diff", "main...HEAD"])
-            .current_dir(worktree_path)
+            .current_dir(&worktree_path)
             .output()
             .ok()?;
 
         if output.status.success() {
-            Some(String::from_utf8_lossy(&output.stdout).into_owned())
+            let raw = String::from_utf8_lossy(&output.stdout);
+            if raw.len() > MAX_DIFF_BYTES {
+                Some(format!(
+                    "{}...\n\n(diff truncated at {} bytes)",
+                    &raw[..MAX_DIFF_BYTES],
+                    MAX_DIFF_BYTES
+                ))
+            } else {
+                Some(raw.into_owned())
+            }
         } else {
             None
         }
-    })();
+    })
+    .await
+    .unwrap_or(None);
 
-    Json(serde_json::json!({ "diff": diff }))
+    Ok(Json(serde_json::json!({ "diff": diff })))
 }
 
 #[derive(Deserialize)]
