@@ -466,6 +466,7 @@ impl Watcher for PrFeedbackWatcher {
                 };
                 if let Some(ref status) = ci_status
                     && (status == "FAILURE" || status == "ERROR")
+                    && head_sha.is_some()
                 {
                     // Only notify if we haven't already told this worker about this SHA
                     let already_notified = state
@@ -522,17 +523,40 @@ impl Watcher for PrFeedbackWatcher {
     }
 }
 
-/// Fetch review thread node IDs via GraphQL, returning (thread_id, is_resolved, first_comment_database_id).
+/// Fetch review thread node IDs via GraphQL, returning (thread_id, is_resolved, comment_database_ids).
 async fn fetch_review_threads(
     owner: &str,
     repo: &str,
     number: i64,
-) -> Vec<(String, bool, Option<u64>)> {
-    let query = format!(
-        r#"query {{ repository(owner: "{owner}", name: "{repo}") {{ pullRequest(number: {number}) {{ reviewThreads(first: 100) {{ nodes {{ id isResolved comments(first: 1) {{ nodes {{ databaseId }} }} }} }} }} }} }}"#
-    );
+) -> Vec<(String, bool, Vec<u64>)> {
+    let query = r#"query($owner: String!, $repo: String!, $number: Int!) {
+        repository(owner: $owner, name: $repo) {
+            pullRequest(number: $number) {
+                reviewThreads(first: 100) {
+                    nodes {
+                        id
+                        isResolved
+                        comments(first: 100) {
+                            nodes { databaseId }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
     let mut cmd = tokio::process::Command::new("gh");
-    cmd.args(["api", "graphql", "-f", &format!("query={query}")]);
+    cmd.args([
+        "api",
+        "graphql",
+        "-f",
+        &format!("query={query}"),
+        "-f",
+        &format!("owner={owner}"),
+        "-f",
+        &format!("repo={repo}"),
+        "-F",
+        &format!("number={number}"),
+    ]);
     if std::env::var("CLAUDECODE").is_ok() {
         cmd.env_remove("GH_TOKEN");
     }
@@ -567,21 +591,36 @@ async fn fetch_review_threads(
         .filter_map(|node| {
             let id = node.get("id")?.as_str()?.to_string();
             let is_resolved = node.get("isResolved")?.as_bool()?;
-            let db_id = node
-                .pointer("/comments/nodes/0/databaseId")
-                .and_then(|d| d.as_u64());
-            Some((id, is_resolved, db_id))
+            let db_ids = node
+                .pointer("/comments/nodes")
+                .and_then(|n| n.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| c.get("databaseId")?.as_u64())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((id, is_resolved, db_ids))
         })
         .collect()
 }
 
 /// Resolve a single review thread via GraphQL mutation.
 async fn resolve_review_thread(thread_id: &str) -> bool {
-    let query = format!(
-        r#"mutation {{ resolveReviewThread(input: {{threadId: "{thread_id}"}}) {{ thread {{ isResolved }} }} }}"#
-    );
+    let query = r#"mutation($threadId: ID!) {
+        resolveReviewThread(input: {threadId: $threadId}) {
+            thread { isResolved }
+        }
+    }"#;
     let mut cmd = tokio::process::Command::new("gh");
-    cmd.args(["api", "graphql", "-f", &format!("query={query}")]);
+    cmd.args([
+        "api",
+        "graphql",
+        "-f",
+        &format!("query={query}"),
+        "-f",
+        &format!("threadId={thread_id}"),
+    ]);
     if std::env::var("CLAUDECODE").is_ok() {
         cmd.env_remove("GH_TOKEN");
     }
@@ -599,21 +638,20 @@ async fn resolve_review_thread(thread_id: &str) -> bool {
     }
 }
 
-/// Resolve review threads whose first comment ID is in `forwarded_ids`.
+/// Resolve review threads whose comment IDs overlap with `forwarded_ids`.
 async fn resolve_forwarded_threads(owner: &str, repo: &str, number: i64, forwarded_ids: &[u64]) {
     if forwarded_ids.is_empty() {
         return;
     }
     let threads = fetch_review_threads(owner, repo, number).await;
-    for (thread_id, is_resolved, db_id) in &threads {
+    for (thread_id, is_resolved, db_ids) in &threads {
         if *is_resolved {
             continue;
         }
-        if let Some(id) = db_id
-            && forwarded_ids.contains(id)
+        if db_ids.iter().any(|id| forwarded_ids.contains(id))
             && resolve_review_thread(thread_id).await
         {
-            info!("[pr-feedback] Resolved review thread {thread_id} (comment {id})");
+            info!("[pr-feedback] Resolved review thread {thread_id}");
         }
     }
 }
