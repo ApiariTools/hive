@@ -25,29 +25,25 @@ function getCtx(): AudioContext | null {
   return audioCtx;
 }
 
-/**
- * Create a simple convolver-based reverb impulse response.
- * Short decay for subtle spaciousness.
- */
-function createReverb(ctx: AudioContext, duration: number, decay: number): ConvolverNode {
+/** Cached reverb impulse buffer — reused across all playTone calls. */
+let reverbBuffer: AudioBuffer | null = null;
+
+function getReverbBuffer(ctx: AudioContext): AudioBuffer {
+  if (reverbBuffer && reverbBuffer.sampleRate === ctx.sampleRate) return reverbBuffer;
   const sampleRate = ctx.sampleRate;
-  const length = sampleRate * duration;
+  const length = sampleRate * 0.4;
   const impulse = ctx.createBuffer(2, length, sampleRate);
   for (let ch = 0; ch < 2; ch++) {
     const data = impulse.getChannelData(ch);
     for (let i = 0; i < length; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 3);
     }
   }
-  const convolver = ctx.createConvolver();
-  convolver.buffer = impulse;
-  return convolver;
+  reverbBuffer = impulse;
+  return impulse;
 }
 
-/**
- * Play a layered tone with harmonics, filter, and reverb.
- * Returns the gain node for further envelope control.
- */
+/** Play a layered tone with harmonics, filter, and reverb. */
 function playTone(
   ctx: AudioContext,
   freq: number,
@@ -65,7 +61,7 @@ function playTone(
     filterQ?: number;
     reverbMix?: number;
   } = {}
-): { master: GainNode } {
+): void {
   const {
     type = "sine",
     harmonics = [],
@@ -91,7 +87,8 @@ function playTone(
   dryGain.gain.value = 1 - reverbMix;
   wetGain.gain.value = reverbMix;
 
-  const reverb = createReverb(ctx, 0.4, 3);
+  const reverb = ctx.createConvolver();
+  reverb.buffer = getReverbBuffer(ctx);
 
   filter.connect(dryGain);
   filter.connect(reverb);
@@ -111,6 +108,9 @@ function playTone(
   }
   master.gain.linearRampToValueAtTime(0, startTime + duration);
 
+  // Collect all nodes for cleanup
+  const allNodes: AudioNode[] = [master, filter, dryGain, wetGain, reverb];
+
   // Fundamental
   const osc = ctx.createOscillator();
   osc.type = type;
@@ -118,6 +118,7 @@ function playTone(
   osc.connect(filter);
   osc.start(startTime);
   osc.stop(startTime + duration + 0.1);
+  allNodes.push(osc);
 
   // Harmonics
   for (const h of harmonics) {
@@ -130,9 +131,13 @@ function playTone(
     hGain.connect(filter);
     hOsc.start(startTime);
     hOsc.stop(startTime + duration + 0.1);
+    allNodes.push(hOsc, hGain);
   }
 
-  return { master };
+  // Disconnect all nodes after sound finishes to prevent leaks
+  osc.onended = () => {
+    for (const node of allNodes) node.disconnect();
+  };
 }
 
 /**
