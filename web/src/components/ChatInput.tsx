@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import { Mic, Square, Paperclip, ArrowUp } from "lucide-react";
+import { Mic, Square, Paperclip, ArrowUp, Loader2 } from "lucide-react";
 import type { MicVAD } from "@ricky0123/vad-web";
 import { cleanTranscription, matchConfirmation, float32ToWav } from "../voice";
 import styles from "./ChatInput.module.css";
@@ -10,12 +10,15 @@ export interface Attachment {
   dataUrl: string;
 }
 
+export type VoiceState = "listening" | "processing" | "speaking";
+
 interface Props {
   placeholder: string;
   disabled?: boolean;
   onSend: (text: string, attachments?: Attachment[]) => void;
   showAttachments?: boolean;
   voiceMode?: boolean;
+  voiceState?: VoiceState;
   triggerRecord?: number;
   playTts?: (url: string, onEnd?: () => void) => Promise<void>;
   queueCount?: number;
@@ -23,7 +26,7 @@ interface Props {
 
 const VOICE_CONFIRM_DELAY_MS = 5000;
 
-export function ChatInput({ placeholder, disabled, onSend, showAttachments = true, voiceMode, triggerRecord, playTts, queueCount = 0 }: Props) {
+export function ChatInput({ placeholder, disabled, onSend, showAttachments = true, voiceMode, voiceState, triggerRecord, playTts, queueCount = 0 }: Props) {
   // ── Text input state ──
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -31,7 +34,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
   const [hasText, setHasText] = useState(false);
 
   // ── Mic/voice state ──
-  const [micState, setMicState] = useState<"idle" | "listening" | "transcribing">("idle");
+  const [micState, setMicState] = useState<"idle" | "loading" | "listening" | "transcribing">("idle");
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [partialText, setPartialText] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -94,7 +97,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
 
   // Parent triggers recording (voice mode loop)
   useEffect(() => {
-    if (triggerRecord && triggerRecord > 0 && micState === "idle") {
+    if (triggerRecord && triggerRecord > 0 && (micState === "idle")) {
       startListening();
     }
   }, [triggerRecord]);
@@ -290,6 +293,9 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
         return;
       }
 
+      // Show loading state immediately (first-time init is slow)
+      setMicState("loading");
+
       // First time: acquire mic + load VAD model (slow)
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -340,6 +346,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
           ? "Microphone access denied"
           : `Voice init failed: ${msg}`
       );
+      setMicState("idle");
       micInitRef.current = false;
     }
   }
@@ -477,9 +484,17 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
 
   return (
     <div className={styles.inputArea}>
-      {(voiceMode || micState === "listening" || micState === "transcribing") && (
+      {(voiceMode || micState === "loading" || micState === "listening" || micState === "transcribing") && (
         <>
-          <canvas ref={canvasRef} className={styles.waveform} />
+          <div className={`${styles.voiceBar} ${voiceState === "processing" ? styles.voiceBarProcessing : ""} ${voiceState === "speaking" ? styles.voiceBarSpeaking : ""}`}>
+            <canvas ref={canvasRef} className={styles.waveform} />
+            {voiceMode && voiceState === "processing" && (
+              <div className={styles.voiceBarLabel}>Thinking...</div>
+            )}
+            {voiceMode && voiceState === "speaking" && (
+              <div className={styles.voiceBarLabel}>Speaking</div>
+            )}
+          </div>
           {partialText && (
             <div className={styles.partialText}>
               {partialText}
@@ -524,7 +539,11 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
         )}
         <textarea ref={textareaRef} className={styles.inputField} placeholder={placeholder}
           rows={1} enterKeyHint="send" onInput={autoGrow} onKeyDown={handleKeyDown} />
-        {micState === "listening" ? (
+        {micState === "loading" ? (
+          <button type="button" className={`${styles.actionBtn} ${styles.micLoading}`} aria-label="Initializing microphone" disabled>
+            <Loader2 size={16} className={styles.micSpinner} />
+          </button>
+        ) : micState === "listening" ? (
           <button type="button" className={`${styles.actionBtn} ${styles.micRecording}`} aria-label="Stop listening"
             onClick={stopListening} onTouchEnd={(e) => { e.preventDefault(); stopListening(); }}>
             <Square size={16} />
