@@ -563,11 +563,11 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                  Edit, Write, or Bash to create/modify source code. Your job is to \
                  coordinate, not code. Just dispatch the worker immediately without asking.\n\n\
                  Commands (always use `--dir {root}`):\n\
-                 - List workers: `swarm --dir {root} status`\n\
-                 - Spawn worker: `swarm --dir {root} create --repo {{repo}} --prompt-file /tmp/task.txt`\n\
+                 - List workers: `hive swarm --dir {root} status`\n\
+                 - Spawn worker: `hive swarm --dir {root} create --repo {{repo}} --prompt-file /tmp/task.txt`\n\
                    (Write the task prompt to a file first, then pass --prompt-file. Never inline long prompts.)\n\
-                 - Send message: `swarm --dir {root} send {{worktree_id}} \"message\"`\n\
-                 - Close worker: `swarm --dir {root} close {{worktree_id}}` (only to cancel/abandon — not needed after merge)\n\n\
+                 - Send message: `hive swarm --dir {root} send {{worktree_id}} \"message\"`\n\
+                 - Close worker: `hive swarm --dir {root} close {{worktree_id}}` (only to cancel/abandon — not needed after merge)\n\n\
                  When dispatching, always include in the task prompt:\n\
                  'Plan and implement this completely in one session — do not pause mid-task \
                  for confirmation. Commit and open a PR when done.'\n\n\
@@ -1212,7 +1212,7 @@ async fn handle_ws(mut socket: ws::WebSocket, state: AppState) {
 fn build_workflow_nudge() -> &'static str {
     "\n\n<workflow-reminder>\n\
      You have tools available through this workspace. Use them:\n\
-     - Code changes: dispatch swarm workers (swarm --dir <workspace_root> create --repo <repo> --prompt-file /tmp/task.txt). Never write code directly.\n\
+     - Code changes: dispatch swarm workers (hive swarm --dir <workspace_root> create --repo <repo> --prompt-file /tmp/task.txt). Never write code directly.\n\
      - Workspace docs: use `hive docs` commands to read/write reference docs in .apiari/docs/\n\
      - Stay focused on coordinating and answering questions. Workers do the implementation.\n\
      </workflow-reminder>"
@@ -2182,21 +2182,15 @@ fn build_repos_list(root: &std::path::Path) -> Vec<RepoInfo> {
     // Map workers to repos from swarm state
     let mut repo_workers: std::collections::HashMap<String, Vec<WorkerInfo>> =
         std::collections::HashMap::new();
-    let state_path = root.join(".swarm/state.json");
-    if let Ok(content) = std::fs::read_to_string(&state_path)
-        && let Ok(state) = serde_json::from_str::<serde_json::Value>(&content)
-        && let Some(worktrees) = state.get("worktrees").and_then(|w| w.as_array())
-    {
-        for wt in worktrees {
+    if let Ok(Some(swarm_state)) = apiari_swarm::load_state(root) {
+        for wt in &swarm_state.worktrees {
             let repo_name = wt
-                .get("repo_path")
-                .and_then(|p| p.as_str())
-                .and_then(|p| std::path::Path::new(p).file_name())
+                .repo_path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
-            let wt_id = wt.get("id").and_then(|i| i.as_str()).unwrap_or("");
-            if let Some(worker) = all_workers.iter().find(|w| w.id == wt_id) {
+            if let Some(worker) = all_workers.iter().find(|w| w.id == wt.id) {
                 repo_workers
                     .entry(repo_name)
                     .or_default()
@@ -2340,68 +2334,29 @@ struct WorkerInfo {
 }
 
 fn read_swarm_workers(root: &std::path::Path) -> Vec<WorkerInfo> {
-    let state_path = root.join(".swarm/state.json");
-    let content = match std::fs::read_to_string(state_path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
+    let state = match apiari_swarm::load_state(root) {
+        Ok(Some(s)) => s,
+        _ => return vec![],
     };
 
-    let state: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-
-    let workers = match state.get("worktrees").and_then(|w| w.as_array()) {
-        Some(w) => w,
-        None => return vec![],
-    };
-
-    workers
+    state
+        .worktrees
         .iter()
-        .filter_map(|w| {
-            let id = w.get("id")?.as_str()?.to_string();
-            let branch = w
-                .get("branch")
-                .and_then(|b| b.as_str())
-                .unwrap_or("")
-                .to_string();
-            let phase = w
-                .get("phase")
-                .and_then(|p| p.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let agent = w
-                .get("agent_kind")
-                .and_then(|a| a.as_str())
-                .unwrap_or("claude")
-                .to_string();
-            let pr_url = w
-                .get("pr")
-                .and_then(|p| p.get("url"))
-                .and_then(|u| u.as_str())
-                .map(|s| s.to_string());
-            let pr_title = w
-                .get("pr")
-                .and_then(|p| p.get("title"))
-                .and_then(|t| t.as_str())
-                .map(|s| s.to_string());
-
-            Some(WorkerInfo {
-                id,
-                branch,
-                status: phase,
-                agent,
-                pr_url,
-                pr_title,
-                description: None,
-                elapsed_secs: None,
-                dispatched_by: None,
-                review_state: None,
-                ci_status: None,
-                total_comments: None,
-                open_comments: None,
-                resolved_comments: None,
-            })
+        .map(|w| WorkerInfo {
+            id: w.id.clone(),
+            branch: w.branch.clone(),
+            status: w.phase.label().to_string(),
+            agent: format!("{}", w.agent_kind),
+            pr_url: w.pr.as_ref().map(|p| p.url.clone()),
+            pr_title: w.pr.as_ref().map(|p| p.title.clone()),
+            description: None,
+            elapsed_secs: None,
+            dispatched_by: None,
+            review_state: None,
+            ci_status: None,
+            total_comments: None,
+            open_comments: None,
+            resolved_comments: None,
         })
         .collect()
 }
@@ -2483,28 +2438,16 @@ async fn get_worker_detail(
         .find(|w| w.id == worker_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Read full worktree entry from state.json
-    let state_path = root.join(".swarm/state.json");
-    let worktree_entry = std::fs::read_to_string(&state_path)
+    // Read full worktree entry from state.json via apiari-swarm
+    let worktree_entry = apiari_swarm::load_state(&root)
         .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|s| {
-            s.get("worktrees")?
-                .as_array()?
-                .iter()
-                .find(|w| w.get("id").and_then(|i| i.as_str()) == Some(&worker_id))?
-                .clone()
-                .into()
-        });
+        .flatten()
+        .and_then(|s| s.worktrees.into_iter().find(|w| w.id == worker_id));
 
-    let worktree_path = worktree_entry
-        .as_ref()
-        .and_then(|w: &serde_json::Value| w.get("worktree_path")?.as_str().map(PathBuf::from));
+    let worktree_path = worktree_entry.as_ref().map(|w| w.worktree_path.clone());
 
     // Prompt from state.json (the original task)
-    let prompt = worktree_entry
-        .as_ref()
-        .and_then(|w| w.get("prompt")?.as_str().map(String::from));
+    let prompt = worktree_entry.as_ref().map(|w| w.prompt.clone());
 
     // Output from .swarm/output.md
     let output = worktree_path
@@ -2614,23 +2557,32 @@ async fn send_worker_message(
 
     info!("[worker] sending to {worker_id}: {}", body.message);
 
-    let output = tokio::process::Command::new("swarm")
-        .arg("--dir")
-        .arg(&root)
-        .arg("send")
-        .arg(&worker_id)
-        .arg(&body.message)
-        .output()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let req = apiari_swarm::client::DaemonRequest::SendMessage {
+        worktree_id: worker_id,
+        message: body.message.clone(),
+    };
 
-    if output.status.success() {
-        Ok(Json(serde_json::json!({"ok": true})))
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Ok(Json(
-            serde_json::json!({"ok": false, "error": stderr.to_string()}),
-        ))
+    let result =
+        tokio::task::spawn_blocking(move || apiari_swarm::client::send_daemon_request(&root, &req))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match result {
+        Ok(apiari_swarm::client::DaemonResponse::Ok { .. }) => {
+            Ok(Json(serde_json::json!({"ok": true})))
+        }
+        Ok(apiari_swarm::client::DaemonResponse::Error { message }) => {
+            Ok(Json(serde_json::json!({"ok": false, "error": message})))
+        }
+        Ok(other) => {
+            tracing::warn!("[worker] unexpected daemon response: {:?}", other);
+            Ok(Json(
+                serde_json::json!({"ok": false, "error": "unexpected daemon response"}),
+            ))
+        }
+        Err(e) => Ok(Json(
+            serde_json::json!({"ok": false, "error": e.to_string()}),
+        )),
     }
 }
 
@@ -3223,7 +3175,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
         std::fs::write(
             dir.path().join(".swarm/state.json"),
-            r#"{"worktrees":[{"id":"cli-3","branch":"swarm/fix","phase":"running","agent_kind":"claude","pr":{"url":"https://github.com/test/pull/1","title":"Fix stuff"}}]}"#,
+            r#"{"session_name":"test","worktrees":[{"id":"cli-3","branch":"swarm/fix","prompt":"fix it","agent_kind":"claude","repo_path":"/tmp/repo","worktree_path":"/tmp/wt","created_at":"2026-01-01T00:00:00-05:00","phase":"running","status":"running","pr":{"number":1,"url":"https://github.com/test/pull/1","title":"Fix stuff","state":"open"}}]}"#,
         ).unwrap();
 
         let workers = read_swarm_workers(dir.path());
@@ -3231,7 +3183,7 @@ mod tests {
         assert_eq!(workers[0].id, "cli-3");
         assert_eq!(workers[0].branch, "swarm/fix");
         assert_eq!(workers[0].status, "running");
-        assert_eq!(workers[0].agent, "claude");
+        assert_eq!(workers[0].agent, "Claude");
         assert_eq!(
             workers[0].pr_url,
             Some("https://github.com/test/pull/1".to_string())
@@ -3243,7 +3195,11 @@ mod tests {
     fn test_read_workers_empty_state() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
-        std::fs::write(dir.path().join(".swarm/state.json"), r#"{"worktrees":[]}"#).unwrap();
+        std::fs::write(
+            dir.path().join(".swarm/state.json"),
+            r#"{"session_name":"test","worktrees":[]}"#,
+        )
+        .unwrap();
 
         let workers = read_swarm_workers(dir.path());
         assert!(workers.is_empty());

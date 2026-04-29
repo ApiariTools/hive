@@ -168,26 +168,29 @@ fn execute_action(action: Action, db: &Db) {
         } => {
             let root = workspace_root.clone();
             tokio::spawn(async move {
-                let output = tokio::process::Command::new("swarm")
-                    .arg("--dir")
-                    .arg(&root)
-                    .arg("send")
-                    .arg(&worker_id)
-                    .arg(&message)
-                    .output()
-                    .await;
-                match output {
-                    Ok(o) if o.status.success() => {
+                let req = apiari_swarm::client::DaemonRequest::SendMessage {
+                    worktree_id: worker_id.clone(),
+                    message,
+                };
+                let result = tokio::task::spawn_blocking(move || {
+                    apiari_swarm::client::send_daemon_request(&root, &req)
+                })
+                .await;
+                match result {
+                    Ok(Ok(apiari_swarm::client::DaemonResponse::Ok { .. })) => {
                         tracing::info!("[pr-feedback] Sent feedback to {}", worker_id);
                     }
-                    Ok(o) => {
-                        tracing::warn!(
-                            "[pr-feedback] swarm send failed: {}",
-                            String::from_utf8_lossy(&o.stderr)
-                        );
+                    Ok(Ok(apiari_swarm::client::DaemonResponse::Error { message })) => {
+                        tracing::warn!("[pr-feedback] swarm send failed: {}", message);
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("[pr-feedback] Failed to send to swarm daemon: {e}");
+                    }
+                    Ok(Ok(other)) => {
+                        tracing::warn!("[pr-feedback] unexpected daemon response: {:?}", other);
                     }
                     Err(e) => {
-                        tracing::warn!("[pr-feedback] Failed to run swarm: {e}");
+                        tracing::warn!("[pr-feedback] spawn_blocking failed: {e}");
                     }
                 }
             });
