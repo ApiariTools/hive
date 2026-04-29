@@ -1,3 +1,4 @@
+import { useEffect, useRef, useCallback } from "react";
 import { Search } from "lucide-react";
 import type { Workspace } from "../types";
 import type { UsageData } from "../api";
@@ -32,6 +33,15 @@ function dotTitle(p: { name: string; status: string; usage_percent: number | nul
 export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggle, onOpenPalette, usage }: Props) {
   const showDots = usage?.installed && usage.providers.length > 0;
   const showInstallHint = usage && !usage.installed;
+  const activeTabRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+  }, [active, activeRemote]);
+
+  const setActiveRef = useCallback((el: HTMLButtonElement | null, isActive: boolean) => {
+    if (isActive) activeTabRef.current = el;
+  }, []);
 
   return (
     <div className={styles.bar}>
@@ -39,19 +49,22 @@ export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggl
         <span /><span /><span />
       </button>
       <div className={styles.logo}>hive</div>
-      {workspaces.map((ws) => {
-        const isActive = ws.name === active && ws.remote === activeRemote;
-        return (
-          <button
-            key={`${ws.remote || "local"}/${ws.name}`}
-            className={`${styles.tab} ${isActive ? styles.active : ""}`}
-            onClick={() => onSelect(ws.name, ws.remote)}
-          >
-            {ws.name}
-            {ws.remote && <span className={styles.remoteBadge}>{ws.remote}</span>}
-          </button>
-        );
-      })}
+      <div className={styles.tabScroll}>
+        {workspaces.map((ws) => {
+          const isActive = ws.name === active && ws.remote === activeRemote;
+          return (
+            <button
+              key={`${ws.remote || "local"}/${ws.name}`}
+              ref={(el) => setActiveRef(el, isActive)}
+              className={`${styles.tab} ${isActive ? styles.active : ""}`}
+              onClick={() => onSelect(ws.name, ws.remote)}
+            >
+              {ws.name}
+              {ws.remote && <span className={styles.remoteBadge}>{ws.remote}</span>}
+            </button>
+          );
+        })}
+      </div>
       {showDots && (
         <div className={styles.usageDots}>
           {usage.providers.map((p) => (

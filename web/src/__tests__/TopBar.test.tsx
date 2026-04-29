@@ -49,4 +49,17 @@ describe("TopBar", () => {
     render(<TopBar workspaces={[]} active="" onSelect={vi.fn()} />);
     expect(screen.getByText("hive")).toBeInTheDocument();
   });
+
+  it("scrolls active tab into view on workspace change", () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+
+    const { rerender } = render(
+      <TopBar workspaces={workspaces} active="apiari" onSelect={vi.fn()} />
+    );
+    scrollIntoView.mockClear();
+
+    rerender(<TopBar workspaces={workspaces} active="mgm" onSelect={vi.fn()} />);
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", inline: "center", block: "nearest" });
+  });
 });
