@@ -34,7 +34,6 @@ export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggl
   const showDots = usage?.installed && usage.providers.length > 0;
   const showInstallHint = usage && !usage.installed;
   const activeTabRef = useRef<HTMLButtonElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
@@ -50,7 +49,7 @@ export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggl
         <span /><span /><span />
       </button>
       <div className={styles.logo}>hive</div>
-      <div className={styles.tabScroll} ref={scrollRef}>
+      <div className={styles.tabScroll}>
         {workspaces.map((ws) => {
           const isActive = ws.name === active && ws.remote === activeRemote;
           return (
