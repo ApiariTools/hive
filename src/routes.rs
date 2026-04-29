@@ -1112,26 +1112,25 @@ async fn proxy_remote_request(
         target_url.push('?');
         target_url.push_str(&qs);
     }
-    let mut req_builder = state.http_client.request(method, &target_url);
 
-    if let Some(ct) = content_type {
-        req_builder = req_builder.header("content-type", ct);
-    }
-    if let Some(b) = body
-        && !b.is_empty()
+    let body_slice = body.as_deref();
+    let ct_str = content_type.as_deref();
+
+    match crate::remote::request_with_fallback(
+        &state.http_client,
+        method,
+        &target_url,
+        body_slice,
+        ct_str,
+    )
+    .await
     {
-        req_builder = req_builder.body(b);
-    }
-
-    match req_builder.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            let resp_headers = resp.headers().clone();
-            let resp_body = resp.bytes().await.unwrap_or_default();
-
+        Ok((status_code, resp_ct, resp_body)) => {
+            let status =
+                StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut response = axum::response::Response::builder().status(status);
-            if let Some(ct) = resp_headers.get("content-type") {
-                response = response.header("content-type", ct);
+            if !resp_ct.is_empty() {
+                response = response.header("content-type", resp_ct);
             }
             response
                 .body(axum::body::Body::from(resp_body))

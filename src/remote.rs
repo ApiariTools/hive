@@ -6,7 +6,6 @@
 //! remote workspaces transparently.
 
 use crate::events::{EventHub, HiveEvent};
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::Path as StdPath;
 use std::sync::Arc;
@@ -83,16 +82,15 @@ pub fn new_registry() -> RemoteRegistry {
 
 // ── Discovery ──
 
-pub fn spawn_discovery(
+pub async fn spawn_discovery(
     registry: RemoteRegistry,
     remotes: Vec<RemoteEntry>,
     events: EventHub,
     http_client: reqwest::Client,
 ) {
-    // Initialize all remotes synchronously so the registry is populated
-    // before any discovery or proxy requests arrive.
+    // Initialize all remotes before spawning discovery tasks
     {
-        let mut reg = registry.blocking_write();
+        let mut reg = registry.write().await;
         for remote in &remotes {
             reg.push(RemoteState {
                 name: remote.name.clone(),
@@ -116,8 +114,18 @@ pub fn spawn_discovery(
             loop {
                 let result = discover_workspaces(&disc_client, &disc_remote.url).await;
                 let (online, workspaces) = match result {
-                    Ok(ws) => (true, ws),
-                    Err(_) => (false, Vec::new()),
+                    Ok(ws) => {
+                        tracing::debug!(
+                            "[remote] discovered {} workspace(s) on {}",
+                            ws.len(),
+                            disc_remote.name
+                        );
+                        (true, ws)
+                    }
+                    Err(e) => {
+                        tracing::debug!("[remote] discovery failed for {}: {e}", disc_remote.name);
+                        (false, Vec::new())
+                    }
                 };
 
                 {
@@ -138,105 +146,235 @@ pub fn spawn_discovery(
             }
         });
 
-        // Spawn WS bridge
-        tokio::spawn(ws_bridge(remote, events, client));
+        // Spawn event bridge
+        tokio::spawn(event_bridge(remote, events, client));
+    }
+}
+
+fn parse_curl_response(raw: Vec<u8>) -> (u16, String, Vec<u8>) {
+    let header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
+    let headers = String::from_utf8_lossy(&raw[..header_end]).to_string();
+    let body_bytes = if header_end > 0 {
+        raw[header_end + 4..].to_vec()
+    } else {
+        raw
+    };
+
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(500);
+
+    let content_type = headers
+        .lines()
+        .find(|line| line.to_ascii_lowercase().starts_with("content-type:"))
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, value)| value.trim().to_string())
+        .unwrap_or_default();
+
+    (status, content_type, body_bytes)
+}
+
+pub async fn curl_request(
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+) -> Result<(u16, String, Vec<u8>), String> {
+    let mut cmd = tokio::process::Command::new("/usr/bin/curl");
+    cmd.args(["-s", "-m", "30", "-X", method, "-D", "-", url]);
+    if let Some(ct) = content_type {
+        cmd.args(["-H", &format!("Content-Type: {ct}")]);
+    }
+    if body.is_some() {
+        cmd.arg("--data-binary").arg("@-");
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    if let Some(b) = body
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(b).await.map_err(|e| e.to_string())?;
+    }
+
+    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(parse_curl_response(output.stdout))
+}
+
+pub async fn reqwest_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+) -> Result<(u16, String, Vec<u8>), String> {
+    let mut request = client.request(method, url);
+    if let Some(ct) = content_type {
+        request = request.header("content-type", ct);
+    }
+    if let Some(bytes) = body {
+        request = request.body(bytes.to_vec());
+    }
+
+    let response = request.send().await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = response.bytes().await.map_err(|e| e.to_string())?.to_vec();
+    Ok((status, content_type, body))
+}
+
+pub async fn request_with_fallback(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<&[u8]>,
+    content_type: Option<&str>,
+) -> Result<(u16, String, Vec<u8>), String> {
+    match reqwest_request(client, method.clone(), url, body, content_type).await {
+        Ok(response) => Ok(response),
+        Err(reqwest_error) => {
+            tracing::warn!(
+                "[remote] native HTTP failed for {method} {url}: {reqwest_error}; falling back to /usr/bin/curl"
+            );
+            curl_request(method.as_str(), url, body, content_type)
+                .await
+                .map_err(|curl_error| {
+                    format!(
+                        "native HTTP failed: {reqwest_error}; curl fallback failed: {curl_error}"
+                    )
+                })
+        }
     }
 }
 
 async fn discover_workspaces(
     client: &reqwest::Client,
     base_url: &str,
-) -> Result<Vec<String>, reqwest::Error> {
+) -> Result<Vec<String>, String> {
     #[derive(Deserialize)]
     struct WsInfo {
         name: String,
     }
 
     let url = format!("{base_url}/api/workspaces");
-    let resp = client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await?;
-    let workspaces: Vec<WsInfo> = resp.json().await?;
+    let (_, _, body) =
+        request_with_fallback(client, reqwest::Method::GET, &url, None, None).await?;
+    let workspaces: Vec<WsInfo> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     Ok(workspaces.into_iter().map(|w| w.name).collect())
 }
 
-// ── WebSocket bridge ──
+// ── Remote event bridge ──
+// Poll bot status for all remote workspaces every 3 seconds.
 
-async fn ws_bridge(remote: RemoteEntry, events: EventHub, _client: reqwest::Client) {
-    let mut backoff = 1u64;
+async fn event_bridge(remote: RemoteEntry, events: EventHub, client: reqwest::Client) {
+    // Wait for discovery to find workspaces first
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let mut last_statuses: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     loop {
-        let ws_url = remote
-            .url
-            .replace("http://", "ws://")
-            .replace("https://", "wss://");
-        let ws_url = format!("{ws_url}/ws");
+        // Get remote workspaces
+        let ws_url = format!("{}/api/workspaces", remote.url);
+        if let Ok((_, _, body)) =
+            request_with_fallback(&client, reqwest::Method::GET, &ws_url, None, None).await
+            && let Ok(workspaces) = serde_json::from_slice::<Vec<serde_json::Value>>(&body)
+        {
+            for ws in &workspaces {
+                let ws_name = ws["name"].as_str().unwrap_or_default();
+                if ws_name.is_empty() {
+                    continue;
+                }
 
-        match tokio_tungstenite::connect_async(&ws_url).await {
-            Ok((ws_stream, _)) => {
-                info!("[remote] WS connected to {}", remote.name);
-                backoff = 1; // reset on successful connect
+                // Poll bot statuses
+                let bots_url = format!("{}/api/workspaces/{ws_name}/bots", remote.url);
+                if let Ok((_, _, bots_body)) =
+                    request_with_fallback(&client, reqwest::Method::GET, &bots_url, None, None)
+                        .await
+                    && let Ok(bots) = serde_json::from_slice::<Vec<serde_json::Value>>(&bots_body)
+                {
+                    for bot in &bots {
+                        let bot_name = bot["name"].as_str().unwrap_or_default();
+                        if bot_name.is_empty() {
+                            continue;
+                        }
 
-                let (_write, mut read) = ws_stream.split();
-                while let Some(msg) = read.next().await {
-                    match msg {
-                        Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            // Parse the remote event and re-broadcast with remote field
-                            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text)
-                            {
-                                // Tag with remote name
-                                if let Some(obj) = value.as_object_mut() {
-                                    obj.insert(
-                                        "remote".to_string(),
-                                        serde_json::Value::String(remote.name.clone()),
-                                    );
+                        let status_url = format!(
+                            "{}/api/workspaces/{ws_name}/bots/{bot_name}/status",
+                            remote.url
+                        );
+                        if let Ok((_, _, status_body)) = request_with_fallback(
+                            &client,
+                            reqwest::Method::GET,
+                            &status_url,
+                            None,
+                            None,
+                        )
+                        .await
+                        {
+                            let status_body = String::from_utf8_lossy(&status_body).to_string();
+                            let key = format!("{ws_name}/{bot_name}");
+                            let changed = last_statuses.get(&key) != Some(&status_body);
+                            if changed {
+                                last_statuses.insert(key, status_body.clone());
+                                if let Ok(status) =
+                                    serde_json::from_str::<serde_json::Value>(&status_body)
+                                {
+                                    let event_type = "bot_status".to_string();
+                                    let mut value = status;
+                                    if let Some(obj) = value.as_object_mut() {
+                                        obj.insert(
+                                            "type".to_string(),
+                                            serde_json::Value::String(event_type.clone()),
+                                        );
+                                        obj.insert(
+                                            "workspace".to_string(),
+                                            serde_json::Value::String(ws_name.to_string()),
+                                        );
+                                        obj.insert(
+                                            "bot".to_string(),
+                                            serde_json::Value::String(bot_name.to_string()),
+                                        );
+                                        obj.insert(
+                                            "remote".to_string(),
+                                            serde_json::Value::String(remote.name.clone()),
+                                        );
+                                    }
+                                    events.send(HiveEvent::RemoteEvent {
+                                        remote: remote.name.clone(),
+                                        workspace: ws_name.to_string(),
+                                        bot: bot_name.to_string(),
+                                        event_type,
+                                        raw_json: serde_json::to_string(&value).unwrap_or_default(),
+                                    });
                                 }
-                                // Re-broadcast as a raw JSON event via EventHub
-                                // We use the RawRemoteEvent variant for this
-                                let workspace = value
-                                    .get("workspace")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let bot = value
-                                    .get("bot")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let event_type = value
-                                    .get("type")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-
-                                events.send(HiveEvent::RemoteEvent {
-                                    remote: remote.name.clone(),
-                                    workspace,
-                                    bot,
-                                    event_type,
-                                    raw_json: serde_json::to_string(&value).unwrap_or_default(),
-                                });
                             }
                         }
-                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
-                        Err(e) => {
-                            warn!("[remote] WS error from {}: {e}", remote.name);
-                            break;
-                        }
-                        _ => {}
                     }
                 }
             }
-            Err(e) => {
-                warn!("[remote] WS connect failed to {}: {e}", remote.name);
-            }
         }
 
-        // Exponential backoff: 1s, 2s, 4s, 8s, ... max 30s
-        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
-        backoff = (backoff * 2).min(30);
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
@@ -362,5 +500,16 @@ url = "http://10.0.0.3:4200"
             assert_eq!(ws[0], ("proj-a".to_string(), "mini".to_string()));
             assert_eq!(ws[1], ("proj-b".to_string(), "mini".to_string()));
         });
+    }
+
+    #[test]
+    fn test_parse_curl_response() {
+        let raw =
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Test: 1\r\n\r\n{\"ok\":true}"
+                .to_vec();
+        let (status, content_type, body) = parse_curl_response(raw);
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "application/json");
+        assert_eq!(body, br#"{"ok":true}"#);
     }
 }

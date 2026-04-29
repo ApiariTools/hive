@@ -170,7 +170,8 @@ async fn main() -> Result<()> {
             remote_entries,
             event_hub.clone(),
             reqwest::Client::new(),
-        );
+        )
+        .await;
     }
 
     let app = routes::router(
