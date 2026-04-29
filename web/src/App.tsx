@@ -305,6 +305,7 @@ export default function App() {
     if (!paletteOpen || workspaces.length === 0) return;
     let cancelled = false;
     setOtherWorkspaceBots([]);
+    setOtherWorkspaceUnreads({});
     const others = workspaces.filter((ws) => ws.name !== workspace || ws.remote !== remote);
     Promise.allSettled(
       others.map((ws) =>
@@ -340,7 +341,7 @@ export default function App() {
       }
     });
     return () => { cancelled = true; };
-  }, [paletteOpen, workspaces, workspace]);
+  }, [paletteOpen, workspaces, workspace, remote]);
 
   // Cmd+K: command palette, Cmd+J: focus chat
   useEffect(() => {
