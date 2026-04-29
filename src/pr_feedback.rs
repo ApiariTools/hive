@@ -19,6 +19,8 @@ pub(crate) struct PrFeedbackState {
     pub last_worker_sha: Option<String>,
     pub last_forward_at: Option<String>,
     pub conflict_notified: bool,
+    #[serde(default)]
+    pub ci_notified_sha: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -398,6 +400,7 @@ impl Watcher for PrFeedbackWatcher {
                             last_worker_sha: None,
                             last_forward_at: None,
                             conflict_notified: false,
+                            ci_notified_sha: None,
                         });
 
                 // Update worker_id in case it changed
@@ -409,6 +412,25 @@ impl Watcher for PrFeedbackWatcher {
                         wp.number, self.max_rounds
                     );
                     continue;
+                }
+
+                // Check if worker pushed a new commit — resolve forwarded review threads
+                let head_sha = get_pr_head_sha(&wp.owner, &wp.repo, wp.number).await;
+                if let Some(ref sha) = head_sha {
+                    let sha_changed = state
+                        .last_worker_sha
+                        .as_ref()
+                        .is_some_and(|prev| prev != sha);
+                    if sha_changed && !state.forwarded_comment_ids.is_empty() {
+                        resolve_forwarded_threads(
+                            &wp.owner,
+                            &wp.repo,
+                            wp.number,
+                            &state.forwarded_comment_ids,
+                        )
+                        .await;
+                    }
+                    state.last_worker_sha = Some(sha.clone());
                 }
 
                 // Check review comments
@@ -444,12 +466,15 @@ impl Watcher for PrFeedbackWatcher {
                 };
                 if let Some(ref status) = ci_status
                     && (status == "FAILURE" || status == "ERROR")
+                    && head_sha.is_some()
                 {
                     // Only notify if we haven't already told this worker about this SHA
-                    let current_sha = state.last_worker_sha.clone();
-                    let head_sha = get_pr_head_sha(&wp.owner, &wp.repo, wp.number).await;
-                    if head_sha.is_some()
-                        && head_sha != current_sha
+                    let already_notified = state
+                        .ci_notified_sha
+                        .as_ref()
+                        .zip(head_sha.as_ref())
+                        .is_some_and(|(notified, current)| notified == current);
+                    if !already_notified
                         && let Some(log) =
                             fetch_ci_failure_log(&wp.owner, &wp.repo, wp.number).await
                     {
@@ -459,7 +484,7 @@ impl Watcher for PrFeedbackWatcher {
                             worker_id: wp.worker_id.clone(),
                             message,
                         });
-                        state.last_worker_sha = head_sha;
+                        state.ci_notified_sha = head_sha.clone();
                         state.rounds += 1;
                         info!(
                             "[pr-feedback] Forwarded CI failure for PR #{} to worker {}",
@@ -495,6 +520,139 @@ impl Watcher for PrFeedbackWatcher {
         save_store(&self.store_path, &self.store);
 
         actions
+    }
+}
+
+/// Fetch review thread node IDs via GraphQL, returning (thread_id, is_resolved, comment_database_ids).
+async fn fetch_review_threads(
+    owner: &str,
+    repo: &str,
+    number: i64,
+) -> Vec<(String, bool, Vec<u64>)> {
+    let query = r#"query($owner: String!, $repo: String!, $number: Int!) {
+        repository(owner: $owner, name: $repo) {
+            pullRequest(number: $number) {
+                reviewThreads(first: 100) {
+                    nodes {
+                        id
+                        isResolved
+                        comments(first: 100) {
+                            nodes { databaseId }
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args([
+        "api",
+        "graphql",
+        "-f",
+        &format!("query={query}"),
+        "-f",
+        &format!("owner={owner}"),
+        "-f",
+        &format!("repo={repo}"),
+        "-F",
+        &format!("number={number}"),
+    ]);
+    if std::env::var("CLAUDECODE").is_ok() {
+        cmd.env_remove("GH_TOKEN");
+    }
+    let output = match cmd.output().await {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!("[pr-feedback] GraphQL fetch review threads failed: {stderr}");
+            return vec![];
+        }
+        Err(e) => {
+            warn!("[pr-feedback] failed to run gh for review threads: {e}");
+            return vec![];
+        }
+    };
+
+    let body: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let nodes = match body
+        .pointer("/data/repository/pullRequest/reviewThreads/nodes")
+        .and_then(|n| n.as_array())
+    {
+        Some(n) => n,
+        None => return vec![],
+    };
+
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let id = node.get("id")?.as_str()?.to_string();
+            let is_resolved = node.get("isResolved")?.as_bool()?;
+            let db_ids = node
+                .pointer("/comments/nodes")
+                .and_then(|n| n.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| c.get("databaseId")?.as_u64())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((id, is_resolved, db_ids))
+        })
+        .collect()
+}
+
+/// Resolve a single review thread via GraphQL mutation.
+async fn resolve_review_thread(thread_id: &str) -> bool {
+    let query = r#"mutation($threadId: ID!) {
+        resolveReviewThread(input: {threadId: $threadId}) {
+            thread { isResolved }
+        }
+    }"#;
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args([
+        "api",
+        "graphql",
+        "-f",
+        &format!("query={query}"),
+        "-f",
+        &format!("threadId={thread_id}"),
+    ]);
+    if std::env::var("CLAUDECODE").is_ok() {
+        cmd.env_remove("GH_TOKEN");
+    }
+    match cmd.output().await {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!("[pr-feedback] GraphQL resolve thread failed: {stderr}");
+            false
+        }
+        Err(e) => {
+            warn!("[pr-feedback] failed to run gh for resolve thread: {e}");
+            false
+        }
+    }
+}
+
+/// Resolve review threads whose comment IDs overlap with `forwarded_ids`.
+async fn resolve_forwarded_threads(owner: &str, repo: &str, number: i64, forwarded_ids: &[u64]) {
+    if forwarded_ids.is_empty() {
+        return;
+    }
+    let threads = fetch_review_threads(owner, repo, number).await;
+    for (thread_id, is_resolved, db_ids) in &threads {
+        if *is_resolved {
+            continue;
+        }
+        if db_ids.iter().any(|id| forwarded_ids.contains(id))
+            && resolve_review_thread(thread_id).await
+        {
+            info!("[pr-feedback] Resolved review thread {thread_id}");
+        }
     }
 }
 
@@ -550,6 +708,7 @@ mod tests {
                 last_worker_sha: Some("abc123".to_string()),
                 last_forward_at: Some("2026-04-26T00:00:00Z".to_string()),
                 conflict_notified: false,
+                ci_notified_sha: None,
             },
         );
 
@@ -608,6 +767,7 @@ mod tests {
             last_worker_sha: None,
             last_forward_at: None,
             conflict_notified: false,
+            ci_notified_sha: None,
         };
         let max_rounds = 3;
         assert!(state.rounds >= max_rounds);
@@ -668,6 +828,7 @@ mod tests {
                 last_worker_sha: None,
                 last_forward_at: None,
                 conflict_notified: false,
+                ci_notified_sha: None,
             },
         );
         store.prs.insert(
@@ -679,6 +840,7 @@ mod tests {
                 last_worker_sha: None,
                 last_forward_at: None,
                 conflict_notified: false,
+                ci_notified_sha: None,
             },
         );
 
@@ -752,6 +914,7 @@ mod tests {
                 last_worker_sha: None,
                 last_forward_at: None,
                 conflict_notified: true,
+                ci_notified_sha: None,
             },
         );
         save_store(&path, &store);
@@ -761,5 +924,37 @@ mod tests {
         let state = &loaded.prs["org/repo/1"];
         assert_eq!(state.rounds, 2);
         assert!(state.conflict_notified);
+    }
+
+    #[test]
+    fn test_ci_notified_sha_serde_default() {
+        // Old serialized data without ci_notified_sha should deserialize with None
+        let json = r#"{"prs":{"org/repo/1":{"worker_id":"w1","forwarded_comment_ids":[],"rounds":0,"last_worker_sha":null,"last_forward_at":null,"conflict_notified":false}}}"#;
+        let store: FeedbackStore = serde_json::from_str(json).unwrap();
+        let state = &store.prs["org/repo/1"];
+        assert!(state.ci_notified_sha.is_none());
+    }
+
+    #[test]
+    fn test_ci_notified_sha_roundtrip() {
+        let mut store = FeedbackStore::default();
+        store.prs.insert(
+            "org/repo/1".to_string(),
+            PrFeedbackState {
+                worker_id: "w1".to_string(),
+                forwarded_comment_ids: vec![],
+                rounds: 0,
+                last_worker_sha: Some("sha1".to_string()),
+                last_forward_at: None,
+                conflict_notified: false,
+                ci_notified_sha: Some("sha1".to_string()),
+            },
+        );
+        let json = serde_json::to_string(&store).unwrap();
+        let restored: FeedbackStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.prs["org/repo/1"].ci_notified_sha.as_deref(),
+            Some("sha1")
+        );
     }
 }
