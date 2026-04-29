@@ -4,15 +4,7 @@ Workspace chat hub with multi-bot, multi-provider support. A Rust daemon serves 
 
 ## Install
 
-### From crates.io (recommended)
-
-```bash
-cargo install apiari-hive
-hive init my-project
-hive --port 4200
-```
-
-### From GitHub Releases
+### From GitHub Releases (preferred for macOS)
 
 Download the latest binary from [Releases](https://github.com/ApiariTools/hive/releases):
 
@@ -22,6 +14,20 @@ mv hive-aarch64-apple-darwin /usr/local/bin/hive
 hive init my-project
 hive --port 4200
 ```
+
+Signed release binaries are the preferred install method for macOS, especially if you use Hive remotes over local-LAN IPs. Future Homebrew distribution should install these release artifacts rather than asking users to build locally.
+
+### From crates.io
+
+Good for local development and Rust-heavy workflows:
+
+```bash
+cargo install apiari-hive
+hive init my-project
+hive --port 4200
+```
+
+On recent macOS versions, locally built or `cargo install`ed binaries may hit local-network privacy quirks when connecting to LAN remotes. Hive includes a `/usr/bin/curl` fallback for remote HTTP, but signed release binaries remain the more reliable default.
 
 ### From Source
 
@@ -35,6 +41,14 @@ cargo install --path .
 hive init my-project
 hive --port 4200
 ```
+
+For day-to-day macOS development, prefer the signed dev launcher:
+
+```bash
+./scripts/run-signed-hive.sh --port 4200
+```
+
+It rebuilds Hive, applies an ad hoc signature, and then `exec`s the signed binary.
 
 ### Prerequisites
 
@@ -107,6 +121,9 @@ This configures git to use the `hooks/` directory for git hooks, including a `pr
 ```bash
 # Run checks
 cargo fmt && cargo clippy -- -D warnings -A clippy::too_many_arguments && cargo test
+
+# Run a locally built, signed Hive binary on macOS
+./scripts/run-signed-hive.sh --port 4200
 
 # Frontend
 cd web
