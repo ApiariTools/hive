@@ -299,7 +299,8 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // Fetch bots for other workspaces when palette opens
+  // Fetch bots + unread counts for other workspaces when palette opens
+  const [otherWorkspaceUnreads, setOtherWorkspaceUnreads] = useState<Record<string, Record<string, number>>>({});
   useEffect(() => {
     if (!paletteOpen || workspaces.length === 0) return;
     let cancelled = false;
@@ -317,6 +318,25 @@ export default function App() {
           .filter((r): r is PromiseFulfilledResult<CrossWorkspaceBot[]> => r.status === "fulfilled")
           .flatMap((r) => r.value);
         setOtherWorkspaceBots(fulfilled);
+      }
+    });
+    // Fetch unread counts for other workspaces
+    Promise.allSettled(
+      others.map((ws) =>
+        api.getUnread(ws.name, ws.remote).then((counts) => ({
+          key: `${ws.remote || "local"}/${ws.name}`,
+          counts,
+        }))
+      )
+    ).then((results) => {
+      if (!cancelled) {
+        const map: Record<string, Record<string, number>> = {};
+        for (const r of results) {
+          if (r.status === "fulfilled") {
+            map[r.value.key] = r.value.counts;
+          }
+        }
+        setOtherWorkspaceUnreads(map);
       }
     });
     return () => { cancelled = true; };
@@ -542,6 +562,8 @@ export default function App() {
         onSelectWorker={handleSelectWorker}
         otherWorkspaceBots={otherWorkspaceBots}
         onSelectWorkspaceBot={handleSelectWorkspaceBot}
+        unread={unread}
+        otherWorkspaceUnreads={otherWorkspaceUnreads}
         onStartResearch={() => {
           const topic = prompt("Research topic:");
           if (topic?.trim()) {
