@@ -64,6 +64,13 @@ const SCHEMA: &str = "
         PRIMARY KEY (workspace, bot)
     );
 
+    CREATE TABLE IF NOT EXISTS schedule_last_run (
+        workspace TEXT NOT NULL,
+        bot TEXT NOT NULL,
+        last_run_at TEXT NOT NULL,
+        PRIMARY KEY (workspace, bot)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_conversations_ws_bot_role
         ON conversations(workspace, bot, role);
 ";
@@ -147,6 +154,36 @@ impl Db {
             params![workspace, bot, status, streaming_content, tool_name],
         )?;
         Ok(())
+    }
+
+    pub fn set_schedule_last_run(
+        &self,
+        workspace: &str,
+        bot: &str,
+        last_run_at: &str,
+    ) -> Result<()> {
+        let conn = self.writer.lock().unwrap();
+        conn.execute(
+            "INSERT INTO schedule_last_run (workspace, bot, last_run_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(workspace, bot) DO UPDATE SET last_run_at = ?3",
+            params![workspace, bot, last_run_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_schedule_last_run(&self, workspace: &str, bot: &str) -> Result<Option<String>> {
+        let conn = self.reader()?;
+        let result = conn.query_row(
+            "SELECT last_run_at FROM schedule_last_run WHERE workspace = ?1 AND bot = ?2",
+            params![workspace, bot],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(ts) => Ok(Some(ts)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn append_streaming(&self, workspace: &str, bot: &str, text: &str) -> Result<()> {

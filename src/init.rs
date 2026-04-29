@@ -82,7 +82,7 @@ description = ""
 # color = "#5cb85c"
 # role = "Code quality reviewer"
 # provider = "claude"
-# schedule_hours = 168
+# schedule = "0 9 * * 1"       # cron expression (minute hour day month weekday)
 # proactive_prompt = "Review recent PRs and summarize trends"
 
 # Voice (optional):

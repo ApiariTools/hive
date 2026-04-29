@@ -347,24 +347,109 @@ impl Watcher for PrReviewWatcher {
     }
 }
 
+/// A scheduled bot entry with its pre-parsed cron expression (if any).
+struct ScheduledBot {
+    bot: WatchedBot,
+    cron: Option<croner::Cron>,
+}
+
 /// Checks if scheduled/proactive bots need to run.
+///
+/// Supports two schedule formats:
+/// - `schedule = "0 9 * * 1-5"` — standard 5-field cron expression (preferred)
+/// - `schedule_hours = 24` — deprecated fallback, runs every N hours
+///
+/// Cron expressions are parsed once at construction time.
+/// Persists `last_run_at` to the DB so schedules survive restarts.
 pub struct ScheduleWatcher {
-    bots: Vec<WatchedBot>,
-    last_run: std::collections::HashMap<String, std::time::Instant>,
-    startup: std::time::Instant,
+    entries: Vec<ScheduledBot>,
+    db: Db,
 }
 
 impl ScheduleWatcher {
-    pub fn new(bots: Vec<WatchedBot>) -> Self {
-        // Only keep bots that have schedule configured
-        let bots = bots
+    pub fn new(bots: Vec<WatchedBot>, db: Db) -> Self {
+        use std::str::FromStr;
+        let entries = bots
             .into_iter()
-            .filter(|b| b.schedule_hours.is_some() && b.proactive_prompt.is_some())
+            .filter(|b| {
+                (b.schedule.is_some() || b.schedule_hours.is_some()) && b.proactive_prompt.is_some()
+            })
+            .map(|bot| {
+                let cron =
+                    bot.schedule
+                        .as_deref()
+                        .and_then(|expr| match croner::Cron::from_str(expr) {
+                            Ok(c) => Some(c),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[schedule] invalid cron expression '{}' for {}/{}: {e}",
+                                    expr,
+                                    bot.workspace,
+                                    bot.name
+                                );
+                                None
+                            }
+                        });
+                ScheduledBot { bot, cron }
+            })
             .collect();
-        Self {
-            bots,
-            last_run: std::collections::HashMap::new(),
-            startup: std::time::Instant::now(),
+        Self { entries, db }
+    }
+
+    /// Determine if a bot should run based on its schedule and last run time.
+    fn should_run(
+        entry: &ScheduledBot,
+        last_run_at: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        if let Some(ref cron) = entry.cron {
+            Self::should_run_cron(cron, last_run_at, now)
+        } else if let Some(hours) = entry.bot.schedule_hours {
+            Self::should_run_hours(hours, last_run_at, now)
+        } else {
+            false
+        }
+    }
+
+    fn should_run_cron(
+        cron: &croner::Cron,
+        last_run_at: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let last_run = last_run_at.and_then(|ts| {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        });
+
+        match last_run {
+            Some(last) => {
+                // Find next trigger after last run — if it's <= now, fire
+                cron.find_next_occurrence(&last, false)
+                    .is_ok_and(|next| next <= now)
+            }
+            None => {
+                // Never run before — check if there was a trigger in the last tick window.
+                // To avoid firing immediately on first startup, only fire if a cron trigger
+                // occurred in the last 60 seconds.
+                let window_start = now - chrono::Duration::seconds(60);
+                cron.find_next_occurrence(&window_start, false)
+                    .is_ok_and(|next| next <= now)
+            }
+        }
+    }
+
+    fn should_run_hours(
+        hours: u64,
+        last_run_at: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let secs = (hours as i64).saturating_mul(3600);
+        let interval = chrono::Duration::seconds(secs);
+        match last_run_at.and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok()) {
+            Some(last) => now - last.with_timezone(&chrono::Utc) >= interval,
+            // Never run before — don't fire on startup
+            None => false,
         }
     }
 }
@@ -376,26 +461,34 @@ impl Watcher for ScheduleWatcher {
     }
 
     fn interval_ticks(&self) -> u64 {
-        1 // every tick, but internally checks hours
+        1 // every tick, but internally checks schedule
     }
 
     async fn tick(&mut self, _ctx: &TickContext) -> Vec<Action> {
         let mut actions = Vec::new();
-        let now = std::time::Instant::now();
+        let now = chrono::Utc::now();
+        let now_str = now.to_rfc3339();
 
-        for bot in &self.bots {
-            let hours = bot.schedule_hours.unwrap_or(24);
-            let interval = std::time::Duration::from_secs(hours * 3600);
+        for entry in &self.entries {
+            let bot = &entry.bot;
             let key = format!("{}/{}", bot.workspace, bot.name);
 
-            let should_run = match self.last_run.get(&key) {
-                Some(last) => now.duration_since(*last) >= interval,
-                // Don't run on startup — wait for first interval
-                None => now.duration_since(self.startup) >= interval,
+            let last_run_at = match self.db.get_schedule_last_run(&bot.workspace, &bot.name) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("[schedule] failed to read last_run for {key}: {e}");
+                    continue;
+                }
             };
 
-            if should_run {
-                self.last_run.insert(key, now);
+            if Self::should_run(entry, last_run_at.as_deref(), now) {
+                tracing::info!("[schedule] firing scheduled bot {key}");
+                if let Err(e) = self
+                    .db
+                    .set_schedule_last_run(&bot.workspace, &bot.name, &now_str)
+                {
+                    tracing::error!("[schedule] failed to persist last_run for {key}: {e}");
+                }
                 actions.push(Action::RunBot { bot: bot.clone() });
             }
         }
@@ -542,5 +635,153 @@ mod tests {
         assert_eq!(count2.load(Ordering::Relaxed), 2);
 
         handle.abort();
+    }
+
+    fn make_test_entry(schedule: Option<&str>, schedule_hours: Option<u64>) -> ScheduledBot {
+        use std::str::FromStr;
+        let bot = WatchedBot {
+            workspace: "test-ws".to_string(),
+            name: "test-bot".to_string(),
+            provider: "claude".to_string(),
+            model: None,
+            role: "tester".to_string(),
+            watch: vec![],
+            working_dir: None,
+            schedule: schedule.map(String::from),
+            schedule_hours,
+            proactive_prompt: Some("do something".to_string()),
+            services: vec![],
+        };
+        let cron = schedule.and_then(|s| croner::Cron::from_str(s).ok());
+        ScheduledBot { bot, cron }
+    }
+
+    #[test]
+    fn test_cron_should_run_after_trigger() {
+        // Cron: every hour at minute 0
+        let entry = make_test_entry(Some("0 * * * *"), None);
+        // Last run was at 08:00, now it's 09:01 — should fire (09:00 trigger passed)
+        let last = "2026-04-29T08:00:00+00:00";
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-29T09:01:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(ScheduleWatcher::should_run(&entry, Some(last), now));
+    }
+
+    #[test]
+    fn test_cron_should_not_run_before_trigger() {
+        // Cron: every hour at minute 0
+        let entry = make_test_entry(Some("0 * * * *"), None);
+        // Last run was at 08:00, now it's 08:30 — should NOT fire (next is 09:00)
+        let last = "2026-04-29T08:00:00+00:00";
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-29T08:30:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(!ScheduleWatcher::should_run(&entry, Some(last), now));
+    }
+
+    #[test]
+    fn test_cron_weekday_only() {
+        // Cron: 9am weekdays only (mon-fri)
+        let entry = make_test_entry(Some("0 9 * * 1-5"), None);
+        // Saturday 2026-05-02 at 09:01 — should NOT fire
+        let last = "2026-05-01T09:00:00+00:00"; // Friday
+        let saturday = chrono::DateTime::parse_from_rfc3339("2026-05-02T09:01:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(!ScheduleWatcher::should_run(&entry, Some(last), saturday));
+
+        // Monday 2026-05-04 at 09:01 — should fire
+        let monday = chrono::DateTime::parse_from_rfc3339("2026-05-04T09:01:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(ScheduleWatcher::should_run(&entry, Some(last), monday));
+    }
+
+    #[test]
+    fn test_cron_no_last_run_within_window() {
+        // Never run before, cron just triggered within 60s window
+        let entry = make_test_entry(Some("0 9 * * *"), None);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-29T09:00:30+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(ScheduleWatcher::should_run(&entry, None, now));
+    }
+
+    #[test]
+    fn test_cron_no_last_run_outside_window() {
+        // Never run before, cron triggered more than 60s ago — don't fire
+        let entry = make_test_entry(Some("0 9 * * *"), None);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-29T09:02:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(!ScheduleWatcher::should_run(&entry, None, now));
+    }
+
+    #[test]
+    fn test_invalid_cron_expression() {
+        // Invalid cron produces no parsed Cron, no schedule_hours — should not run
+        let entry = make_test_entry(Some("not a cron"), None);
+        let now = chrono::Utc::now();
+        assert!(!ScheduleWatcher::should_run(&entry, None, now));
+    }
+
+    #[test]
+    fn test_schedule_hours_fallback() {
+        let entry = make_test_entry(None, Some(24));
+        // Last run 25 hours ago — should fire
+        let now = chrono::Utc::now();
+        let last = (now - chrono::Duration::hours(25)).to_rfc3339();
+        assert!(ScheduleWatcher::should_run(&entry, Some(&last), now));
+    }
+
+    #[test]
+    fn test_schedule_hours_not_yet() {
+        let entry = make_test_entry(None, Some(24));
+        // Last run 1 hour ago — should NOT fire
+        let now = chrono::Utc::now();
+        let last = (now - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(!ScheduleWatcher::should_run(&entry, Some(&last), now));
+    }
+
+    #[test]
+    fn test_schedule_hours_no_last_run() {
+        // schedule_hours with no last_run — should NOT fire on startup
+        let entry = make_test_entry(None, Some(24));
+        let now = chrono::Utc::now();
+        assert!(!ScheduleWatcher::should_run(&entry, None, now));
+    }
+
+    #[test]
+    fn test_schedule_prefers_cron_over_hours() {
+        // Bot has both schedule and schedule_hours — cron takes precedence
+        let entry = make_test_entry(Some("0 9 * * *"), Some(1));
+        // Last run 2 hours ago, but cron says 9am and it's 10am — cron should fire
+        let now = chrono::DateTime::parse_from_rfc3339("2026-04-29T10:00:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let last = "2026-04-29T08:00:00+00:00";
+        assert!(ScheduleWatcher::should_run(&entry, Some(last), now));
+    }
+
+    #[test]
+    fn test_db_schedule_last_run_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(&dir.path().join("test.db")).unwrap();
+
+        // Initially no last_run
+        assert!(db.get_schedule_last_run("ws", "bot").unwrap().is_none());
+
+        // Set and read back
+        db.set_schedule_last_run("ws", "bot", "2026-04-29T09:00:00+00:00")
+            .unwrap();
+        let last = db.get_schedule_last_run("ws", "bot").unwrap();
+        assert_eq!(last.as_deref(), Some("2026-04-29T09:00:00+00:00"));
+
+        // Update
+        db.set_schedule_last_run("ws", "bot", "2026-04-29T10:00:00+00:00")
+            .unwrap();
+        let last = db.get_schedule_last_run("ws", "bot").unwrap();
+        assert_eq!(last.as_deref(), Some("2026-04-29T10:00:00+00:00"));
     }
 }
