@@ -2574,7 +2574,12 @@ async fn send_worker_message(
         Ok(apiari_swarm::client::DaemonResponse::Error { message }) => {
             Ok(Json(serde_json::json!({"ok": false, "error": message})))
         }
-        Ok(_) => Ok(Json(serde_json::json!({"ok": true}))),
+        Ok(other) => {
+            tracing::warn!("[worker] unexpected daemon response: {:?}", other);
+            Ok(Json(
+                serde_json::json!({"ok": false, "error": "unexpected daemon response"}),
+            ))
+        }
         Err(e) => Ok(Json(
             serde_json::json!({"ok": false, "error": e.to_string()}),
         )),

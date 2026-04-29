@@ -67,7 +67,7 @@ pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
             };
 
             let resp = send_daemon_request(&dir, &req)?;
-            print_response(&resp);
+            check_response(&resp)?;
         }
         SwarmCommand::Send {
             worktree_id,
@@ -78,12 +78,12 @@ pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
                 message,
             };
             let resp = send_daemon_request(&dir, &req)?;
-            print_response(&resp);
+            check_response(&resp)?;
         }
         SwarmCommand::Close { worktree_id } => {
             let req = DaemonRequest::CloseWorker { worktree_id };
             let resp = send_daemon_request(&dir, &req)?;
-            print_response(&resp);
+            check_response(&resp)?;
         }
         SwarmCommand::Status => {
             let req = DaemonRequest::ListWorkers {
@@ -110,7 +110,7 @@ pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
                         }
                     }
                 }
-                _ => print_response(&resp),
+                _ => check_response(&resp)?,
             }
         }
     }
@@ -118,7 +118,7 @@ pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
     Ok(())
 }
 
-fn print_response(resp: &DaemonResponse) {
+fn check_response(resp: &DaemonResponse) -> Result<()> {
     match resp {
         DaemonResponse::Ok { data } => {
             if let Some(d) = data {
@@ -126,21 +126,22 @@ fn print_response(resp: &DaemonResponse) {
             } else {
                 println!("ok");
             }
+            Ok(())
         }
-        DaemonResponse::Error { message } => {
-            eprintln!("error: {message}");
-        }
+        DaemonResponse::Error { message } => Err(color_eyre::eyre::eyre!("{message}")),
         DaemonResponse::Workers { workers } => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(workers).unwrap_or_default()
             );
+            Ok(())
         }
         other => {
             println!(
                 "{}",
                 serde_json::to_string_pretty(other).unwrap_or_default()
             );
+            Ok(())
         }
     }
 }

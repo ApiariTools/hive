@@ -108,7 +108,10 @@ async fn main() -> Result<()> {
                 return setup::run();
             }
             Command::Swarm { dir, command } => {
-                let work_dir = dir.unwrap_or_else(|| std::env::current_dir().unwrap());
+                let work_dir = match dir {
+                    Some(d) => d,
+                    None => std::env::current_dir()?,
+                };
                 return swarm::run(work_dir, command);
             }
         }

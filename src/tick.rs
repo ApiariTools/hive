@@ -186,10 +186,12 @@ fn execute_action(action: Action, db: &Db) {
                     Ok(Err(e)) => {
                         tracing::warn!("[pr-feedback] Failed to send to swarm daemon: {e}");
                     }
+                    Ok(Ok(other)) => {
+                        tracing::warn!("[pr-feedback] unexpected daemon response: {:?}", other);
+                    }
                     Err(e) => {
                         tracing::warn!("[pr-feedback] spawn_blocking failed: {e}");
                     }
-                    _ => {}
                 }
             });
         }
