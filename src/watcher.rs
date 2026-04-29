@@ -66,7 +66,9 @@ pub fn start_watchers(bots: Vec<WatchedBot>, db: Db) {
 #[allow(dead_code)]
 async fn run_watcher(bot: WatchedBot, db: Db) {
     let signal_interval = Duration::from_secs(60);
-    let proactive_interval = Duration::from_secs(bot.schedule_hours.unwrap_or(24) * 3600);
+    // Use schedule_hours for legacy interval; cron bots should use ScheduleWatcher instead
+    let proactive_secs = bot.schedule_hours.unwrap_or(24).saturating_mul(3600);
+    let proactive_interval = Duration::from_secs(proactive_secs);
 
     let mut signal_tick = interval(signal_interval);
     let mut proactive_tick = interval(proactive_interval);
