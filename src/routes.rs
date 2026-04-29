@@ -120,6 +120,10 @@ pub fn router_with_http_client(
             "/api/workspaces/{workspace}/workers/{worker_id}/send",
             post(send_worker_message),
         )
+        .route(
+            "/api/workspaces/{workspace}/workers/{worker_id}/diff",
+            get(get_worker_diff),
+        )
         .route("/api/workspaces/{workspace}/docs", get(list_docs))
         .route(
             "/api/workspaces/{workspace}/docs/{filename}",
@@ -2531,6 +2535,73 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
     }
 
     messages
+}
+
+/// Max diff output size (2 MB) to avoid unbounded memory usage.
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
+async fn get_worker_diff(
+    State(state): State<AppState>,
+    Path((workspace, worker_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Validate workspace name: only alphanumeric, hyphens, underscores
+    if workspace.is_empty()
+        || workspace
+            .chars()
+            .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let config_dir = state.config_dir.clone();
+    let diff = tokio::task::spawn_blocking(move || -> Option<String> {
+        let config_path = config_dir
+            .join("workspaces")
+            .join(format!("{workspace}.toml"));
+        let ws_config = load_workspace_config(&config_path);
+        let root = ws_config
+            .workspace
+            .as_ref()
+            .and_then(|w| w.root.as_ref())
+            .map(PathBuf::from)?;
+
+        let state_path = root.join(".swarm/state.json");
+        let state_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).ok()?).ok()?;
+        let worktree_path = state_json
+            .get("worktrees")?
+            .as_array()?
+            .iter()
+            .find(|w| w.get("id").and_then(|i| i.as_str()) == Some(&worker_id))?
+            .get("worktree_path")?
+            .as_str()?
+            .to_string();
+
+        let output = std::process::Command::new("git")
+            .args(["diff", "main...HEAD"])
+            .current_dir(&worktree_path)
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            if raw.len() > MAX_DIFF_BYTES {
+                Some(format!(
+                    "{}...\n\n(diff truncated at {} bytes)",
+                    &raw[..MAX_DIFF_BYTES],
+                    MAX_DIFF_BYTES
+                ))
+            } else {
+                Some(raw.into_owned())
+            }
+        } else {
+            None
+        }
+    })
+    .await
+    .unwrap_or(None);
+
+    Ok(Json(serde_json::json!({ "diff": diff })))
 }
 
 #[derive(Deserialize)]

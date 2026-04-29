@@ -219,6 +219,22 @@ async fn test_worker_detail_not_found() {
 }
 
 #[tokio::test]
+async fn test_worker_diff_no_swarm() {
+    let (app, _dir) = test_app();
+    let (status, body) = get(&app, "/api/workspaces/test/workers/nonexistent/diff").await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(parsed["diff"].is_null());
+}
+
+#[tokio::test]
+async fn test_worker_diff_rejects_invalid_name() {
+    let (app, _dir) = test_app();
+    let (status, _) = get(&app, "/api/workspaces/bad.name/workers/x/diff").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn test_send_message_stores_user_msg() {
     let (app, _dir) = test_app();
     let (status, _) = post_json(

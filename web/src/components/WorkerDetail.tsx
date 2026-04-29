@@ -1,6 +1,9 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { DiffView as GitDiffView, DiffModeEnum } from "@git-diff-view/react";
+import { DiffFile, getLang } from "@git-diff-view/core";
+import "@git-diff-view/react/styles/diff-view-pure.css";
 import type { Worker, WorkerDetail as WorkerDetailData } from "../types";
 import * as api from "../api";
 import { ChatInput } from "./ChatInput";
@@ -18,12 +21,75 @@ function branchName(branch: string): string {
   return branch.replace(/^swarm\//, "");
 }
 
-type InfoTab = "output" | "task" | "chat";
+type InfoTab = "output" | "task" | "diff" | "chat";
+
+/** Split a multi-file unified diff into per-file sections */
+function splitDiffByFile(raw: string): { fileName: string; hunks: string[] }[] {
+  const files: { fileName: string; hunks: string[] }[] = [];
+  // Split on "diff --git" boundaries
+  const parts = raw.split(/^(?=diff --git )/m);
+  for (const part of parts) {
+    if (!part.trim()) continue;
+    // Extract filename from "diff --git a/path b/path"
+    const headerMatch = part.match(/^diff --git a\/.+ b\/(.+)/);
+    const fileName = headerMatch?.[1] ?? "unknown";
+    // Extract everything from the first @@ onward as hunk content
+    const hunkStart = part.indexOf("\n@@");
+    if (hunkStart === -1) {
+      files.push({ fileName, hunks: [] });
+      continue;
+    }
+    const hunkContent = part.slice(hunkStart + 1); // skip the \n before @@
+    files.push({ fileName, hunks: [hunkContent] });
+  }
+  return files;
+}
+
+function FileDiffView({ fileName, hunks }: { fileName: string; hunks: string[] }) {
+  const diffFile = useMemo(() => {
+    const lang = getLang(fileName);
+    const instance = DiffFile.createInstance({
+      oldFile: { fileName, fileLang: lang },
+      newFile: { fileName, fileLang: lang },
+      hunks,
+    });
+    instance.initTheme("dark");
+    instance.init();
+    instance.buildUnifiedDiffLines();
+    return instance;
+  }, [fileName, hunks]);
+
+  return (
+    <div className={styles.diffFileSection}>
+      <div className={styles.diffFileName}>{fileName}</div>
+      <GitDiffView
+        diffFile={diffFile}
+        diffViewMode={DiffModeEnum.Unified}
+        diffViewTheme="dark"
+        diffViewHighlight
+        diffViewFontSize={12}
+      />
+    </div>
+  );
+}
+
+function DiffViewer({ diff }: { diff: string }) {
+  const files = useMemo(() => splitDiffByFile(diff), [diff]);
+  if (files.length === 0) return <div className={styles.empty}>Empty diff</div>;
+  return (
+    <div>
+      {files.map((f, i) => (
+        <FileDiffView key={`${f.fileName}-${i}`} fileName={f.fileName} hunks={f.hunks} />
+      ))}
+    </div>
+  );
+}
 
 export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Props) {
   const [sending, setSending] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [infoTab, setInfoTab] = useState<InfoTab>(window.innerWidth <= 768 ? "chat" : "output");
+  const [diffContent, setDiffContent] = useState<string | null | undefined>(undefined);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -41,6 +107,17 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [detail?.conversation.length]);
+
+  // Reset cached diff when worker changes
+  useEffect(() => {
+    setDiffContent(undefined);
+  }, [workspace, worker.id, remote]);
+
+  useEffect(() => {
+    if (infoTab === "diff" && diffContent === undefined) {
+      api.getWorkerDiff(workspace, worker.id, remote).then(setDiffContent).catch(() => setDiffContent(null));
+    }
+  }, [infoTab, workspace, worker.id, remote, diffContent]);
 
   async function handleWorkerSend(text: string) {
     if (!text || sending) return;
@@ -168,6 +245,12 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
             Task
           </button>
           <button
+            className={`${styles.tab} ${infoTab === "diff" ? styles.tabActive : ""}`}
+            onClick={() => setInfoTab("diff")}
+          >
+            Diff
+          </button>
+          <button
             className={`${styles.tab} ${styles.tabChat} ${infoTab === "chat" ? styles.tabActive : ""}`}
             onClick={() => setInfoTab("chat")}
           >
@@ -193,6 +276,15 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
               </div>
             ) : (
               <div className={styles.empty}>No task prompt</div>
+            )
+          )}
+          {infoTab === "diff" && (
+            diffContent === undefined ? (
+              <div className={styles.empty}>Loading diff...</div>
+            ) : diffContent ? (
+              <DiffViewer diff={diffContent} />
+            ) : (
+              <div className={styles.empty}>No diff available</div>
             )
           )}
           {isMobile && infoTab === "chat" && (
