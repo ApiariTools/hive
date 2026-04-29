@@ -215,6 +215,11 @@ export async function startResearch(
   return res.json();
 }
 
+export async function getWorkerDiff(workspace: string, workerId: string, remote?: string): Promise<string | null> {
+  const data = await get<{ diff: string | null }>(`${wsPath(workspace, remote)}/workers/${workerId}/diff`);
+  return data.diff;
+}
+
 export async function sendMessage(
   workspace: string,
   bot: string,

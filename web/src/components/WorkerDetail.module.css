@@ -324,6 +324,62 @@
 .msgText pre code { background: none; padding: 0; }
 
 
+/* ── Diff view ── */
+.diffView {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+
+.diffLine {
+  display: flex;
+  white-space: pre;
+}
+
+.diffLineNum {
+  width: 48px;
+  flex-shrink: 0;
+  text-align: right;
+  padding-right: 12px;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.diffCode {
+  flex: 1;
+  padding-right: 16px;
+}
+
+.diffFile {
+  color: var(--text-strong);
+  font-weight: 600;
+  padding-top: 16px;
+}
+
+.diffFile:first-child {
+  padding-top: 0;
+}
+
+.diffMeta {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.diffHunk {
+  color: var(--accent);
+  font-weight: 600;
+  padding-top: 4px;
+}
+
+.diffAdd {
+  background: rgba(86, 186, 86, 0.15);
+}
+
+.diffRemove {
+  background: rgba(229, 85, 85, 0.15);
+}
+
 @media (max-width: 768px) {
   .layout {
     flex-direction: column;

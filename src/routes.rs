@@ -120,6 +120,10 @@ pub fn router_with_http_client(
             "/api/workspaces/{workspace}/workers/{worker_id}/send",
             post(send_worker_message),
         )
+        .route(
+            "/api/workspaces/{workspace}/workers/{worker_id}/diff",
+            get(get_worker_diff),
+        )
         .route("/api/workspaces/{workspace}/docs", get(list_docs))
         .route(
             "/api/workspaces/{workspace}/docs/{filename}",
@@ -2588,6 +2592,49 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
     }
 
     messages
+}
+
+async fn get_worker_diff(
+    State(state): State<AppState>,
+    Path((workspace, worker_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let diff = (|| -> Option<String> {
+        let config_path = state
+            .config_dir
+            .join("workspaces")
+            .join(format!("{workspace}.toml"));
+        let ws_config = load_workspace_config(&config_path);
+        let root = ws_config
+            .workspace
+            .as_ref()
+            .and_then(|w| w.root.as_ref())
+            .map(PathBuf::from)?;
+
+        let state_path = root.join(".swarm/state.json");
+        let state_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state_path).ok()?).ok()?;
+        let worktree_path = state_json
+            .get("worktrees")?
+            .as_array()?
+            .iter()
+            .find(|w| w.get("id").and_then(|i| i.as_str()) == Some(&worker_id))?
+            .get("worktree_path")?
+            .as_str()?;
+
+        let output = std::process::Command::new("git")
+            .args(["diff", "main...HEAD"])
+            .current_dir(worktree_path)
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            None
+        }
+    })();
+
+    Json(serde_json::json!({ "diff": diff }))
 }
 
 #[derive(Deserialize)]

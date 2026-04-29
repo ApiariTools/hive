@@ -18,12 +18,41 @@ function branchName(branch: string): string {
   return branch.replace(/^swarm\//, "");
 }
 
-type InfoTab = "output" | "task" | "chat";
+type InfoTab = "output" | "task" | "diff" | "chat";
+
+function DiffView({ diff }: { diff: string }) {
+  const lines = diff.split("\n");
+  return (
+    <div className={styles.diffView}>
+      {lines.map((line, i) => {
+        let cls = styles.diffLine;
+        if (line.startsWith("diff --git")) {
+          cls = `${styles.diffLine} ${styles.diffFile}`;
+        } else if (line.startsWith("@@")) {
+          cls = `${styles.diffLine} ${styles.diffHunk}`;
+        } else if (line.startsWith("+++") || line.startsWith("---")) {
+          cls = `${styles.diffLine} ${styles.diffMeta}`;
+        } else if (line.startsWith("+")) {
+          cls = `${styles.diffLine} ${styles.diffAdd}`;
+        } else if (line.startsWith("-")) {
+          cls = `${styles.diffLine} ${styles.diffRemove}`;
+        }
+        return (
+          <div key={i} className={cls}>
+            <span className={styles.diffLineNum}>{i + 1}</span>
+            <span className={styles.diffCode}>{line || "\n"}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Props) {
   const [sending, setSending] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [infoTab, setInfoTab] = useState<InfoTab>(window.innerWidth <= 768 ? "chat" : "output");
+  const [diffContent, setDiffContent] = useState<string | null | undefined>(undefined);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -41,6 +70,12 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [detail?.conversation.length]);
+
+  useEffect(() => {
+    if (infoTab === "diff" && diffContent === undefined) {
+      api.getWorkerDiff(workspace, worker.id, remote).then(setDiffContent);
+    }
+  }, [infoTab]);
 
   async function handleWorkerSend(text: string) {
     if (!text || sending) return;
@@ -168,6 +203,12 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
             Task
           </button>
           <button
+            className={`${styles.tab} ${infoTab === "diff" ? styles.tabActive : ""}`}
+            onClick={() => setInfoTab("diff")}
+          >
+            Diff
+          </button>
+          <button
             className={`${styles.tab} ${styles.tabChat} ${infoTab === "chat" ? styles.tabActive : ""}`}
             onClick={() => setInfoTab("chat")}
           >
@@ -193,6 +234,15 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
               </div>
             ) : (
               <div className={styles.empty}>No task prompt</div>
+            )
+          )}
+          {infoTab === "diff" && (
+            diffContent === undefined ? (
+              <div className={styles.empty}>Loading diff...</div>
+            ) : diffContent ? (
+              <DiffView diff={diffContent} />
+            ) : (
+              <div className={styles.empty}>No diff available</div>
             )
           )}
           {isMobile && infoTab === "chat" && (
