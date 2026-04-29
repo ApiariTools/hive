@@ -17,6 +17,7 @@ mod research;
 mod routes;
 mod setup;
 mod stt;
+mod swarm;
 mod tick;
 mod tts;
 mod usage;
@@ -53,6 +54,15 @@ enum Command {
     Docs(docs::DocsArgs),
     /// Install voice dependencies (whisper STT + Kokoro TTS)
     Setup,
+    /// Interact with swarm workers via the daemon IPC
+    Swarm {
+        /// Workspace root directory where .swarm/ lives
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+
+        #[command(subcommand)]
+        command: swarm::SwarmCommand,
+    },
 }
 
 #[tokio::main]
@@ -96,6 +106,10 @@ async fn main() -> Result<()> {
             }
             Command::Setup => {
                 return setup::run();
+            }
+            Command::Swarm { dir, command } => {
+                let work_dir = dir.unwrap_or_else(|| std::env::current_dir().unwrap());
+                return swarm::run(work_dir, command);
             }
         }
     }
