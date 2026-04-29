@@ -7,7 +7,7 @@ import type { Message } from "../types";
 import { splitSentences } from "../voice";
 import { ChatInput } from "./ChatInput";
 import type { Attachment, VoiceState } from "./ChatInput";
-import { playSentCue, startThinkingCue, playSpeakingCue } from "../soundCues";
+import { playSentCue, startThinkingCue, playSpeakingCue, setSharedAudioContext } from "../soundCues";
 import styles from "./ChatPanel.module.css";
 
 export type { Attachment };
@@ -90,7 +90,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
 
   // Thinking pulse: start when bot is loading in voice mode, stop when done
   useEffect(() => {
-    if (voiceMode && loading && !playingId) {
+    if (voiceMode && loading && playingId === null) {
       stopThinkingCueRef.current = startThinkingCue();
     } else {
       if (stopThinkingCueRef.current) {
@@ -300,6 +300,9 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
       if (ttsVoice) params.set("voice", ttsVoice);
       if (ttsSpeed) params.set("speed", String(ttsSpeed));
       new Howl({ src: [`/api/tts/speak?${params.toString()}`], format: ["wav"], html5: true }).play();
+
+      // Share Howler's gesture-unlocked AudioContext with sound cues
+      if (Howler.ctx) setSharedAudioContext(Howler.ctx);
 
       // Keep Howler's AudioContext alive by playing silent audio every 4 seconds
       if (keepAliveRef.current) clearInterval(keepAliveRef.current);

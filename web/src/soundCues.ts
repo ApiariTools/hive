@@ -5,6 +5,11 @@
 
 let audioCtx: AudioContext | null = null;
 
+/** Allow voice mode to inject Howler's unlocked AudioContext (iOS gesture requirement) */
+export function setSharedAudioContext(ctx: AudioContext) {
+  audioCtx = ctx;
+}
+
 function getCtx(): AudioContext | null {
   if (!audioCtx) {
     try {
@@ -13,7 +18,9 @@ function getCtx(): AudioContext | null {
       return null;
     }
   }
-  if (audioCtx.state === "suspended") audioCtx.resume();
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume().catch(() => {});
+  }
   return audioCtx;
 }
 
@@ -27,7 +34,8 @@ export function playSentCue() {
   osc.type = "sine";
   osc.frequency.setValueAtTime(440, ctx.currentTime);
   osc.frequency.linearRampToValueAtTime(660, ctx.currentTime + 0.15);
-  gain.gain.setValueAtTime(0.15, ctx.currentTime);
+  gain.gain.setValueAtTime(0, ctx.currentTime);
+  gain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + 0.02);
   gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.2);
   osc.connect(gain);
   gain.connect(ctx.destination);
@@ -74,7 +82,8 @@ export function playSpeakingCue() {
   osc.type = "sine";
   osc.frequency.setValueAtTime(550, ctx.currentTime);
   osc.frequency.linearRampToValueAtTime(440, ctx.currentTime + 0.12);
-  gain.gain.setValueAtTime(0.12, ctx.currentTime);
+  gain.gain.setValueAtTime(0, ctx.currentTime);
+  gain.gain.linearRampToValueAtTime(0.12, ctx.currentTime + 0.02);
   gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.15);
   osc.connect(gain);
   gain.connect(ctx.destination);

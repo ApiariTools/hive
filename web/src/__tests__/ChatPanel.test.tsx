@@ -18,8 +18,19 @@ vi.mock("howler", () => {
       }
     }
   }
-  return { Howl: MockHowl };
+  return { Howl: MockHowl, Howler: { ctx: null } };
 });
+
+// Mock sound cues
+const mockStartThinkingCue = vi.fn(() => vi.fn());
+const mockPlaySentCue = vi.fn();
+const mockPlaySpeakingCue = vi.fn();
+vi.mock("../soundCues", () => ({
+  playSentCue: (...args: unknown[]) => mockPlaySentCue(...args),
+  startThinkingCue: (...args: unknown[]) => mockStartThinkingCue(...args),
+  playSpeakingCue: (...args: unknown[]) => mockPlaySpeakingCue(...args),
+  setSharedAudioContext: vi.fn(),
+}));
 
 import { ChatPanel } from "../components/ChatPanel";
 import type { Message } from "../types";
@@ -233,5 +244,27 @@ describe("ChatPanel", () => {
         expect(screen.getByLabelText("Play")).toBeInTheDocument();
       });
     }
+  });
+
+  // ── Sound cue tests ──
+
+  it("does not play sound cues when voice mode is off", () => {
+    mockPlaySentCue.mockClear();
+    mockStartThinkingCue.mockClear();
+
+    const msgs1: Message[] = [
+      { id: 1, workspace: "test", bot: "Main", role: "user", content: "hello", attachments: null, created_at: new Date().toISOString() },
+    ];
+    const { rerender } = render(<ChatPanel {...defaultProps} messages={msgs1} loading={true} />);
+
+    // Add a user message — should NOT trigger sent cue since voice mode is off
+    const msgs2: Message[] = [
+      ...msgs1,
+      { id: 2, workspace: "test", bot: "Main", role: "user", content: "world", attachments: null, created_at: new Date().toISOString() },
+    ];
+    rerender(<ChatPanel {...defaultProps} messages={msgs2} loading={true} />);
+
+    expect(mockPlaySentCue).not.toHaveBeenCalled();
+    expect(mockStartThinkingCue).not.toHaveBeenCalled();
   });
 });
