@@ -26,7 +26,7 @@ describe("DocsPanel", () => {
     await waitFor(() => expect(screen.getByText("Architecture")).toBeInTheDocument());
     await user.click(screen.getByText("Architecture"));
     await waitFor(() => {
-      expect(api.getDoc).toHaveBeenCalledWith("test", "architecture.md");
+      expect(api.getDoc).toHaveBeenCalledWith("test", "architecture.md", undefined);
     });
   });
 
@@ -44,7 +44,7 @@ describe("DocsPanel", () => {
 
     await user.click(screen.getByText("Save"));
     await waitFor(() => {
-      expect(api.saveDoc).toHaveBeenCalledWith("test", "architecture.md", "new content");
+      expect(api.saveDoc).toHaveBeenCalledWith("test", "architecture.md", "new content", undefined);
     });
   });
 
@@ -58,7 +58,7 @@ describe("DocsPanel", () => {
     await user.click(screen.getByTitle("Delete"));
     expect(confirmSpy).toHaveBeenCalled();
     await waitFor(() => {
-      expect(api.deleteDoc).toHaveBeenCalledWith("test", "architecture.md");
+      expect(api.deleteDoc).toHaveBeenCalledWith("test", "architecture.md", undefined);
     });
     confirmSpy.mockRestore();
   });
@@ -71,7 +71,7 @@ describe("DocsPanel", () => {
     await user.click(screen.getByText("New"));
     expect(promptSpy).toHaveBeenCalled();
     await waitFor(() => {
-      expect(api.saveDoc).toHaveBeenCalledWith("test", "new-doc.md", "");
+      expect(api.saveDoc).toHaveBeenCalledWith("test", "new-doc.md", "", undefined);
     });
     promptSpy.mockRestore();
   });

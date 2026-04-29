@@ -84,6 +84,16 @@
   margin-left: 8px;
 }
 
+.remoteBadge {
+  font-size: 10px;
+  color: var(--text-faint);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 6px;
+}
+
 .workerInfo {
   display: flex;
   flex-direction: column;

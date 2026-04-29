@@ -23,7 +23,7 @@ describe("TopBar", () => {
     const onSelect = vi.fn();
     render(<TopBar workspaces={workspaces} active="apiari" onSelect={onSelect} />);
     await user.click(screen.getByText("mgm"));
-    expect(onSelect).toHaveBeenCalledWith("mgm");
+    expect(onSelect).toHaveBeenCalledWith("mgm", undefined);
   });
 
   it("calls onMenuToggle when hamburger clicked", async () => {

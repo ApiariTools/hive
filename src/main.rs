@@ -12,6 +12,7 @@ mod init;
 mod pr_feedback;
 mod pr_review;
 mod publish;
+mod remote;
 mod research;
 mod routes;
 mod setup;
@@ -155,7 +156,31 @@ async fn main() -> Result<()> {
     let _stt_child = stt::start_stt_server().await;
 
     let event_hub = events::EventHub::new();
-    let app = routes::router(db, &config_dir, event_hub, pr_review_cache, usage_cache);
+
+    // Load remote hive instances and spawn discovery + WS bridge tasks
+    let remote_entries = remote::load_remotes_config(&config_dir);
+    let remote_registry = remote::new_registry();
+    if !remote_entries.is_empty() {
+        info!(
+            "connecting to {} remote hive instance(s)",
+            remote_entries.len()
+        );
+        remote::spawn_discovery(
+            remote_registry.clone(),
+            remote_entries,
+            event_hub.clone(),
+            reqwest::Client::new(),
+        );
+    }
+
+    let app = routes::router(
+        db,
+        &config_dir,
+        event_hub,
+        pr_review_cache,
+        usage_cache,
+        remote_registry,
+    );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
     info!("hive listening on http://{addr}");

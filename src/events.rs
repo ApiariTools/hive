@@ -36,6 +36,16 @@ pub enum HiveEvent {
         topic: String,
         output_file: Option<String>,
     },
+    /// Event bridged from a remote hive instance (sent as raw JSON to WS clients)
+    #[serde(skip)]
+    #[allow(dead_code)]
+    RemoteEvent {
+        remote: String,
+        workspace: String,
+        bot: String,
+        event_type: String,
+        raw_json: String,
+    },
 }
 
 #[derive(Clone)]

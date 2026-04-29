@@ -1,5 +1,6 @@
 export interface Workspace {
   name: string;
+  remote?: string;
   tts_voice?: string;
   tts_speed?: number;
 }
@@ -62,6 +63,7 @@ export interface WorkerMessage {
 export interface CrossWorkspaceBot {
   workspace: string;
   bot: Bot;
+  remote?: string;
 }
 
 export interface Doc {

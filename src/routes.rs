@@ -18,6 +18,7 @@ use tracing::info;
 use crate::db::Db;
 use crate::events::{EventHub, HiveEvent};
 use crate::pr_review::PrReviewCache;
+use crate::remote::RemoteRegistry;
 use crate::usage::UsageCache;
 
 #[derive(Clone)]
@@ -30,6 +31,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub tts_base_url: String,
     pub stt_base_url: String,
+    pub remote_registry: RemoteRegistry,
 }
 
 pub fn router(
@@ -38,6 +40,7 @@ pub fn router(
     events: EventHub,
     pr_review_cache: PrReviewCache,
     usage_cache: UsageCache,
+    remote_registry: RemoteRegistry,
 ) -> Router {
     router_with_http_client(
         db,
@@ -48,6 +51,7 @@ pub fn router(
         reqwest::Client::new(),
         "http://127.0.0.1:4201".to_string(),
         "http://127.0.0.1:4202".to_string(),
+        remote_registry,
     )
 }
 
@@ -60,6 +64,7 @@ pub fn router_with_http_client(
     http_client: reqwest::Client,
     tts_base_url: String,
     stt_base_url: String,
+    remote_registry: RemoteRegistry,
 ) -> Router {
     let state = AppState {
         db,
@@ -70,6 +75,7 @@ pub fn router_with_http_client(
         http_client,
         tts_base_url,
         stt_base_url,
+        remote_registry,
     };
 
     Router::new()
@@ -127,6 +133,14 @@ pub fn router_with_http_client(
             "/api/workspaces/{workspace}/research/{task_id}",
             get(get_research_task),
         )
+        .route("/api/remotes", get(list_remotes))
+        .route(
+            "/api/remotes/{remote}/workspaces/{workspace}/{*rest}",
+            get(proxy_remote_get)
+                .post(proxy_remote_post)
+                .put(proxy_remote_put)
+                .delete(proxy_remote_delete),
+        )
         .fallback(get(serve_frontend))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB for image attachments
         .layer(CorsLayer::permissive())
@@ -152,6 +166,7 @@ async fn list_workspaces(State(state): State<AppState>) -> Json<Vec<WorkspaceInf
                     .unwrap_or((None, None));
                 workspaces.push(WorkspaceInfo {
                     name: name.to_string(),
+                    remote: None,
                     tts_voice,
                     tts_speed,
                 });
@@ -159,13 +174,31 @@ async fn list_workspaces(State(state): State<AppState>) -> Json<Vec<WorkspaceInf
         }
     }
 
-    workspaces.sort_by(|a, b| a.name.cmp(&b.name));
+    // Append remote workspaces
+    let remote_ws = crate::remote::get_remote_workspaces(&state.remote_registry).await;
+    for (ws_name, remote_name) in remote_ws {
+        workspaces.push(WorkspaceInfo {
+            name: ws_name,
+            remote: Some(remote_name),
+            tts_voice: None,
+            tts_speed: None,
+        });
+    }
+
+    workspaces.sort_by(|a, b| {
+        // Local first, then remotes
+        let a_remote = a.remote.is_some();
+        let b_remote = b.remote.is_some();
+        a_remote.cmp(&b_remote).then(a.name.cmp(&b.name))
+    });
     Json(workspaces)
 }
 
 #[derive(Serialize)]
 struct WorkspaceInfo {
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tts_voice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -944,6 +977,175 @@ async fn mark_seen(
     Json(serde_json::json!({"ok": true}))
 }
 
+// ── Remotes ──
+
+async fn list_remotes(State(state): State<AppState>) -> Json<Vec<crate::remote::RemoteState>> {
+    let reg = state.remote_registry.read().await;
+    Json(reg.clone())
+}
+
+async fn proxy_remote_get(
+    Path((remote_name, workspace, rest)): Path<(String, String, String)>,
+    query: axum::extract::RawQuery,
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    proxy_remote_request(
+        remote_name,
+        workspace,
+        rest,
+        query.0,
+        state,
+        reqwest::Method::GET,
+        None,
+        None,
+    )
+    .await
+}
+
+async fn proxy_remote_post(
+    Path((remote_name, workspace, rest)): Path<(String, String, String)>,
+    query: axum::extract::RawQuery,
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let content_type = request
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let body_bytes = match axum::body::to_bytes(request.into_body(), 50 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "Failed to read body").into_response();
+        }
+    };
+    proxy_remote_request(
+        remote_name,
+        workspace,
+        rest,
+        query.0,
+        state,
+        reqwest::Method::POST,
+        Some(body_bytes),
+        content_type,
+    )
+    .await
+}
+
+async fn proxy_remote_put(
+    Path((remote_name, workspace, rest)): Path<(String, String, String)>,
+    query: axum::extract::RawQuery,
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let content_type = request
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let body_bytes = match axum::body::to_bytes(request.into_body(), 50 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "Failed to read body").into_response();
+        }
+    };
+    proxy_remote_request(
+        remote_name,
+        workspace,
+        rest,
+        query.0,
+        state,
+        reqwest::Method::PUT,
+        Some(body_bytes),
+        content_type,
+    )
+    .await
+}
+
+async fn proxy_remote_delete(
+    Path((remote_name, workspace, rest)): Path<(String, String, String)>,
+    query: axum::extract::RawQuery,
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    proxy_remote_request(
+        remote_name,
+        workspace,
+        rest,
+        query.0,
+        state,
+        reqwest::Method::DELETE,
+        None,
+        None,
+    )
+    .await
+}
+
+async fn proxy_remote_request(
+    remote_name: String,
+    workspace: String,
+    rest: String,
+    query_string: Option<String>,
+    state: AppState,
+    method: reqwest::Method,
+    body: Option<axum::body::Bytes>,
+    content_type: Option<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let base_url = {
+        let reg = state.remote_registry.read().await;
+        match reg.iter().find(|r| r.name == remote_name) {
+            Some(r) if r.online => r.url.clone(),
+            Some(_) => {
+                return (StatusCode::BAD_GATEWAY, "Remote is offline").into_response();
+            }
+            None => {
+                return (StatusCode::NOT_FOUND, "Remote not found").into_response();
+            }
+        }
+    };
+
+    let mut target_url = format!("{base_url}/api/workspaces/{workspace}/{rest}");
+    if let Some(qs) = query_string {
+        target_url.push('?');
+        target_url.push_str(&qs);
+    }
+    let mut req_builder = state.http_client.request(method, &target_url);
+
+    if let Some(ct) = content_type {
+        req_builder = req_builder.header("content-type", ct);
+    }
+    if let Some(b) = body
+        && !b.is_empty()
+    {
+        req_builder = req_builder.body(b);
+    }
+
+    match req_builder.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let resp_headers = resp.headers().clone();
+            let resp_body = resp.bytes().await.unwrap_or_default();
+
+            let mut response = axum::response::Response::builder().status(status);
+            if let Some(ct) = resp_headers.get("content-type") {
+                response = response.header("content-type", ct);
+            }
+            response
+                .body(axum::body::Body::from(resp_body))
+                .unwrap_or_else(|_| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "proxy error").into_response()
+                })
+        }
+        Err(e) => {
+            tracing::warn!("[remote] proxy error to {remote_name}: {e}");
+            (StatusCode::BAD_GATEWAY, "Failed to reach remote").into_response()
+        }
+    }
+}
+
 // ── WebSocket ──
 
 async fn ws_handler(
@@ -961,6 +1163,12 @@ async fn handle_ws(mut socket: ws::WebSocket, state: AppState) {
             // Forward events to the client
             event = rx.recv() => {
                 match event {
+                    Ok(HiveEvent::RemoteEvent { raw_json, .. }) => {
+                        // Remote events are already JSON with the `remote` field
+                        if socket.send(ws::Message::Text(raw_json.into())).await.is_err() {
+                            break;
+                        }
+                    }
                     Ok(e) => {
                         let json = serde_json::to_string(&e).unwrap_or_default();
                         if socket.send(ws::Message::Text(json.into())).await.is_err() {
@@ -3655,6 +3863,7 @@ role = "Chat"
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
+            remote_registry: crate::remote::new_registry(),
         };
 
         let result = list_docs(State(state), Path("test".to_string())).await;
@@ -3690,6 +3899,7 @@ role = "Chat"
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
+            remote_registry: crate::remote::new_registry(),
         };
 
         let result = list_docs(State(state), Path("test".to_string())).await;
@@ -3727,6 +3937,7 @@ role = "Chat"
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
+            remote_registry: crate::remote::new_registry(),
         };
 
         let result = get_doc(
@@ -3767,6 +3978,7 @@ role = "Chat"
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
+            remote_registry: crate::remote::new_registry(),
         };
 
         let result = get_doc(
@@ -3802,6 +4014,7 @@ role = "Chat"
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
+            remote_registry: crate::remote::new_registry(),
         };
 
         let result = put_doc(
@@ -3847,6 +4060,7 @@ role = "Chat"
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
+            remote_registry: crate::remote::new_registry(),
         };
 
         let result = delete_doc(
@@ -3883,6 +4097,7 @@ role = "Chat"
             http_client: reqwest::Client::new(),
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
+            remote_registry: crate::remote::new_registry(),
         };
 
         let result = delete_doc(

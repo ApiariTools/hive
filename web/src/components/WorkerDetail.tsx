@@ -10,6 +10,7 @@ interface Props {
   worker: Worker;
   detail: WorkerDetailData | null;
   workspace: string;
+  remote?: string;
   onBack: () => void;
 }
 
@@ -19,7 +20,7 @@ function branchName(branch: string): string {
 
 type InfoTab = "output" | "task" | "chat";
 
-export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
+export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Props) {
   const [sending, setSending] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [infoTab, setInfoTab] = useState<InfoTab>(window.innerWidth <= 768 ? "chat" : "output");
@@ -45,7 +46,7 @@ export function WorkerDetail({ worker, detail, workspace, onBack }: Props) {
     if (!text || sending) return;
     setSending(true);
     try {
-      await api.sendWorkerMessage(workspace, worker.id, text);
+      await api.sendWorkerMessage(workspace, worker.id, text, remote);
     } finally {
       setSending(false);
     }
