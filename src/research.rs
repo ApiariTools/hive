@@ -39,16 +39,15 @@ pub fn ensure_schema(db: &Db) {
 }
 
 /// Insert a new research task.
-pub fn insert_task(db: &Db, id: &str, workspace: &str, topic: &str) {
+pub fn insert_task(db: &Db, id: &str, workspace: &str, topic: &str) -> color_eyre::Result<()> {
     db.execute_sql(
         "INSERT INTO research_tasks (id, workspace, topic, status) VALUES (?1, ?2, ?3, 'running')",
         &[id, workspace, topic],
     )
-    .ok();
 }
 
 /// Update task status to complete.
-pub fn complete_task(db: &Db, id: &str, output_file: &str) {
+fn complete_task(db: &Db, id: &str, output_file: &str) {
     db.execute_sql(
         "UPDATE research_tasks SET status = 'complete', output_file = ?2, completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?1",
         &[id, output_file],
@@ -56,7 +55,7 @@ pub fn complete_task(db: &Db, id: &str, output_file: &str) {
 }
 
 /// Update task status to failed.
-pub fn fail_task(db: &Db, id: &str, error: &str) {
+fn fail_task(db: &Db, id: &str, error: &str) {
     db.execute_sql(
         "UPDATE research_tasks SET status = 'failed', error = ?2, completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?1",
         &[id, error],
@@ -212,6 +211,9 @@ async fn run_research(
 
     // Write to .apiari/docs/{slug}.md
     let slug = slugify(topic);
+    if slug.is_empty() {
+        return Err("Topic produced an empty slug".to_string());
+    }
     let filename = format!("{slug}.md");
     let docs_dir = working_dir.join(".apiari/docs");
     std::fs::create_dir_all(&docs_dir).map_err(|e| e.to_string())?;
@@ -245,6 +247,7 @@ mod tests {
         assert_eq!(slugify("  spaces  "), "spaces");
         assert_eq!(slugify("CamelCase"), "camelcase");
         assert_eq!(slugify("a--b"), "a-b");
+        assert_eq!(slugify("!!!"), "");
     }
 
     #[test]
@@ -253,7 +256,7 @@ mod tests {
         let db = Db::open(&dir.path().join("test.db")).unwrap();
         ensure_schema(&db);
 
-        insert_task(&db, "task-1", "ws", "test topic");
+        insert_task(&db, "task-1", "ws", "test topic").unwrap();
         let tasks = list_tasks(&db, "ws");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "task-1");
@@ -271,7 +274,7 @@ mod tests {
         let db = Db::open(&dir.path().join("test.db")).unwrap();
         ensure_schema(&db);
 
-        insert_task(&db, "task-2", "ws", "failing topic");
+        insert_task(&db, "task-2", "ws", "failing topic").unwrap();
         fail_task(&db, "task-2", "something went wrong");
         let task = get_task(&db, "task-2").unwrap();
         assert_eq!(task.status, "failed");

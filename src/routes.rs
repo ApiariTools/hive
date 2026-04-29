@@ -2489,34 +2489,39 @@ async fn start_research(
     Path(workspace): Path<String>,
     Json(body): Json<ResearchRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let topic = body.topic.trim().to_string();
+    if topic.is_empty() || topic.len() > 500 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let root = resolve_workspace_root(&state, &workspace).ok_or(StatusCode::NOT_FOUND)?;
 
     crate::research::ensure_schema(&state.db);
 
-    let task_id = format!(
-        "research-{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    );
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let rand: u32 = (millis as u32).wrapping_mul(2654435761); // simple hash spread
+    let task_id = format!("research-{millis:x}-{rand:04x}");
 
-    crate::research::insert_task(&state.db, &task_id, &workspace, &body.topic);
+    crate::research::insert_task(&state.db, &task_id, &workspace, &topic)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    info!("[research] spawning task {task_id}: {}", body.topic);
+    info!("[research] spawning task {task_id}: {topic}");
 
     crate::research::spawn_research(
         state.db.clone(),
         state.events.clone(),
         task_id.clone(),
         workspace,
-        body.topic.clone(),
+        topic.clone(),
         root,
     );
 
     Ok(Json(serde_json::json!({
         "id": task_id,
-        "topic": body.topic,
+        "topic": topic,
         "status": "running",
     })))
 }

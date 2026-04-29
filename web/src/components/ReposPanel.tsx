@@ -1,4 +1,4 @@
-import { Search, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import type { Repo, ResearchTask } from "../types";
 import styles from "./ReposPanel.module.css";
 

@@ -228,3 +228,34 @@ describe("WebSocket message dedup", () => {
     expect(matches).toHaveLength(1);
   });
 });
+
+describe("Research command", () => {
+  it("intercepts /research and calls startResearch API", async () => {
+    const user = await renderAndSelectBot("Main");
+    await waitFor(() => expect(screen.getByPlaceholderText(/Message Main/)).toBeInTheDocument());
+
+    const textarea = screen.getByPlaceholderText(/Message Main/);
+    await user.type(textarea, "/research test topic");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(api.startResearch).toHaveBeenCalledWith("apiari", "test topic");
+    });
+    // Should NOT call sendMessage for /research commands
+    const sendMock = api.sendMessage as ReturnType<typeof vi.fn>;
+    expect(sendMock.mock.calls.some((c: string[]) => c[2]?.startsWith("/research"))).toBe(false);
+  });
+
+  it("shows system message after starting research", async () => {
+    const user = await renderAndSelectBot("Main");
+    await waitFor(() => expect(screen.getByPlaceholderText(/Message Main/)).toBeInTheDocument());
+
+    const textarea = screen.getByPlaceholderText(/Message Main/);
+    await user.type(textarea, "/research test topic");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(screen.getByText("Research started: test topic")).toBeInTheDocument();
+    });
+  });
+});

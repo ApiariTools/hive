@@ -123,8 +123,7 @@ export default function App() {
       if (event.type === "research_update") {
         if (event.workspace === workspace) {
           api.getResearchTasks(workspace).then(setResearchTasks);
-          if (event.status === "complete" && event.bot === bot) {
-            // Show completion in chat
+          if (event.status === "complete") {
             setMessages((prev) => [
               ...prev,
               {
@@ -547,7 +546,7 @@ export default function App() {
                   created_at: new Date().toISOString(),
                 },
               ]);
-            });
+            }).catch(() => {});
           }
         }}
       />
