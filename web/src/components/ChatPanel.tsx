@@ -6,7 +6,8 @@ import { Howl, Howler } from "howler";
 import type { Message } from "../types";
 import { splitSentences } from "../voice";
 import { ChatInput } from "./ChatInput";
-import type { Attachment } from "./ChatInput";
+import type { Attachment, VoiceState } from "./ChatInput";
+import { playSentCue, startThinkingCue, playSpeakingCue } from "../soundCues";
 import styles from "./ChatPanel.module.css";
 
 export type { Attachment };
@@ -42,6 +43,16 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   const [triggerRecord, setTriggerRecord] = useState(0);
   const voiceModeRef = useRef(false);
   const lastMsgCountRef = useRef(0);
+  const stopThinkingCueRef = useRef<(() => void) | null>(null);
+
+  // ── Voice state: listening / processing / speaking ──
+  const voiceState: VoiceState = !voiceMode
+    ? "listening"
+    : playingId !== null
+      ? "speaking"
+      : loading
+        ? "processing"
+        : "listening";
 
   // ── Message queue ──
   const handleSendOrQueue = useCallback(
@@ -74,6 +85,45 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
     }
     prevLoadingRef.current = loading;
   }, [loading, messageQueue, onSend]);
+
+  // ── Sound cues (voice mode only) ──
+
+  // Thinking pulse: start when bot is loading in voice mode, stop when done
+  useEffect(() => {
+    if (voiceMode && loading && !playingId) {
+      stopThinkingCueRef.current = startThinkingCue();
+    } else {
+      if (stopThinkingCueRef.current) {
+        stopThinkingCueRef.current();
+        stopThinkingCueRef.current = null;
+      }
+    }
+    return () => {
+      if (stopThinkingCueRef.current) {
+        stopThinkingCueRef.current();
+        stopThinkingCueRef.current = null;
+      }
+    };
+  }, [voiceMode, loading, playingId]);
+
+  // Sent cue: play when user message appears in voice mode
+  const prevMsgCountForCue = useRef(messages.length);
+  useEffect(() => {
+    if (voiceMode && messages.length > prevMsgCountForCue.current) {
+      const last = messages[messages.length - 1];
+      if (last.role === "user") playSentCue();
+    }
+    prevMsgCountForCue.current = messages.length;
+  }, [messages.length, voiceMode]);
+
+  // Speaking cue: play when TTS starts
+  const prevPlayingId = useRef<number | null>(null);
+  useEffect(() => {
+    if (voiceMode && playingId !== null && prevPlayingId.current === null) {
+      playSpeakingCue();
+    }
+    prevPlayingId.current = playingId;
+  }, [playingId, voiceMode]);
 
   // ── TTS playback (Howler — for user-tapped play buttons) ──
   const howlRef = useRef<Howl | null>(null);
@@ -415,6 +465,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
         disabled={loading}
         onSend={handleSendOrQueue}
         voiceMode={voiceMode}
+        voiceState={voiceState}
         triggerRecord={triggerRecord}
         playTts={voiceMode ? playViaCx : undefined}
         queueCount={messageQueue.length}
