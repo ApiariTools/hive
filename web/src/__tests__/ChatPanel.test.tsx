@@ -211,7 +211,7 @@ describe("ChatPanel", () => {
     // Send a message while bot is loading — should be queued, not sent
     const textarea = screen.getByPlaceholderText(/Message Main/);
     (textarea as HTMLTextAreaElement).value = "queued msg";
-    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
     expect(onSend).not.toHaveBeenCalled();
     expect(screen.getByText("1 message queued")).toBeInTheDocument();
 
