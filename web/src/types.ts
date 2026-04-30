@@ -10,6 +10,8 @@ export interface Bot {
   color?: string;
   role?: string;
   description?: string;
+  provider?: string;
+  model?: string;
   watch: string[];
 }
 

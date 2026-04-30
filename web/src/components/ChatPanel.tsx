@@ -16,6 +16,8 @@ export type { Attachment };
 interface Props {
   bot: string;
   botDescription?: string;
+  botProvider?: string;
+  botModel?: string;
   messages: Message[];
   messagesLoading: boolean;
   loading: boolean;
@@ -37,7 +39,7 @@ interface QueuedMessage {
   attachments?: Attachment[];
 }
 
-export function ChatPanel({ bot, botDescription, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel, ttsVoice, ttsSpeed, followups, workspace, onFollowupCancelled }: Props) {
+export function ChatPanel({ bot, botDescription, botProvider, botModel, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel, ttsVoice, ttsSpeed, followups, workspace, onFollowupCancelled }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
@@ -370,7 +372,14 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
     <div className={styles.panel}>
       <div className={styles.header}>
         <div className={styles.headerInfo}>
-          <div className={styles.headerName}>{bot}</div>
+          <div className={styles.headerNameRow}>
+            <div className={styles.headerName}>{bot}</div>
+            {botProvider && (
+              <span className={styles.providerBadge} title={botModel || undefined}>
+                {botProvider.charAt(0).toUpperCase() + botProvider.slice(1)}
+              </span>
+            )}
+          </div>
           {botDescription && <div className={styles.headerDescription}>{botDescription}</div>}
         </div>
         <div className={styles.headerActions}>

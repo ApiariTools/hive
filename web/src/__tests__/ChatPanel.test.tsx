@@ -160,6 +160,20 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Monitors errors via Sentry")).toBeInTheDocument();
   });
 
+  it("renders provider badge when botProvider is set", () => {
+    render(<ChatPanel {...defaultProps} botProvider="claude" botModel="claude-sonnet-4-20250514" />);
+    const badge = screen.getByText("Claude");
+    expect(badge).toBeInTheDocument();
+    expect(badge.getAttribute("title")).toBe("claude-sonnet-4-20250514");
+  });
+
+  it("does not render provider badge when botProvider is not set", () => {
+    render(<ChatPanel {...defaultProps} />);
+    expect(screen.queryByText("Claude")).not.toBeInTheDocument();
+    expect(screen.queryByText("Codex")).not.toBeInTheDocument();
+    expect(screen.queryByText("Gemini")).not.toBeInTheDocument();
+  });
+
   it("does not render description element when not provided", () => {
     const { container } = render(<ChatPanel {...defaultProps} />);
     expect(container.querySelector('[class*="headerDescription"]')).toBeNull();
