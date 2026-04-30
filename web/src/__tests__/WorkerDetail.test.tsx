@@ -50,16 +50,21 @@ describe("WorkerDetail", () => {
     // Switch to chat tab
     fireEvent.click(screen.getByRole("button", { name: "Chat" }));
 
-    // Messages with timestamps should show formatted time (e.g. "1:42 PM")
-    const timePattern = /\d{1,2}:\d{2}\s*(AM|PM)/i;
+    // Messages with timestamps should show formatted time
+    // Pattern handles both 12h ("1:42 PM") and 24h ("13:42") locales
+    const timePattern = /\d{1,2}:\d{2}/;
 
     // The strong "You" is inside a div, look for it within the rendered content
     const youEl = screen.getByText((_, el) => el?.tagName === "STRONG" && el.textContent === "You");
-    expect(youEl.parentElement!.textContent).toMatch(timePattern);
+    const youMeta = youEl.parentElement!.textContent!;
+    expect(youMeta).toMatch(timePattern);
+    expect(youMeta).toContain("·");
 
     // First worker-1 label (assistant message with timestamp)
     const workerEls = screen.getAllByText((_, el) => el?.tagName === "STRONG" && el.textContent === "worker-1");
-    expect(workerEls[0].parentElement!.textContent).toMatch(timePattern);
+    const workerMeta = workerEls[0].parentElement!.textContent!;
+    expect(workerMeta).toMatch(timePattern);
+    expect(workerMeta).toContain("·");
   });
 
   it("does not render timestamp when absent", () => {

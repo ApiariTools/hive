@@ -3402,10 +3402,10 @@ mod tests {
         std::fs::create_dir_all(&events_dir).unwrap();
         std::fs::write(
             events_dir.join("events.jsonl"),
-            r#"{"type":"assistant_text","text":"Hello "}
-{"type":"assistant_text","text":"world"}
-{"type":"tool_use","tool":"Read"}
-{"type":"assistant_text","text":"Done"}
+            r#"{"type":"assistant_text","text":"Hello ","timestamp":"2025-01-15T13:42:00Z"}
+{"type":"assistant_text","text":"world","timestamp":"2025-01-15T13:42:01Z"}
+{"type":"tool_use","tool":"Read","timestamp":"2025-01-15T13:42:02Z"}
+{"type":"assistant_text","text":"Done","timestamp":"2025-01-15T13:42:03Z"}
 "#,
         )
         .unwrap();
@@ -3414,10 +3414,14 @@ mod tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "assistant");
         assert_eq!(msgs[0].content, "Hello world");
+        // Accumulated text uses the FIRST chunk's timestamp
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2025-01-15T13:42:00Z"));
         assert_eq!(msgs[1].role, "tool");
         assert_eq!(msgs[1].content, "*Using Read*");
+        assert_eq!(msgs[1].timestamp.as_deref(), Some("2025-01-15T13:42:02Z"));
         assert_eq!(msgs[2].role, "assistant");
         assert_eq!(msgs[2].content, "Done");
+        assert_eq!(msgs[2].timestamp.as_deref(), Some("2025-01-15T13:42:03Z"));
     }
 
     #[test]
@@ -3427,7 +3431,7 @@ mod tests {
         std::fs::create_dir_all(&events_dir).unwrap();
         std::fs::write(
             events_dir.join("events.jsonl"),
-            r#"{"type":"user_message","text":"fix the bug"}
+            r#"{"type":"user_message","text":"fix the bug","timestamp":"2025-01-15T14:00:00Z"}
 {"type":"assistant_text","text":"On it"}
 "#,
         )
@@ -3437,6 +3441,9 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[0].content, "fix the bug");
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2025-01-15T14:00:00Z"));
+        // assistant_text without timestamp field
+        assert!(msgs[1].timestamp.is_none());
     }
 
     // ── read_swarm_workers ──

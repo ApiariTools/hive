@@ -89,7 +89,7 @@ function DiffViewer({ diff }: { diff: string }) {
 }
 
 function formatTime(iso: string): string {
-  const normalized = iso.includes("Z") || iso.includes("+") ? iso : iso + "Z";
+  const normalized = iso.includes("Z") || iso.includes("+") || iso.includes("-", 10) ? iso : iso + "Z";
   return new Date(normalized).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
