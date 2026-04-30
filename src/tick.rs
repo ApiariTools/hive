@@ -6,6 +6,7 @@
 //! long-running actions are spawned as background tasks.
 
 use crate::db::Db;
+use crate::events::EventHub;
 use crate::pr_review::PrReviewCache;
 use crate::watcher::WatchedBot;
 use async_trait::async_trait;
@@ -38,6 +39,13 @@ pub enum Action {
         workspace_root: PathBuf,
         worker_id: String,
         message: String,
+    },
+    /// Fire a due follow-up (inject action as user message to bot)
+    FireFollowup {
+        id: String,
+        workspace: String,
+        bot: String,
+        action: String,
     },
 }
 
@@ -81,7 +89,7 @@ impl TickEngine {
     }
 
     /// Start the tick loop. Call this with tokio::spawn.
-    pub async fn run(mut self, db: Db) {
+    pub async fn run(mut self, db: Db, events: Option<EventHub>) {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(self.tick_interval_secs));
 
@@ -119,7 +127,7 @@ impl TickEngine {
 
             // Execute actions — spawn long-running ones as background tasks
             for action in all_actions {
-                execute_action(action, &db);
+                execute_action(action, &db, events.as_ref());
             }
 
             // Wait for next tick (wall-clock aligned, not work-time + sleep)
@@ -130,7 +138,7 @@ impl TickEngine {
 
 /// Execute an action. Long-running actions (signal dispatch, bot runs) are spawned
 /// as background tasks to avoid blocking the tick loop.
-fn execute_action(action: Action, db: &Db) {
+fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
     match action {
         Action::LogBotMessage {
             workspace,
@@ -160,6 +168,32 @@ fn execute_action(action: Action, db: &Db) {
                 let prompt = bot.proactive_prompt.as_deref().unwrap_or("");
                 crate::watcher::run_proactive(&bot, &db, prompt).await;
             });
+        }
+        Action::FireFollowup {
+            id,
+            workspace,
+            bot,
+            action,
+        } => {
+            tracing::info!("[followup] firing {id} for {workspace}/{bot}");
+            let _ = crate::followup::mark_fired(db, &id);
+            let message = format!("[Scheduled follow-up] {action}");
+            let _ = db.add_message(&workspace, &bot, "user", &message, None);
+            if let Some(hub) = events {
+                hub.send(crate::events::HiveEvent::FollowupFired {
+                    id: id.clone(),
+                    workspace: workspace.clone(),
+                    bot: bot.clone(),
+                    action: action.clone(),
+                    fires_at: String::new(),
+                });
+                hub.send(crate::events::HiveEvent::Message {
+                    workspace: workspace.clone(),
+                    bot: bot.clone(),
+                    role: "user".to_string(),
+                    content: message,
+                });
+            }
         }
         Action::SendToWorker {
             workspace_root,
@@ -496,6 +530,40 @@ impl Watcher for ScheduleWatcher {
     }
 }
 
+/// Checks for due follow-ups every tick (~15s).
+pub struct FollowupWatcher {
+    db: Db,
+}
+
+impl FollowupWatcher {
+    pub fn new(db: Db) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl Watcher for FollowupWatcher {
+    fn name(&self) -> &str {
+        "followup-watcher"
+    }
+
+    fn interval_ticks(&self) -> u64 {
+        1 // every tick (~15s)
+    }
+
+    async fn tick(&mut self, _ctx: &TickContext) -> Vec<Action> {
+        let due = crate::followup::query_due(&self.db);
+        due.into_iter()
+            .map(|f| Action::FireFollowup {
+                id: f.id,
+                workspace: f.workspace,
+                bot: f.bot,
+                action: f.action,
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,7 +690,7 @@ mod tests {
         let db = crate::db::Db::open(&dir.path().join("test.db")).unwrap();
 
         // Spawn the engine
-        let handle = tokio::spawn(engine.run(db));
+        let handle = tokio::spawn(engine.run(db, None));
 
         // Advance time tick-by-tick (15s each) for 4 ticks
         for _ in 0..4 {

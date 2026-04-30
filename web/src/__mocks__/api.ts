@@ -44,6 +44,8 @@ export const getDoc = vi.fn().mockResolvedValue({
 });
 export const saveDoc = vi.fn().mockResolvedValue({ ok: true });
 export const deleteDoc = vi.fn().mockResolvedValue({ ok: true });
+export const getFollowups = vi.fn().mockResolvedValue([]);
+export const cancelFollowup = vi.fn().mockResolvedValue({ ok: true });
 export const getResearchTasks = vi.fn().mockResolvedValue([]);
 export const startResearch = vi.fn().mockResolvedValue({ id: "research-1", topic: "test", status: "running" });
 export const connectWebSocket = vi.fn().mockReturnValue({ close: vi.fn() });

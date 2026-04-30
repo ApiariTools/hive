@@ -3,6 +3,7 @@ pub mod config_watcher;
 pub mod db;
 pub mod docs;
 pub mod events;
+pub mod followup;
 pub mod init;
 pub mod pr_feedback;
 pub mod pr_review;
