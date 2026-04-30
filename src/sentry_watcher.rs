@@ -261,18 +261,34 @@ impl Watcher for SentryWatcher {
                 }
             }
 
-            // Find new issues (those with IDs we haven't seen)
+            // Find new issues — Sentry IDs are monotonically increasing integers,
+            // so we filter to issues with id > cursor. This avoids depending on the
+            // cursor issue still being present in the `is:unresolved` results.
             let new_issues: Vec<&SentryIssue> = match &cursor {
                 Some(last_id) => {
-                    // Issues are sorted by date desc. Collect until we hit the last known ID.
+                    let cursor_num = match last_id.parse::<u64>() {
+                        Ok(n) => n,
+                        Err(_) => {
+                            warn!(
+                                "[sentry] cursor ID '{}' is not numeric for {}/{}, skipping",
+                                last_id, state.bot.workspace, state.bot.name
+                            );
+                            continue;
+                        }
+                    };
                     issues
                         .iter()
-                        .take_while(|issue| issue.id != *last_id)
+                        .filter(|issue| issue.id.parse::<u64>().is_ok_and(|n| n > cursor_num))
                         .collect()
                 }
                 None => {
-                    // No cursor but initialized — shouldn't happen, take first issue
-                    issues.iter().take(1).collect()
+                    // No cursor but initialized — shouldn't happen, take highest-ID issue
+                    issues
+                        .iter()
+                        .filter(|i| i.id.parse::<u64>().is_ok())
+                        .max_by_key(|i| i.id.parse::<u64>().unwrap())
+                        .into_iter()
+                        .collect()
                 }
             };
 
@@ -280,8 +296,13 @@ impl Watcher for SentryWatcher {
                 continue;
             }
 
-            // Capture newest issue ID for cursor update (emitted after signals)
-            let newest_issue_id = new_issues.first().map(|i| i.id.clone());
+            // Capture newest issue ID for cursor update — use the highest numeric ID,
+            // not first(), since results are sorted by date and ID order may differ.
+            let newest_issue_id = new_issues
+                .iter()
+                .filter_map(|i| i.id.parse::<u64>().ok().map(|n| (n, &i.id)))
+                .max_by_key(|(n, _)| *n)
+                .map(|(_, id)| id.clone());
 
             // Dispatch each new issue as a signal
             for issue in &new_issues {
@@ -615,6 +636,116 @@ project = "my-project"
             .count();
         assert_eq!(signal_count, 3);
         assert_eq!(cursor_count, 1);
+    }
+
+    fn make_issue(id: &str) -> SentryIssue {
+        SentryIssue {
+            id: id.to_string(),
+            title: format!("Issue {id}"),
+            culprit: None,
+            permalink: None,
+            count: None,
+            user_count: None,
+            first_seen: None,
+            last_seen: None,
+            level: None,
+            metadata: None,
+        }
+    }
+
+    /// Replicate the filtering logic from tick() so we can test it in isolation.
+    fn filter_new_issues<'a>(
+        issues: &'a [SentryIssue],
+        cursor: &Option<String>,
+    ) -> Vec<&'a SentryIssue> {
+        match cursor {
+            Some(last_id) => {
+                let cursor_num = match last_id.parse::<u64>() {
+                    Ok(n) => n,
+                    Err(_) => return Vec::new(),
+                };
+                issues
+                    .iter()
+                    .filter(|issue| issue.id.parse::<u64>().is_ok_and(|n| n > cursor_num))
+                    .collect()
+            }
+            None => issues
+                .iter()
+                .filter(|i| i.id.parse::<u64>().is_ok())
+                .max_by_key(|i| i.id.parse::<u64>().unwrap())
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_numeric_cursor_filters_older_issues() {
+        let issues = vec![make_issue("105"), make_issue("103"), make_issue("101")];
+        let cursor = Some("102".to_string());
+        let new = filter_new_issues(&issues, &cursor);
+        let ids: Vec<&str> = new.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["105", "103"]);
+    }
+
+    #[test]
+    fn test_numeric_cursor_no_new_issues() {
+        let issues = vec![make_issue("100"), make_issue("99")];
+        let cursor = Some("100".to_string());
+        let new = filter_new_issues(&issues, &cursor);
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_numeric_cursor_resolved_cursor_issue_still_works() {
+        // Cursor issue "102" is resolved and no longer in the results.
+        // With the old take_while, this would return ALL issues as new.
+        let issues = vec![make_issue("105"), make_issue("103"), make_issue("101")];
+        let cursor = Some("102".to_string());
+        let new = filter_new_issues(&issues, &cursor);
+        let ids: Vec<&str> = new.iter().map(|i| i.id.as_str()).collect();
+        // Only issues with id > 102 should be returned
+        assert_eq!(ids, vec!["105", "103"]);
+    }
+
+    #[test]
+    fn test_numeric_cursor_non_numeric_issue_id_skipped() {
+        let issues = vec![make_issue("abc"), make_issue("105"), make_issue("103")];
+        let cursor = Some("100".to_string());
+        let new = filter_new_issues(&issues, &cursor);
+        let ids: Vec<&str> = new.iter().map(|i| i.id.as_str()).collect();
+        // "abc" is skipped, only numeric IDs > 100 included
+        assert_eq!(ids, vec!["105", "103"]);
+    }
+
+    #[test]
+    fn test_numeric_cursor_non_numeric_cursor_returns_empty() {
+        let issues = vec![make_issue("105"), make_issue("103")];
+        let cursor = Some("not-a-number".to_string());
+        let new = filter_new_issues(&issues, &cursor);
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_no_cursor_takes_highest_id() {
+        let issues = vec![make_issue("103"), make_issue("105"), make_issue("101")];
+        let new = filter_new_issues(&issues, &None);
+        assert_eq!(new.len(), 1);
+        assert_eq!(new[0].id, "105");
+    }
+
+    #[test]
+    fn test_newest_issue_id_uses_max_numeric_id() {
+        // Simulates what tick() does: results sorted by date (not ID order),
+        // newest_issue_id should be the highest numeric ID.
+        let issues = vec![make_issue("103"), make_issue("107"), make_issue("105")];
+        let cursor = Some("100".to_string());
+        let new = filter_new_issues(&issues, &cursor);
+        let newest = new
+            .iter()
+            .filter_map(|i| i.id.parse::<u64>().ok().map(|n| (n, &i.id)))
+            .max_by_key(|(n, _)| *n)
+            .map(|(_, id)| id.as_str());
+        assert_eq!(newest, Some("107"));
     }
 
     #[tokio::test]
