@@ -400,6 +400,7 @@ mod tests {
             schedule_hours: None,
             proactive_prompt: None,
             services,
+            response_style: None,
         }
     }
 
@@ -472,6 +473,7 @@ project = "my-project"
             schedule_hours: None,
             proactive_prompt: None,
             services: vec!["sentry".to_string()],
+            response_style: None,
         };
 
         let config = load_sentry_config(&bot).unwrap();
@@ -494,6 +496,7 @@ project = "my-project"
             schedule_hours: None,
             proactive_prompt: None,
             services: vec!["sentry".to_string()],
+            response_style: None,
         };
 
         assert!(load_sentry_config(&bot).is_none());
@@ -527,6 +530,7 @@ project = "my-project"
             schedule_hours: None,
             proactive_prompt: None,
             services: vec!["sentry".to_string()],
+            response_style: None,
         };
 
         assert!(load_sentry_config(&bot).is_none());

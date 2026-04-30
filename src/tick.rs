@@ -764,6 +764,7 @@ mod tests {
             schedule_hours,
             proactive_prompt: Some("do something".to_string()),
             services: vec![],
+            response_style: None,
         };
         let cron = schedule.and_then(|s| croner::Cron::from_str(s).ok());
         ScheduledBot { bot, cron }
@@ -936,6 +937,7 @@ mod tests {
             schedule_hours: None,
             proactive_prompt: None,
             services: vec![],
+            response_style: None,
         };
 
         let result = execute_action(
