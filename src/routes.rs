@@ -498,7 +498,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         .as_ref()
         .and_then(|bots| bots.iter().find(|b| b.name == bot_name));
 
-    // Resolve response style: bot-level overrides workspace-level
+    // Resolve response_style: bot-level > workspace-level > None
     let response_style = bot_config
         .and_then(|b| b.response_style.as_deref())
         .or(ws.response_style.as_deref());
@@ -533,6 +533,11 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                 if !services_prompt.is_empty() {
                     prompt.push_str(&services_prompt);
                 }
+            }
+
+            // Response style
+            if let Some(style) = response_style {
+                prompt.push_str(&format!("\n## Response Style\n{style}\n"));
             }
 
             // Follow-up scheduler
@@ -645,6 +650,11 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         docs_dynamic.push_str(&build_docs_instructions(ws_id));
     }
 
+    // Response style
+    if let Some(style) = response_style {
+        prompt.push_str(&format!("\n## Response Style\n{style}\n"));
+    }
+
     // Follow-up scheduler
     prompt.push_str(&followup_prompt(ws_id));
 
@@ -662,6 +672,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          name = \"my-workspace\"        # display name\n\
          description = \"...\"          # optional description\n\
          default_agent = \"codex\"        # default agent for swarm workers: claude | codex | gemini (optional, default claude)\n\
+         response_style = \"...\"        # default response style for all bots (optional, freeform)\n\
          tts_voice = \"af_nova\"         # TTS voice (optional)\n\
          tts_speed = 1.2              # TTS speed multiplier (optional, default 1.2)\n\
          response_style = \"Brief and friendly. 2-3 sentences for routine stuff.\"  # optional, injected into all bot prompts\n\n\

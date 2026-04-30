@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use tokio::time::{Duration, interval};
 use tracing::info;
 
+const DEFAULT_RESPONSE_STYLE: &str = "Be concise. Lead with the answer.";
+
 /// Configuration for a watched bot.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -135,34 +137,33 @@ pub(crate) async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
         String::new()
     };
 
-    let style_section = bot
-        .response_style
-        .as_deref()
-        .map(|s| format!("\n## Response Style\n{s}\n"))
-        .unwrap_or_default();
-
     let full_prompt = format!(
         "You are {}, a specialty bot for the {} workspace.\n\
          Your role: {}\n\
-         {services}\
-         {style}\
+         {services}\n\
          This is a scheduled proactive check. Do the following:\n\n\
          {}\n\n\
          IMPORTANT: Do your research silently using tools. Do NOT narrate your process.\n\
-         When you have your findings, publish your report using this command:\n\
+         If nothing noteworthy happened, do NOT publish a report. Just exit silently.\n\
+         When you have findings worth reporting, publish your report using this command:\n\
          ```\n\
          hive publish --workspace {ws} --bot {bot_name} --file /tmp/hive-report-{ws}-{bot_name}.md\n\
          ```\n\
          First write your report to /tmp/hive-report-{ws}-{bot_name}.md, then run the command above.\n\n\
+         ## Response Style\n\
+         {style}\n\n\
          After publishing, say DONE.",
         bot.name,
         bot.workspace,
         bot.role,
         prompt,
         services = services_section,
-        style = style_section,
         ws = bot.workspace,
-        bot_name = bot.name
+        bot_name = bot.name,
+        style = bot
+            .response_style
+            .as_deref()
+            .unwrap_or(DEFAULT_RESPONSE_STYLE),
     );
 
     // Resume session if we have one — saves tokens by not re-sending system prompt
@@ -317,24 +318,18 @@ pub(crate) async fn dispatch_signal(bot: &WatchedBot, db: &Db, signal: &Signal) 
     );
 
     // Build prompt for the bot
-    let style_section = bot
+    let style = bot
         .response_style
         .as_deref()
-        .map(|s| format!("\n## Response Style\n{s}\n\n"))
-        .unwrap_or_default();
-
+        .unwrap_or(DEFAULT_RESPONSE_STYLE);
     let prompt = format!(
-        "You are {}, a specialty bot. Your role: {}\n\
-         {style}\
+        "You are {}, a specialty bot. Your role: {}\n\n\
          A signal just fired:\n\
          **{}**\n\n{}\n\n\
-         Investigate this and take appropriate action. \
-         Be concise about what you find and what you did.",
-        bot.name,
-        bot.role,
-        signal.title,
-        signal.body,
-        style = style_section
+         Investigate this and take appropriate action.\n\n\
+         ## Response Style\n\
+         {style}",
+        bot.name, bot.role, signal.title, signal.body
     );
 
     // Dispatch to the right provider — resume session if available

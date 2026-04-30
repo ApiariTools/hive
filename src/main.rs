@@ -270,7 +270,7 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
             let ws_response_style = config
                 .get("workspace")
                 .and_then(|w| w.get("response_style"))
-                .and_then(|r| r.as_str())
+                .and_then(|v| v.as_str())
                 .map(String::from);
 
             if let Some(bots) = config.get("bots").and_then(|b| b.as_array()) {
@@ -317,10 +317,10 @@ fn load_watched_bots(config_dir: &std::path::Path) -> Vec<watcher::WatchedBot> {
                     let has_schedule = (schedule.is_some() || schedule_hours.is_some())
                         && proactive_prompt.is_some();
 
-                    // Bot-level response_style overrides workspace-level
+                    // bot-level response_style > workspace-level
                     let response_style = bot
                         .get("response_style")
-                        .and_then(|r| r.as_str())
+                        .and_then(|v| v.as_str())
                         .map(String::from)
                         .or_else(|| ws_response_style.clone());
 
