@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
             Command::Swarm { dir, command } => {
                 let work_dir = match dir {
                     Some(d) => d,
-                    None => std::env::current_dir()?,
+                    None => resolve_swarm_dir(&config_dir)?,
                 };
                 return swarm::run(work_dir, command);
             }
@@ -387,6 +387,35 @@ fn load_watched_workspaces(config_dir: &std::path::Path) -> Vec<config_watcher::
     }
 
     watched
+}
+
+/// Resolve the workspace root directory for `hive swarm` when `--dir` is not provided.
+/// Scans workspace configs to find one whose root matches or is a parent of the cwd.
+/// Falls back to the current directory if no matching workspace is found.
+fn resolve_swarm_dir(config_dir: &std::path::Path) -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let workspaces_dir = config_dir.join("workspaces");
+
+    if let Ok(entries) = std::fs::read_dir(&workspaces_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "toml")
+                && let Ok(content) = std::fs::read_to_string(&path)
+                && let Ok(config) = toml::from_str::<toml::Value>(&content)
+                && let Some(root) = config
+                    .get("workspace")
+                    .and_then(|w| w.get("root"))
+                    .and_then(|r| r.as_str())
+            {
+                let root_path = PathBuf::from(root);
+                if cwd.starts_with(&root_path) {
+                    return Ok(root_path);
+                }
+            }
+        }
+    }
+
+    Ok(cwd)
 }
 
 fn load_workspace_roots(config_dir: &std::path::Path) -> Vec<PathBuf> {

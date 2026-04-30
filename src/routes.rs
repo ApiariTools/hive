@@ -581,7 +581,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         // Swarm worker dispatch instructions
         let has_swarm = root_path.join(".swarm").exists();
         if has_swarm {
-            prompt.push_str(&format!(
+            prompt.push_str(
                 "\n## Swarm Workers\n\
                  You dispatch coding tasks to swarm workers. Workers run in their own git worktrees \
                  with an LLM agent that writes code, commits, and opens PRs.\n\n\
@@ -589,19 +589,20 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                  ALWAYS dispatch a swarm worker. Do NOT write code yourself — never use \
                  Edit, Write, or Bash to create/modify source code. Your job is to \
                  coordinate, not code. Just dispatch the worker immediately without asking.\n\n\
-                 Commands (always use `--dir {root}`):\n\
-                 - List workers: `hive swarm --dir {root} status`\n\
-                 - Spawn worker: `hive swarm --dir {root} create --repo {{repo}} --prompt-file /tmp/task.txt`\n\
+                 IMPORTANT: Always use `hive swarm` commands, never bare `swarm`. The hive wrapper ensures the correct workspace directory is used.\n\n\
+                 Commands:\n\
+                 - List workers: `hive swarm status`\n\
+                 - Spawn worker: `hive swarm create --repo {repo} --prompt-file /tmp/task.txt`\n\
                    (Write the task prompt to a file first, then pass --prompt-file. Never inline long prompts.)\n\
-                 - Send message: `hive swarm --dir {root} send {{worktree_id}} \"message\"`\n\
-                 - Close worker: `hive swarm --dir {root} close {{worktree_id}}` (only to cancel/abandon — not needed after merge)\n\n\
+                 - Send message: `hive swarm send {worktree_id} \"message\"`\n\
+                 - Close worker: `hive swarm close {worktree_id}` (only to cancel/abandon — not needed after merge)\n\n\
                  When dispatching, always include in the task prompt:\n\
                  'Plan and implement this completely in one session — do not pause mid-task \
                  for confirmation. Commit and open a PR when done.'\n\n\
                  When a task spans multiple repos, dispatch separate workers for each.\n\
                  Each worker prompt must be self-contained — workers cannot see other repos.\n\n\
                  After a PR is merged, swarm auto-closes the worker and pulls main — no manual close or pull needed.\n"
-            ));
+            );
         }
 
         // Inject service credentials from .apiari/services.toml
@@ -1243,7 +1244,7 @@ async fn handle_ws(mut socket: ws::WebSocket, state: AppState) {
 fn build_workflow_nudge() -> &'static str {
     "\n\n<workflow-reminder>\n\
      You have tools available through this workspace. Use them:\n\
-     - Code changes: dispatch swarm workers (hive swarm --dir <workspace_root> create --repo <repo> --prompt-file /tmp/task.txt). Never write code directly.\n\
+     - Code changes: dispatch swarm workers (`hive swarm create --repo <repo> --prompt-file /tmp/task.txt`). Never write code directly. Always use `hive swarm`, never bare `swarm`.\n\
      - Workspace docs: use `hive docs` commands to read/write reference docs in .apiari/docs/\n\
      - Stay focused on coordinating and answering questions. Workers do the implementation.\n\
      </workflow-reminder>"
