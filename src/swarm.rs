@@ -2,6 +2,7 @@ use apiari_swarm::client::{DaemonRequest, DaemonResponse, send_daemon_request};
 use clap::Subcommand;
 use color_eyre::Result;
 use std::path::PathBuf;
+use tracing::info;
 
 #[derive(Subcommand)]
 pub enum SwarmCommand {
@@ -39,7 +40,9 @@ pub enum SwarmCommand {
     Status,
 }
 
-pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
+pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
+    ensure_daemon_running(&dir).await?;
+
     match cmd {
         SwarmCommand::Create {
             repo,
@@ -121,6 +124,44 @@ pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Ensure the swarm daemon is running, starting it if necessary.
+async fn ensure_daemon_running(dir: &std::path::Path) -> Result<()> {
+    // Try a ping to see if the daemon is already reachable
+    if send_daemon_request(dir, &DaemonRequest::Ping).is_ok() {
+        return Ok(());
+    }
+
+    info!("swarm daemon not reachable, attempting to start it");
+
+    // Shell out to `swarm daemon start`
+    let dir_str = dir.display().to_string();
+    let child = std::process::Command::new("swarm")
+        .args(["--dir", &dir_str, "daemon", "start"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    match child {
+        Ok(_) => {
+            // Wait for the socket to appear (up to 5 seconds)
+            for _ in 0..50 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if send_daemon_request(dir, &DaemonRequest::Ping).is_ok() {
+                    info!("swarm daemon started successfully");
+                    return Ok(());
+                }
+            }
+            Err(color_eyre::eyre::eyre!(
+                "swarm daemon was started but did not become reachable within 5 seconds"
+            ))
+        }
+        Err(_) => Err(color_eyre::eyre::eyre!(
+            "Swarm daemon is not running. Start it with: swarm --dir {} daemon start",
+            dir.display()
+        )),
+    }
 }
 
 fn check_response(resp: &DaemonResponse) -> Result<()> {
