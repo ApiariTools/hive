@@ -1,4 +1,4 @@
-import type { Workspace, Bot, Worker, WorkerDetail, Message, Repo, Doc, ResearchTask } from "./types";
+import type { Workspace, Bot, Worker, WorkerDetail, Message, Repo, Doc, ResearchTask, Followup } from "./types";
 
 const BASE = "/api";
 
@@ -194,6 +194,21 @@ export async function deleteDoc(
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`DELETE docs/${filename}: ${res.status}`);
+  return res.json();
+}
+
+export function getFollowups(workspace: string, remote?: string): Promise<Followup[]> {
+  return get(`${wsPath(workspace, remote)}/followups`);
+}
+
+export async function cancelFollowup(
+  workspace: string,
+  followupId: string,
+  remote?: string,
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}${wsPath(workspace, remote)}/followups/${followupId}`, {
+    method: "DELETE",
+  });
   return res.json();
 }
 

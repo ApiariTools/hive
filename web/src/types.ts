@@ -73,6 +73,16 @@ export interface Doc {
   updated_at: string;
 }
 
+export interface Followup {
+  id: string;
+  workspace: string;
+  bot: string;
+  action: string;
+  created_at: string;
+  fires_at: string;
+  status: "pending" | "fired" | "cancelled";
+}
+
 export interface ResearchTask {
   id: string;
   workspace: string;

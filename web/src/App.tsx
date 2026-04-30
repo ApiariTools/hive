@@ -6,7 +6,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { ReposPanel } from "./components/ReposPanel";
 import { WorkerDetail } from "./components/WorkerDetail";
 import { DocsPanel } from "./components/DocsPanel";
-import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData, CrossWorkspaceBot, ResearchTask } from "./types";
+import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData, CrossWorkspaceBot, ResearchTask, Followup } from "./types";
 import * as api from "./api";
 import { initWakeLock } from "./wakeLock";
 
@@ -65,6 +65,7 @@ export default function App() {
   const [otherWorkspaceBots, setOtherWorkspaceBots] = useState<CrossWorkspaceBot[]>([]);
   const [docsOpen, setDocsOpen] = useState(false);
   const [researchTasks, setResearchTasks] = useState<ResearchTask[]>([]);
+  const [followups, setFollowups] = useState<Followup[]>([]);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const [usage, setUsage] = useState<api.UsageData>({ installed: false, providers: [], updated_at: null });
   const lastMsgId = useRef<number>(0);
@@ -146,6 +147,11 @@ export default function App() {
           }
         }
       }
+      if (event.type === "followup_created" || event.type === "followup_fired" || event.type === "followup_cancelled") {
+        if (isCurrentWs) {
+          api.getFollowups(workspace, remote).then(setFollowups);
+        }
+      }
       if (event.type === "message") {
         // Refresh unread counts
         if (workspace) api.getUnread(workspace, remote).then(setUnread);
@@ -173,6 +179,7 @@ export default function App() {
     api.getRepos(workspace, remote).then(setRepos);
     api.getUnread(workspace, remote).then(setUnread);
     api.getResearchTasks(workspace, remote).then(setResearchTasks);
+    api.getFollowups(workspace, remote).then(setFollowups);
   }, [workspace, remote]);
 
   // Load conversations + initial status when workspace or bot changes
@@ -266,10 +273,14 @@ export default function App() {
     const researchInterval = setInterval(() => {
       api.getResearchTasks(workspace, remote).then(setResearchTasks);
     }, 10000);
+    const followupInterval = setInterval(() => {
+      api.getFollowups(workspace, remote).then(setFollowups);
+    }, 10000);
     return () => {
       clearInterval(workerInterval);
       clearInterval(repoInterval);
       clearInterval(researchInterval);
+      clearInterval(followupInterval);
     };
   }, [workspace, remote]);
 
@@ -532,6 +543,9 @@ export default function App() {
             onCancel={loading ? () => api.cancelBot(workspace, bot, remote) : undefined}
             ttsVoice={workspaces.find((w) => w.name === workspace && w.remote === remote)?.tts_voice}
             ttsSpeed={workspaces.find((w) => w.name === workspace && w.remote === remote)?.tts_speed}
+            followups={followups.filter((f) => f.bot === bot)}
+            workspace={workspace}
+            onFollowupCancelled={() => api.getFollowups(workspace, remote).then(setFollowups)}
           />
         ) : (
           <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 8 }}>

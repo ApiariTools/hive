@@ -8,6 +8,7 @@ mod config_watcher;
 mod db;
 mod docs;
 mod events;
+mod followup;
 mod init;
 mod pr_feedback;
 mod pr_review;
@@ -54,6 +55,8 @@ enum Command {
     Docs(docs::DocsArgs),
     /// Install voice dependencies (whisper STT + Kokoro TTS)
     Setup,
+    /// Schedule, list, or cancel follow-ups
+    Followup(followup::FollowupArgs),
     /// Interact with swarm workers via the daemon IPC
     Swarm {
         /// Workspace root directory where .swarm/ lives
@@ -106,6 +109,10 @@ async fn main() -> Result<()> {
             }
             Command::Setup => {
                 return setup::run();
+            }
+            Command::Followup(args) => {
+                let db_path = config_dir.join("hive.db");
+                return followup::run(args, &db_path);
             }
             Command::Swarm { dir, command } => {
                 let work_dir = match dir {
@@ -169,13 +176,17 @@ async fn main() -> Result<()> {
 
     engine.add_watcher(Box::new(usage::UsageWatcher::new(usage_cache.clone())));
 
-    tokio::spawn(engine.run(db.clone()));
+    // Follow-up watcher — checks for due follow-ups every tick
+    followup::ensure_schema(&db);
+    engine.add_watcher(Box::new(tick::FollowupWatcher::new(db.clone())));
+
+    // Create event hub before starting tick engine so it can emit events
+    let event_hub = events::EventHub::new();
+    tokio::spawn(engine.run(db.clone(), Some(event_hub.clone())));
 
     // Auto-start TTS and STT servers if set up
     let _tts_child = tts::start_tts_server().await;
     let _stt_child = stt::start_stt_server().await;
-
-    let event_hub = events::EventHub::new();
 
     // Load remote hive instances and spawn discovery + WS bridge tasks
     let remote_entries = remote::load_remotes_config(&config_dir);

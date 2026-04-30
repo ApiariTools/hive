@@ -3,9 +3,10 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, Loader2, Square, Volume2, AudioLines } from "lucide-react";
 import { Howl, Howler } from "howler";
-import type { Message } from "../types";
+import type { Message, Followup } from "../types";
 import { splitSentences } from "../voice";
 import { ChatInput } from "./ChatInput";
+import { FollowupCard, FollowupIndicator } from "./FollowupCard";
 import type { Attachment, VoiceState } from "./ChatInput";
 import { playSentCue, startThinkingCue, playSpeakingCue, setSharedAudioContext } from "../soundCues";
 import styles from "./ChatPanel.module.css";
@@ -26,6 +27,9 @@ interface Props {
   onSend: (text: string, attachments?: Attachment[]) => void;
   ttsVoice?: string;
   ttsSpeed?: number;
+  followups?: Followup[];
+  workspace?: string;
+  onFollowupCancelled?: () => void;
 }
 
 interface QueuedMessage {
@@ -33,7 +37,7 @@ interface QueuedMessage {
   attachments?: Attachment[];
 }
 
-export function ChatPanel({ bot, botDescription, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel, ttsVoice, ttsSpeed }: Props) {
+export function ChatPanel({ bot, botDescription, messages, messagesLoading, loading, loadingStatus, streamingContent, onSend, workerCount, onWorkersToggle, onCancel, ttsVoice, ttsSpeed, followups, workspace, onFollowupCancelled }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
@@ -449,8 +453,19 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
             )}
           </div>
         )}
+        {followups && workspace && followups.map((f) => (
+          <FollowupCard
+            key={f.id}
+            followup={f}
+            workspace={workspace}
+            onCancelled={() => onFollowupCancelled?.()}
+          />
+        ))}
         <div ref={bottomRef} style={{ paddingBottom: voiceMode ? 100 : 0 }} />
       </div>
+      {followups && followups.some((f) => f.status === "pending") && showScrollBtn && (
+        <FollowupIndicator followup={followups.find((f) => f.status === "pending")!} />
+      )}
       <button
         className={`${styles.scrollToBottom} ${showScrollBtn ? styles.scrollToBottomVisible : ""}`}
         onClick={scrollToBottom}

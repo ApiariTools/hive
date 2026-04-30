@@ -36,6 +36,22 @@ pub enum HiveEvent {
         topic: String,
         output_file: Option<String>,
     },
+    /// Follow-up fired
+    FollowupFired {
+        id: String,
+        workspace: String,
+        bot: String,
+        action: String,
+        fires_at: String,
+    },
+    /// Follow-up cancelled
+    FollowupCancelled {
+        id: String,
+        workspace: String,
+        bot: String,
+        action: String,
+        fires_at: String,
+    },
     /// Event bridged from a remote hive instance (sent as raw JSON to WS clients)
     #[serde(skip)]
     #[allow(dead_code)]

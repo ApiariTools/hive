@@ -6,7 +6,7 @@ use axum::{
     extract::{Multipart, Path, Query, State, WebSocketUpgrade, ws},
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
@@ -128,6 +128,11 @@ pub fn router_with_http_client(
         .route(
             "/api/workspaces/{workspace}/docs/{filename}",
             get(get_doc).put(put_doc).delete(delete_doc),
+        )
+        .route("/api/workspaces/{workspace}/followups", get(list_followups))
+        .route(
+            "/api/workspaces/{workspace}/followups/{followup_id}",
+            delete(cancel_followup),
         )
         .route(
             "/api/workspaces/{workspace}/research",
@@ -451,6 +456,21 @@ struct BuiltPrompt {
     stable: String,
 }
 
+fn followup_prompt(workspace: &str) -> String {
+    format!(
+        "\n## Follow-ups\n\
+         You can schedule follow-ups to check back on something later.\n\
+         To schedule a follow-up, run this command:\n\
+         ```\n\
+         hive followup schedule --workspace {ws} --bot {{your_bot_name}} --delay <delay> --action \"<what to do>\"\n\
+         ```\n\
+         Delay format: `30s`, `5m`, `1h`, `2h30m`\n\
+         When the follow-up fires, you'll receive it as a message and should act on it.\n\
+         Don't say \"I'll check back\" without scheduling a follow-up.\n",
+        ws = workspace,
+    )
+}
+
 fn research_workers_prompt() -> &'static str {
     "\n## Research Workers\n\
      You can start background research tasks that run independently and save findings to workspace docs.\n\
@@ -500,6 +520,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                     prompt.push_str(&services_prompt);
                 }
             }
+
+            // Follow-up scheduler
+            prompt.push_str(&followup_prompt(ws_id));
 
             // Research workers — available for all bots
             prompt.push_str(research_workers_prompt());
@@ -596,6 +619,9 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         }
         docs_dynamic.push_str(&build_docs_instructions(ws_id));
     }
+
+    // Follow-up scheduler
+    prompt.push_str(&followup_prompt(ws_id));
 
     // Research workers — available for all bots regardless of workspace root
     prompt.push_str(research_workers_prompt());
@@ -2724,6 +2750,43 @@ async fn serve_frontend(uri: axum::http::Uri) -> axum::response::Response {
     }
 
     StatusCode::NOT_FOUND.into_response()
+}
+
+// ── Research ──
+
+// ── Follow-ups ──
+
+async fn list_followups(
+    State(state): State<AppState>,
+    Path(workspace): Path<String>,
+) -> Json<Vec<crate::followup::Followup>> {
+    Json(crate::followup::query_workspace(&state.db, &workspace))
+}
+
+async fn cancel_followup(
+    State(state): State<AppState>,
+    Path((workspace, followup_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    match crate::followup::cancel(&state.db, &followup_id, &workspace) {
+        Ok(true) => {
+            // Look up the followup details for the event
+            let followups = crate::followup::query_workspace(&state.db, &workspace);
+            if let Some(f) = followups.iter().find(|f| f.id == followup_id) {
+                state.events.send(HiveEvent::FollowupCancelled {
+                    id: f.id.clone(),
+                    workspace: f.workspace.clone(),
+                    bot: f.bot.clone(),
+                    action: f.action.clone(),
+                    fires_at: f.fires_at.clone(),
+                });
+            }
+            Json(serde_json::json!({"ok": true}))
+        }
+        Ok(false) => {
+            Json(serde_json::json!({"ok": false, "error": "not found or already processed"}))
+        }
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e.to_string()})),
+    }
 }
 
 // ── Research ──

@@ -95,7 +95,7 @@ impl Db {
     }
 
     /// Open a fresh read-only connection. Doesn't block the writer.
-    fn reader(&self) -> Result<Connection> {
+    pub fn reader(&self) -> Result<Connection> {
         let conn = open_conn(&self.db_path)?;
         Ok(conn)
     }
