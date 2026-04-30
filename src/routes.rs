@@ -592,10 +592,10 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                  IMPORTANT: Always use `hive swarm` commands, never bare `swarm`. The hive wrapper ensures the correct workspace directory is used.\n\n\
                  Commands:\n\
                  - List workers: `hive swarm status`\n\
-                 - Spawn worker: `hive swarm create --repo {repo} --prompt-file /tmp/task.txt`\n\
+                 - Spawn worker: `hive swarm create --repo <repo> --prompt-file /tmp/task.txt`\n\
                    (Write the task prompt to a file first, then pass --prompt-file. Never inline long prompts.)\n\
-                 - Send message: `hive swarm send {worktree_id} \"message\"`\n\
-                 - Close worker: `hive swarm close {worktree_id}` (only to cancel/abandon — not needed after merge)\n\n\
+                 - Send message: `hive swarm send <worktree_id> \"message\"`\n\
+                 - Close worker: `hive swarm close <worktree_id>` (only to cancel/abandon — not needed after merge)\n\n\
                  When dispatching, always include in the task prompt:\n\
                  'Plan and implement this completely in one session — do not pause mid-task \
                  for confirmation. Commit and open a PR when done.'\n\n\
