@@ -483,6 +483,7 @@ export default function App() {
     }));
   }, [repos, workers]);
 
+  const selectedBot = bots.find((b) => b.name === bot);
   const selectedWorker = workerId
     ? workers.find((w) => w.id === workerId) || null
     : null;
@@ -531,7 +532,9 @@ export default function App() {
         ) : bot ? (
           <ChatPanel
             bot={bot}
-            botDescription={bots.find((b) => b.name === bot)?.description}
+            botDescription={selectedBot?.description}
+            botProvider={selectedBot?.provider}
+            botModel={selectedBot?.model}
             messages={messages}
             messagesLoading={messagesLoading}
             loading={loading}
