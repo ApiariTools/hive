@@ -10,8 +10,13 @@ use axum::{
 };
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::task::AbortHandle;
+
+pub type RunningTasks = Arc<tokio::sync::Mutex<HashMap<(String, String), AbortHandle>>>;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -32,6 +37,7 @@ pub struct AppState {
     pub tts_base_url: String,
     pub stt_base_url: String,
     pub remote_registry: RemoteRegistry,
+    pub running_tasks: RunningTasks,
 }
 
 pub fn router(
@@ -76,6 +82,7 @@ pub fn router_with_http_client(
         tts_base_url,
         stt_base_url,
         remote_registry,
+        running_tasks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     };
 
     Router::new()
@@ -899,6 +906,7 @@ async fn send_message(
     let hash = prompt_hash.clone();
 
     let events = state.events.clone();
+    let running_tasks = state.running_tasks.clone();
 
     // Set bot status to thinking
     let _ = db.set_bot_status(&ws_name, &bot_name, "thinking", "", None);
@@ -910,7 +918,10 @@ async fn send_message(
     });
 
     // Spawn background task with 5-minute timeout
-    tokio::spawn(async move {
+    let task_ws = ws_name.clone();
+    let task_bot = bot_name.clone();
+    let task_running = running_tasks.clone();
+    let handle = tokio::spawn(async move {
         let task = async {
             match provider.as_str() {
                 "codex" => {
@@ -988,6 +999,12 @@ async fn send_message(
             Ok(Ok(())) => {}
         }
 
+        // Remove ourselves from running_tasks before setting idle
+        task_running
+            .lock()
+            .await
+            .remove(&(ws_name.clone(), bot_name.clone()));
+
         let _ = db.set_bot_status(&ws_name, &bot_name, "idle", "", None);
         events.send(HiveEvent::BotStatus {
             workspace: ws_name.clone(),
@@ -996,6 +1013,12 @@ async fn send_message(
             tool_name: None,
         });
     });
+
+    // Abort any previous task for this bot (e.g. double-submit) and store new handle
+    let mut tasks = running_tasks.lock().await;
+    if let Some(prev) = tasks.insert((task_ws, task_bot), handle.abort_handle()) {
+        prev.abort();
+    }
 
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -1026,12 +1049,24 @@ async fn cancel_bot(
     Path((workspace, bot)): Path<(String, String)>,
 ) -> Json<serde_json::Value> {
     info!("[chat] cancelling {workspace}/{bot}");
-    let _ = state
-        .db
-        .set_bot_status(&workspace, &bot, "cancelled", "", None);
-    // Give the background task a moment to notice
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Abort the running task if one exists
+    if let Some(handle) = state
+        .running_tasks
+        .lock()
+        .await
+        .remove(&(workspace.clone(), bot.clone()))
+    {
+        handle.abort();
+    }
+
     let _ = state.db.set_bot_status(&workspace, &bot, "idle", "", None);
+    state.events.send(HiveEvent::BotStatus {
+        workspace: workspace.clone(),
+        bot: bot.clone(),
+        status: "idle".to_string(),
+        tool_name: None,
+    });
     add_message_and_emit(
         &state.db,
         &state.events,
@@ -4110,6 +4145,9 @@ role = "Chat"
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
             remote_registry: crate::remote::new_registry(),
+            running_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
 
         let result = list_docs(State(state), Path("test".to_string())).await;
@@ -4146,6 +4184,9 @@ role = "Chat"
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
             remote_registry: crate::remote::new_registry(),
+            running_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
 
         let result = list_docs(State(state), Path("test".to_string())).await;
@@ -4184,6 +4225,9 @@ role = "Chat"
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
             remote_registry: crate::remote::new_registry(),
+            running_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
 
         let result = get_doc(
@@ -4225,6 +4269,9 @@ role = "Chat"
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
             remote_registry: crate::remote::new_registry(),
+            running_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
 
         let result = get_doc(
@@ -4261,6 +4308,9 @@ role = "Chat"
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
             remote_registry: crate::remote::new_registry(),
+            running_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
 
         let result = put_doc(
@@ -4307,6 +4357,9 @@ role = "Chat"
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
             remote_registry: crate::remote::new_registry(),
+            running_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
 
         let result = delete_doc(
@@ -4344,6 +4397,9 @@ role = "Chat"
             tts_base_url: "http://localhost".to_string(),
             stt_base_url: "http://localhost".to_string(),
             remote_registry: crate::remote::new_registry(),
+            running_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
 
         let result = delete_doc(
@@ -4522,5 +4578,72 @@ role = "Chat"
         };
         let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(!prompt.contains("## Response Style"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_bot_aborts_running_task() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let ws_dir = config_dir.path().join("workspaces");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+
+        let db = crate::db::Db::open(&config_dir.path().join("test.db")).unwrap();
+        let events = crate::events::EventHub::new();
+        let running_tasks: RunningTasks =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+
+        // Spawn a long-running task that sets status to "streaming"
+        let db2 = db.clone();
+        let handle = tokio::spawn(async move {
+            let _ = db2.set_bot_status("ws", "bot", "streaming", "partial", None);
+            // Simulate a long-running bot — sleep for 60s (will be aborted)
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            // This should NOT execute if cancelled
+            let _ = db2.set_bot_status("ws", "bot", "done_naturally", "", None);
+        });
+        let abort_handle = handle.abort_handle();
+        running_tasks
+            .lock()
+            .await
+            .insert(("ws".into(), "bot".into()), abort_handle);
+
+        // Give the task a moment to start
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify the task is running
+        let status = db.get_bot_status("ws", "bot").unwrap().unwrap();
+        assert_eq!(status.status, "streaming");
+
+        let state = AppState {
+            db: db.clone(),
+            config_dir: config_dir.path().to_path_buf(),
+            events,
+            pr_review_cache: Default::default(),
+            usage_cache: Default::default(),
+            http_client: reqwest::Client::new(),
+            tts_base_url: "http://localhost".to_string(),
+            stt_base_url: "http://localhost".to_string(),
+            remote_registry: crate::remote::new_registry(),
+            running_tasks,
+        };
+
+        // Cancel the bot
+        let result = cancel_bot(State(state.clone()), Path(("ws".into(), "bot".into()))).await;
+        assert_eq!(result.0["ok"], true);
+
+        // Await the handle — it should complete with a JoinError (cancelled)
+        let join_result = handle.await;
+        assert!(join_result.is_err(), "task should have been aborted");
+        assert!(join_result.unwrap_err().is_cancelled());
+
+        // Verify status is idle (set by cancel_bot), NOT "done_naturally"
+        let status = db.get_bot_status("ws", "bot").unwrap().unwrap();
+        assert_eq!(status.status, "idle");
+
+        // Verify the running_tasks map is empty
+        assert!(state.running_tasks.lock().await.is_empty());
+
+        // Verify system message was logged
+        let msgs = db.get_conversations("ws", "bot", 10).unwrap();
+        assert!(msgs.iter().any(|m| m.content == "Response cancelled."));
     }
 }
