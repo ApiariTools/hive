@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
             Command::Swarm { dir, command } => {
                 let work_dir = match dir {
                     Some(d) => d,
-                    None => std::env::current_dir()?,
+                    None => resolve_swarm_dir(&config_dir)?,
                 };
                 return swarm::run(work_dir, command);
             }
@@ -398,7 +398,8 @@ fn load_watched_workspaces(config_dir: &std::path::Path) -> Vec<config_watcher::
     watched
 }
 
-fn load_workspace_roots(config_dir: &std::path::Path) -> Vec<PathBuf> {
+/// Parse all workspace TOML configs and return their root paths.
+fn all_workspace_roots(config_dir: &std::path::Path) -> Vec<PathBuf> {
     let workspaces_dir = config_dir.join("workspaces");
     let mut roots = Vec::new();
 
@@ -418,13 +419,42 @@ fn load_workspace_roots(config_dir: &std::path::Path) -> Vec<PathBuf> {
                 .and_then(|r| r.as_str())
         {
             let root_path = PathBuf::from(root);
-            if root_path.join(".swarm").exists() && !roots.contains(&root_path) {
+            if !roots.contains(&root_path) {
                 roots.push(root_path);
             }
         }
     }
 
     roots
+}
+
+/// Resolve the workspace root directory for `hive swarm` when `--dir` is not provided.
+/// Finds the most specific workspace root that is a parent of the cwd.
+/// Canonicalizes both paths to handle symlinks correctly.
+/// Falls back to the current directory if no matching workspace is found.
+fn resolve_swarm_dir(config_dir: &std::path::Path) -> Result<PathBuf> {
+    let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
+    let mut best: Option<PathBuf> = None;
+
+    for root in all_workspace_roots(config_dir) {
+        if let Ok(canonical) = std::fs::canonicalize(&root)
+            && cwd.starts_with(&canonical)
+            && best
+                .as_ref()
+                .is_none_or(|b| canonical.as_os_str().len() > b.as_os_str().len())
+        {
+            best = Some(root);
+        }
+    }
+
+    Ok(best.unwrap_or(std::env::current_dir()?))
+}
+
+fn load_workspace_roots(config_dir: &std::path::Path) -> Vec<PathBuf> {
+    all_workspace_roots(config_dir)
+        .into_iter()
+        .filter(|r| r.join(".swarm").exists())
+        .collect()
 }
 
 fn dirs_home_dir() -> Option<std::path::PathBuf> {
