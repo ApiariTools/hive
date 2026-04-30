@@ -37,6 +37,7 @@ function splitDiffByFile(raw: string): { fileName: string; content: string }[] {
 }
 
 function FileDiffView({ fileName, content }: { fileName: string; content: string }) {
+  const [collapsed, setCollapsed] = useState(false);
   const diffFile = useMemo(() => {
     const lang = getLang(fileName);
     const instance = DiffFile.createInstance({
@@ -52,14 +53,25 @@ function FileDiffView({ fileName, content }: { fileName: string; content: string
 
   return (
     <div className={styles.diffFileSection}>
-      <div className={styles.diffFileName}>{fileName}</div>
-      <GitDiffView
-        diffFile={diffFile}
-        diffViewMode={DiffModeEnum.Unified}
-        diffViewTheme="dark"
-        diffViewHighlight
-        diffViewFontSize={12}
-      />
+      <button
+        className={styles.diffFileName}
+        onClick={() => setCollapsed((c) => !c)}
+        aria-expanded={!collapsed}
+      >
+        <span className={`${styles.chevron} ${collapsed ? styles.chevronCollapsed : ""}`}>&#9660;</span>
+        {fileName}
+      </button>
+      {!collapsed && (
+        <div className={styles.diffContent}>
+          <GitDiffView
+            diffFile={diffFile}
+            diffViewMode={DiffModeEnum.Unified}
+            diffViewTheme="dark"
+            diffViewHighlight
+            diffViewFontSize={12}
+          />
+        </div>
+      )}
     </div>
   );
 }
