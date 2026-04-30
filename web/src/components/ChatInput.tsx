@@ -460,7 +460,8 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    const isMobile = navigator.maxTouchPoints > 0;
+    if (e.key === "Enter" && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
   }
 
   function handleFiles(files: FileList | null) {
@@ -538,7 +539,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
           </>
         )}
         <textarea ref={textareaRef} className={styles.inputField} placeholder={placeholder}
-          rows={1} enterKeyHint="send" onInput={autoGrow} onKeyDown={handleKeyDown} />
+          rows={1} enterKeyHint="enter" onInput={autoGrow} onKeyDown={handleKeyDown} />
         {micState === "loading" ? (
           <button type="button" className={`${styles.actionBtn} ${styles.micLoading}`} aria-label="Initializing microphone" disabled>
             <Loader2 size={16} className={styles.micSpinner} />

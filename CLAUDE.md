@@ -221,7 +221,8 @@ Dark theme. CSS variables in `web/src/theme.css`:
 - `useKeyboardHeight` was removed — don't re-add iOS keyboard hacks
 - Uncontrolled textarea for chat input (no React state for input value)
 - `onMouseDown preventDefault` on send button keeps iOS keyboard open
-- `enterKeyHint="send"` on textarea for mobile keyboard Send key
+- `enterKeyHint="enter"` on textarea so mobile keyboard shows return/newline key; mobile users send via the send button
+- On mobile (touch devices), Enter inserts a newline; on desktop, Enter sends the message
 
 ## Config
 - Workspace configs: `~/.config/hive/workspaces/{name}.toml`
