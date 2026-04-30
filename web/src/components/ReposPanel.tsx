@@ -43,40 +43,42 @@ export function ReposPanel({ repos, researchTasks, onSelectWorker, mobileOpen, o
                     className={styles.workerCard}
                     onClick={() => onSelectWorker(w.id)}
                   >
-                    <span
-                      className={styles.workerDot}
-                      style={{
-                        background:
-                          w.status === "running" || w.status === "active"
-                            ? "var(--green)"
-                            : w.status === "waiting"
-                              ? "var(--accent)"
-                              : "var(--text-faint)",
-                      }}
-                    />
-                    <span className={styles.workerId}>{w.id}</span>
-                    <span className={styles.agentBadge} data-agent={w.agent.split(/[- ]/)[0].toLowerCase()}>
-                      {w.agent}
-                    </span>
-                    <span className={styles.workerBranch}>{branchName(w.branch)}</span>
-                    {w.pr_url && <span className={styles.prBadge}>PR</span>}
-                    {w.review_state && (
-                      <span className={styles.reviewBadge} data-state={w.review_state.toLowerCase()}>
-                        {w.review_state === "APPROVED" ? "Approved" :
-                         w.review_state === "CHANGES_REQUESTED" ? "Changes" :
-                         "Pending"}
+                    <div className={styles.workerTopLine}>
+                      <span
+                        className={styles.workerDot}
+                        style={{
+                          background:
+                            w.status === "running" || w.status === "active"
+                              ? "var(--green)"
+                              : w.status === "waiting"
+                                ? "var(--accent)"
+                                : "var(--text-faint)",
+                        }}
+                      />
+                      <span className={styles.workerId}>{w.id}</span>
+                      <span className={styles.agentBadge} data-agent={w.agent.split(/[- ]/)[0].toLowerCase()}>
+                        {w.agent}
                       </span>
-                    )}
-                    {w.open_comments != null && w.open_comments > 0 && (
-                      <span className={styles.commentBadge}>
-                        {w.open_comments} open{w.resolved_comments ? ` · ${w.resolved_comments} resolved` : ""}
-                      </span>
-                    )}
-                    {w.ci_status && (
-                      <span className={styles.ciBadge} data-status={w.ci_status.toLowerCase()}>
-                        {w.ci_status === "SUCCESS" ? "CI ok" : w.ci_status === "FAILURE" ? "CI fail" : "CI ..."}
-                      </span>
-                    )}
+                      {w.pr_url && <span className={styles.prBadge}>PR</span>}
+                      {w.review_state && (
+                        <span className={styles.reviewBadge} data-state={w.review_state.toLowerCase()}>
+                          {w.review_state === "APPROVED" ? "Approved" :
+                           w.review_state === "CHANGES_REQUESTED" ? "Changes" :
+                           "Pending"}
+                        </span>
+                      )}
+                      {w.open_comments != null && w.open_comments > 0 && (
+                        <span className={styles.commentBadge}>
+                          {w.open_comments} open{w.resolved_comments ? ` · ${w.resolved_comments} resolved` : ""}
+                        </span>
+                      )}
+                      {w.ci_status && (
+                        <span className={styles.ciBadge} data-status={w.ci_status.toLowerCase()}>
+                          {w.ci_status === "SUCCESS" ? "CI ok" : w.ci_status === "FAILURE" ? "CI fail" : "CI ..."}
+                        </span>
+                      )}
+                    </div>
+                    <div className={styles.workerBranchLine}>{branchName(w.branch)}</div>
                   </div>
                 ))}
               </div>
