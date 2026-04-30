@@ -3658,6 +3658,59 @@ mod tests {
     }
 
     #[test]
+    fn test_services_prompt_linear() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[linear]\ntoken = \"lin_api_abc123\"\n",
+        )
+        .unwrap();
+
+        let prompt = build_services_prompt(dir.path(), &["linear".to_string()]);
+        assert!(prompt.contains("Linear Access"));
+        assert!(prompt.contains("lin_api_abc123"));
+        assert!(prompt.contains("api.linear.app/graphql"));
+        assert!(prompt.contains("issueSearch"));
+        assert!(!prompt.contains("Filter by team"));
+    }
+
+    #[test]
+    fn test_services_prompt_linear_with_team() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[linear]\ntoken = \"lin_api_abc123\"\nteam = \"ENG\"\n",
+        )
+        .unwrap();
+
+        let prompt = build_services_prompt(dir.path(), &["linear".to_string()]);
+        assert!(prompt.contains("Linear Access"));
+        assert!(prompt.contains("Filter by team"));
+        assert!(prompt.contains("ENG"));
+    }
+
+    #[test]
+    fn test_services_prompt_notion() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
+        std::fs::write(
+            dir.path().join(".apiari/services.toml"),
+            "[notion]\ntoken = \"ntn_abc123\"\n",
+        )
+        .unwrap();
+
+        let prompt = build_services_prompt(dir.path(), &["notion".to_string()]);
+        assert!(prompt.contains("Notion Access"));
+        assert!(prompt.contains("ntn_abc123"));
+        assert!(prompt.contains("api.notion.com/v1/search"));
+        assert!(prompt.contains("Notion-Version: 2022-06-28"));
+        assert!(prompt.contains("blocks/"));
+        assert!(prompt.contains("databases/"));
+    }
+
+    #[test]
     fn test_services_prompt_multiple() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".apiari")).unwrap();
