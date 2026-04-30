@@ -87,22 +87,9 @@ function DiffViewer({ diff }: { diff: string }) {
 
 export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Props) {
   const [sending, setSending] = useState(false);
-  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
-  const [infoTab, setInfoTab] = useState<InfoTab>(window.innerWidth <= 768 ? "chat" : "output");
+  const [infoTab, setInfoTab] = useState<InfoTab>("output");
   const [diffContent, setDiffContent] = useState<string | null | undefined>(undefined);
   const bottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = () => setIsMobile(window.innerWidth <= 768);
-    window.addEventListener("resize", handler);
-    return () => window.removeEventListener("resize", handler);
-  }, []);
-
-  useEffect(() => {
-    if (!isMobile && infoTab === "chat") {
-      setInfoTab("output");
-    }
-  }, [isMobile]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -256,7 +243,7 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
             Diff
           </button>
           <button
-            className={`${styles.tab} ${styles.tabChat} ${infoTab === "chat" ? styles.tabActive : ""}`}
+            className={`${styles.tab} ${infoTab === "chat" ? styles.tabActive : ""}`}
             onClick={() => setInfoTab("chat")}
           >
             Chat
@@ -292,23 +279,13 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
               <div className={styles.empty}>No diff available</div>
             )
           )}
-          {isMobile && infoTab === "chat" && (
+          {infoTab === "chat" && (
             <div className={styles.chatInTab}>
               {renderChat()}
             </div>
           )}
         </div>
       </div>
-
-      {/* Right: agent conversation (desktop only) */}
-      {!isMobile && (
-        <div className={styles.chat}>
-          <div className={styles.chatHeader}>
-            <div className={styles.chatTitle}>Conversation</div>
-          </div>
-          {renderChat()}
-        </div>
-      )}
     </div>
   );
 }
