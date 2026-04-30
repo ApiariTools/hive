@@ -105,6 +105,25 @@
   white-space: nowrap;
 }
 
+.agentBadge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  color: #7eb8f7;
+  background: rgba(126, 184, 247, 0.12);
+}
+
+.agentBadge[data-agent="codex"] {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.agentBadge[data-agent="gemini"] {
+  color: #5cc5c5;
+  background: rgba(92, 197, 197, 0.12);
+}
+
 .prBadge {
   font-size: 10px;
   color: var(--accent);

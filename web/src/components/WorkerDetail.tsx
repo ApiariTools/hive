@@ -172,7 +172,12 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
         <div className={styles.infoHeader}>
           <button className={styles.back} onClick={onBack}>&larr;</button>
           <div className={styles.headerMid}>
-            <div className={styles.title}>{worker.id}</div>
+            <div className={styles.titleRow}>
+              <span className={styles.title}>{worker.id}</span>
+              <span className={styles.agentBadge} data-agent={worker.agent.split(/[- ]/)[0].toLowerCase()}>
+                {worker.agent}
+              </span>
+            </div>
             <div className={styles.subtitle}>
               <span
                 className={`${styles.statusDot} ${worker.status === "running" || worker.status === "active" ? styles.running : ""}`}
@@ -185,7 +190,7 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
                         : "var(--text-faint)",
                 }}
               />
-              {worker.status} &middot; {worker.agent} &middot; {branchName(worker.branch)}
+              {worker.status} &middot; {branchName(worker.branch)}
             </div>
           </div>
           <div className={styles.headerActions}>

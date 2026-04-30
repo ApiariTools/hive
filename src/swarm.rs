@@ -11,6 +11,10 @@ pub enum SwarmCommand {
         #[arg(long)]
         repo: Option<String>,
 
+        /// Agent to use (claude, codex, or gemini)
+        #[arg(long, default_value = "claude")]
+        agent: String,
+
         /// Task prompt text
         #[arg(long, conflicts_with = "prompt_file")]
         prompt: Option<String>,
@@ -39,6 +43,7 @@ pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
     match cmd {
         SwarmCommand::Create {
             repo,
+            agent,
             prompt,
             prompt_file,
         } => {
@@ -55,7 +60,7 @@ pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
 
             let req = DaemonRequest::CreateWorker {
                 prompt: prompt_text,
-                agent: "claude".to_string(),
+                agent,
                 repo,
                 start_point: None,
                 workspace: Some(dir.clone()),
