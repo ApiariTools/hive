@@ -376,6 +376,63 @@ pub fn build_services_prompt(root: &std::path::Path, services: &[String]) -> Str
                     ));
                 }
             }
+            "linear" => {
+                let token = section.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                if !token.is_empty() {
+                    prompt.push_str(&format!(
+                        "\n## Linear Access\n\
+                         Query issues (GraphQL):\n\
+                         curl -s -X POST https://api.linear.app/graphql \\\n  \
+                         -H \"Authorization: Bearer {token}\" \\\n  \
+                         -H \"Content-Type: application/json\" \\\n  \
+                         -d '{{\"query\": \"{{ issues(filter: {{ state: {{ type: {{ nin: [\\\"completed\\\", \\\"canceled\\\"] }} }} }}, first: 25, orderBy: updatedAt) {{ nodes {{ identifier title state {{ name }} priority assignee {{ name }} labels {{ nodes {{ name }} }} updatedAt }} }} }}\"}}'\n\n\
+                         Search issues:\n\
+                         curl -s -X POST https://api.linear.app/graphql \\\n  \
+                         -H \"Authorization: Bearer {token}\" \\\n  \
+                         -H \"Content-Type: application/json\" \\\n  \
+                         -d '{{\"query\": \"{{ issueSearch(query: \\\"<search terms>\\\", first: 10) {{ nodes {{ identifier title state {{ name }} description }} }} }}\"}}'\n\n\
+                         Get issue by ID:\n\
+                         curl -s -X POST https://api.linear.app/graphql \\\n  \
+                         -H \"Authorization: Bearer {token}\" \\\n  \
+                         -H \"Content-Type: application/json\" \\\n  \
+                         -d '{{\"query\": \"{{ issue(id: \\\"<issue-id>\\\") {{ identifier title description state {{ name }} priority assignee {{ name }} comments {{ nodes {{ body user {{ name }} createdAt }} }} }} }}\"}}'\n"
+                    ));
+                    let team = section.get("team").and_then(|v| v.as_str()).unwrap_or("");
+                    if !team.is_empty() {
+                        prompt.push_str(&format!(
+                            "Filter by team: add team: {{ key: {{ eq: \"{team}\" }} }} to the issues filter.\n"
+                        ));
+                    }
+                }
+            }
+            "notion" => {
+                let token = section.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                if !token.is_empty() {
+                    prompt.push_str(&format!(
+                        "\n## Notion Access\n\
+                         Search pages and databases:\n\
+                         curl -s -X POST \"https://api.notion.com/v1/search\" \\\n  \
+                         -H \"Authorization: Bearer {token}\" \\\n  \
+                         -H \"Notion-Version: 2022-06-28\" \\\n  \
+                         -H \"Content-Type: application/json\" \\\n  \
+                         -d '{{\"query\": \"<search terms>\", \"page_size\": 10}}'\n\n\
+                         Get page content (blocks):\n\
+                         curl -s \"https://api.notion.com/v1/blocks/<page-id>/children?page_size=100\" \\\n  \
+                         -H \"Authorization: Bearer {token}\" \\\n  \
+                         -H \"Notion-Version: 2022-06-28\"\n\n\
+                         Query a database:\n\
+                         curl -s -X POST \"https://api.notion.com/v1/databases/<database-id>/query\" \\\n  \
+                         -H \"Authorization: Bearer {token}\" \\\n  \
+                         -H \"Notion-Version: 2022-06-28\" \\\n  \
+                         -H \"Content-Type: application/json\" \\\n  \
+                         -d '{{\"page_size\": 25}}'\n\n\
+                         Get page properties:\n\
+                         curl -s \"https://api.notion.com/v1/pages/<page-id>\" \\\n  \
+                         -H \"Authorization: Bearer {token}\" \\\n  \
+                         -H \"Notion-Version: 2022-06-28\"\n"
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -701,7 +758,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          - .apiari/context.md — project context (appended to all bot prompts)\n\
          - .apiari/soul.md — communication style (appended to all bot prompts)\n\
          - .apiari/docs/ — reference docs (indexed, read on demand)\n\
-         - .apiari/services.toml — service credentials (sentry, grafana)\n\n\
+         - .apiari/services.toml — service credentials (sentry, grafana, linear, notion)\n\n\
          To initialize a new workspace: `hive init <name> [--root /path]`\n\
          The user can edit these files directly. If they ask you to help configure, \
          explain the options and suggest what to add to their TOML or context files.\n\
