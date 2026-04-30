@@ -7,8 +7,15 @@
 }
 
 .card.fired {
-  opacity: 0.6;
   border-color: var(--green);
+}
+
+.card.inline {
+  opacity: 1;
+  border-left: 3px solid var(--green);
+  border-radius: 4px;
+  background: transparent;
+  margin: 4px 0;
 }
 
 .card.cancelled {

@@ -406,70 +406,103 @@ export function ChatPanel({ bot, botDescription, botProvider, botModel, messages
         {!messagesLoading && messages.length === 0 && !loading && (
           <div className={styles.empty}>Start a conversation with {bot}</div>
         )}
-        {messages.map((msg) => (
-          <div key={msg.id} className={`${styles.msg} ${msg.role === "user" ? styles.user : ""}`}>
-            <div className={styles.meta}>
-              <strong>{msg.role === "user" ? "You" : bot}</strong>
-              {" · "}
-              {formatTime(msg.created_at)}
-              {msg.role === "assistant" && (
-                <button
-                  className={`${styles.playBtn} ${playingId === msg.id ? styles.playBtnActive : ""}`}
-                  onClick={() => playMessage(msg)}
-                  aria-label={playingId === msg.id ? "Stop" : loadingTtsId === msg.id ? "Loading" : "Play"}
-                >
-                  {loadingTtsId === msg.id ? (
-                    <Loader2 size={12} className={styles.ttsSpinner} />
-                  ) : playingId === msg.id ? (
-                    <Square size={12} />
+        {(() => {
+          // Interleave fired followups into the message timeline
+          const firedFollowups = (followups ?? []).filter((f) => f.status === "fired");
+          const pendingFollowups = (followups ?? []).filter((f) => f.status === "pending");
+
+          // Build merged timeline: messages + fired followups sorted by time
+          type TimelineItem =
+            | { kind: "message"; msg: Message }
+            | { kind: "followup"; followup: Followup };
+
+          const timeline: TimelineItem[] = [
+            ...messages.map((msg): TimelineItem => ({ kind: "message", msg })),
+            ...firedFollowups.map((f): TimelineItem => ({ kind: "followup", followup: f })),
+          ].sort((a, b) => {
+            const timeA = a.kind === "message" ? a.msg.created_at : a.followup.fires_at;
+            const timeB = b.kind === "message" ? b.msg.created_at : b.followup.fires_at;
+            return new Date(timeA).getTime() - new Date(timeB).getTime();
+          });
+
+          return (
+            <>
+              {timeline.map((item) =>
+                item.kind === "followup" ? (
+                  <FollowupCard
+                    key={`followup-${item.followup.id}`}
+                    followup={item.followup}
+                    workspace={workspace ?? ""}
+                    inline
+                  />
+                ) : (
+                  <div key={item.msg.id} className={`${styles.msg} ${item.msg.role === "user" ? styles.user : ""}`}>
+                    <div className={styles.meta}>
+                      <strong>{item.msg.role === "user" ? "You" : bot}</strong>
+                      {" · "}
+                      {formatTime(item.msg.created_at)}
+                      {item.msg.role === "assistant" && (
+                        <button
+                          className={`${styles.playBtn} ${playingId === item.msg.id ? styles.playBtnActive : ""}`}
+                          onClick={() => playMessage(item.msg)}
+                          aria-label={playingId === item.msg.id ? "Stop" : loadingTtsId === item.msg.id ? "Loading" : "Play"}
+                        >
+                          {loadingTtsId === item.msg.id ? (
+                            <Loader2 size={12} className={styles.ttsSpinner} />
+                          ) : playingId === item.msg.id ? (
+                            <Square size={12} />
+                          ) : (
+                            <Volume2 size={12} />
+                          )}
+                        </button>
+                      )}
+                    </div>
+                    {renderAttachments(item.msg.attachments)}
+                    <div className={styles.text}>
+                      {item.msg.role === "assistant" ? (
+                        <Markdown remarkPlugins={[remarkGfm]}>{item.msg.content}</Markdown>
+                      ) : (
+                        item.msg.content
+                      )}
+                    </div>
+                  </div>
+                ),
+              )}
+              {loading && (
+                <div className={styles.msg}>
+                  <div className={styles.meta}>
+                    <strong>{bot}</strong>
+                    {onCancel && <button className={styles.cancelBtn} onClick={onCancel}>Stop</button>}
+                  </div>
+                  {streamingContent ? (
+                    <>
+                      <div className={styles.text}>
+                        <Markdown remarkPlugins={[remarkGfm]}>{streamingContent}</Markdown>
+                      </div>
+                      <div className={styles.streamingIndicator}>
+                        <span className={styles.thinkingDots}><span /><span /><span /></span>
+                        {loadingStatus && <span className={styles.thinkingStatus}>{loadingStatus}</span>}
+                      </div>
+                    </>
                   ) : (
-                    <Volume2 size={12} />
+                    <div className={styles.thinking}>
+                      <span className={styles.thinkingDots}><span /><span /><span /></span>
+                      {loadingStatus && <span className={styles.thinkingStatus}>{loadingStatus}</span>}
+                    </div>
                   )}
-                </button>
-              )}
-            </div>
-            {renderAttachments(msg.attachments)}
-            <div className={styles.text}>
-              {msg.role === "assistant" ? (
-                <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
-              ) : (
-                msg.content
-              )}
-            </div>
-          </div>
-        ))}
-        {loading && (
-          <div className={styles.msg}>
-            <div className={styles.meta}>
-              <strong>{bot}</strong>
-              {onCancel && <button className={styles.cancelBtn} onClick={onCancel}>Stop</button>}
-            </div>
-            {streamingContent ? (
-              <>
-                <div className={styles.text}>
-                  <Markdown remarkPlugins={[remarkGfm]}>{streamingContent}</Markdown>
                 </div>
-                <div className={styles.streamingIndicator}>
-                  <span className={styles.thinkingDots}><span /><span /><span /></span>
-                  {loadingStatus && <span className={styles.thinkingStatus}>{loadingStatus}</span>}
-                </div>
-              </>
-            ) : (
-              <div className={styles.thinking}>
-                <span className={styles.thinkingDots}><span /><span /><span /></span>
-                {loadingStatus && <span className={styles.thinkingStatus}>{loadingStatus}</span>}
-              </div>
-            )}
-          </div>
-        )}
-        {followups && workspace && followups.map((f) => (
-          <FollowupCard
-            key={f.id}
-            followup={f}
-            workspace={workspace}
-            onCancelled={() => onFollowupCancelled?.()}
-          />
-        ))}
+              )}
+              {workspace && pendingFollowups.map((f) => (
+                <FollowupCard
+                  key={f.id}
+                  followup={f}
+                  workspace={workspace}
+                  onCancelled={() => onFollowupCancelled?.()}
+                />
+              ))}
+            </>
+          );
+        })()}
         <div ref={bottomRef} style={{ paddingBottom: voiceMode ? 100 : 0 }} />
       </div>
       {followups && followups.some((f) => f.status === "pending") && showScrollBtn && (
