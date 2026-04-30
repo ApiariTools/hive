@@ -38,6 +38,21 @@ describe("ChatInput", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("does not send on Enter on touch devices", () => {
+    const original = navigator.maxTouchPoints;
+    Object.defineProperty(navigator, "maxTouchPoints", { value: 1, configurable: true });
+    try {
+      const onSend = vi.fn();
+      render(<ChatInput placeholder="msg" onSend={onSend} />);
+      const textarea = screen.getByPlaceholderText("msg");
+      (textarea as HTMLTextAreaElement).value = "hello";
+      fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(navigator, "maxTouchPoints", { value: original, configurable: true });
+    }
+  });
+
   it("sends even when disabled (queue handled by parent)", () => {
     const onSend = vi.fn();
     render(<ChatInput placeholder="msg" onSend={onSend} disabled />);
