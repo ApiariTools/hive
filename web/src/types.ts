@@ -60,6 +60,7 @@ export interface WorkerDetail extends Worker {
 export interface WorkerMessage {
   role: string;
   content: string;
+  timestamp?: string;
 }
 
 export interface CrossWorkspaceBot {

@@ -2518,6 +2518,8 @@ struct WorkerDetail {
 struct WorkerMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
 }
 
 async fn get_worker_detail(
@@ -2579,6 +2581,7 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
 
     let mut messages = Vec::new();
     let mut current_text = String::new();
+    let mut current_text_ts: Option<String> = None;
 
     for line in content.lines() {
         let event: serde_json::Value = match serde_json::from_str(line) {
@@ -2587,10 +2590,17 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
         };
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let ts = event
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string());
 
         match event_type {
             "assistant_text" => {
                 if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
+                    if current_text.is_empty() {
+                        current_text_ts = ts;
+                    }
                     current_text.push_str(text);
                 }
             }
@@ -2600,12 +2610,14 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
                     messages.push(WorkerMessage {
                         role: "assistant".to_string(),
                         content: std::mem::take(&mut current_text),
+                        timestamp: current_text_ts.take(),
                     });
                 }
                 let tool = event.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
                 messages.push(WorkerMessage {
                     role: "tool".to_string(),
                     content: format!("*Using {tool}*"),
+                    timestamp: ts,
                 });
             }
             "user_message" => {
@@ -2614,12 +2626,14 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
                     messages.push(WorkerMessage {
                         role: "assistant".to_string(),
                         content: std::mem::take(&mut current_text),
+                        timestamp: current_text_ts.take(),
                     });
                 }
                 if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
                     messages.push(WorkerMessage {
                         role: "user".to_string(),
                         content: text.to_string(),
+                        timestamp: ts,
                     });
                 }
             }
@@ -2632,6 +2646,7 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
         messages.push(WorkerMessage {
             role: "assistant".to_string(),
             content: current_text,
+            timestamp: current_text_ts,
         });
     }
 

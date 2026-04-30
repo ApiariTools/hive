@@ -88,6 +88,11 @@ function DiffViewer({ diff }: { diff: string }) {
   );
 }
 
+function formatTime(iso: string): string {
+  const normalized = iso.includes("Z") || iso.includes("+") ? iso : iso + "Z";
+  return new Date(normalized).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
 export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Props) {
   const [sending, setSending] = useState(false);
   const [infoTab, setInfoTab] = useState<InfoTab>("output");
@@ -134,6 +139,7 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
                 <>
                   <div className={styles.msgMeta}>
                     <strong>{msg.role === "user" ? "You" : worker.id}</strong>
+                    {msg.timestamp && <> · {formatTime(msg.timestamp)}</>}
                   </div>
                   <div className={styles.msgText}>
                     <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
