@@ -1,6 +1,6 @@
 [package]
 name = "apiari-hive"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "Workspace chat hub — multi-bot, multi-provider AI assistant with swarm integration"
 license = "MIT"
