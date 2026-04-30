@@ -46,7 +46,6 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   const [voiceMode, setVoiceMode] = useState(false);
   const [triggerRecord, setTriggerRecord] = useState(0);
   const voiceModeRef = useRef(false);
-  const lastMsgCountRef = useRef(0);
   const stopThinkingCueRef = useRef<(() => void) | null>(null);
 
   // ── Voice state: listening / processing / speaking ──
@@ -61,7 +60,7 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   // ── Message queue ──
   const handleSendOrQueue = useCallback(
     (text: string, attachments?: Attachment[]) => {
-      if (loading) {
+      if (loading && !voiceModeRef.current) {
         setMessageQueue((q) => [...q, { text, attachments }]);
       } else {
         onSend(text, attachments);
@@ -176,27 +175,25 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
   }
 
   useEffect(() => {
-    if (!voiceModeRef.current) {
-      lastMsgCountRef.current = messages.length;
-      return;
-    }
-    if (messages.length > lastMsgCountRef.current && !loading) {
-      const newMsg = messages[messages.length - 1];
-      if (newMsg.role === "assistant" && !autoPlayedRef.current.has(newMsg.id) && !playingMsgRef.current) {
-        autoPlayedRef.current.add(newMsg.id);
-        const sentences = splitSentences(newMsg.content);
-        if (sentences.length === 0) return;
+    if (!voiceModeRef.current || loading) return;
+    if (messages.length === 0) return;
 
-        setTimeout(() => {
-          if (!voiceModeRef.current || playingMsgRef.current) return;
-          setPlayingId(newMsg.id);
-          playingMsgRef.current = newMsg.id;
-          playVoiceChain(sentences, 0, newMsg.id);
-        }, 200);
-      }
-    }
-    lastMsgCountRef.current = messages.length;
-  }, [messages.length, loading]);
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg.role !== "assistant") return;
+    if (autoPlayedRef.current.has(lastMsg.id)) return;
+    if (playingMsgRef.current) return;
+
+    autoPlayedRef.current.add(lastMsg.id);
+    const sentences = splitSentences(lastMsg.content);
+    if (sentences.length === 0) return;
+
+    setTimeout(() => {
+      if (!voiceModeRef.current || playingMsgRef.current) return;
+      setPlayingId(lastMsg.id);
+      playingMsgRef.current = lastMsg.id;
+      playVoiceChain(sentences, 0, lastMsg.id);
+    }, 200);
+  }, [messages, loading]);
 
   // ── Cleanup ──
   useEffect(() => {
@@ -324,7 +321,6 @@ export function ChatPanel({ bot, botDescription, messages, messagesLoading, load
 
       voiceModeRef.current = true;
       setVoiceMode(true);
-      lastMsgCountRef.current = messages.length;
       setTriggerRecord((n) => n + 1);
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     }

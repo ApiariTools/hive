@@ -248,6 +248,26 @@ describe("ChatPanel", () => {
 
   // ── Sound cue tests ──
 
+  it("voice mode bypasses message queue and sends immediately while loading", async () => {
+    const onSend = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(<ChatPanel {...defaultProps} onSend={onSend} loading={false} />);
+
+    // Enable voice mode
+    await user.click(screen.getByLabelText("Enter voice mode"));
+
+    // Now set loading=true (bot is responding)
+    rerender(<ChatPanel {...defaultProps} onSend={onSend} loading={true} loadingStatus="Thinking..." />);
+
+    // Send a message while loading — in voice mode it should NOT be queued
+    const textarea = screen.getByPlaceholderText(/Message Main/);
+    (textarea as HTMLTextAreaElement).value = "voice msg";
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+
+    expect(onSend).toHaveBeenCalledWith("voice msg", undefined);
+    expect(screen.queryByText(/queued/)).not.toBeInTheDocument();
+  });
+
   it("does not play sound cues when voice mode is off", () => {
     mockPlaySentCue.mockClear();
     mockStartThinkingCue.mockClear();
