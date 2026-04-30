@@ -115,13 +115,6 @@
   flex-shrink: 0;
 }
 
-.installHint {
-  font-size: 11px;
-  color: var(--text-faint);
-  margin-left: 8px;
-  cursor: default;
-  white-space: nowrap;
-}
 
 .searchBtn {
   margin-left: 0;
