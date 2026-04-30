@@ -165,6 +165,7 @@ describe("ChatPanel", () => {
     const badge = screen.getByText("Claude");
     expect(badge).toBeInTheDocument();
     expect(badge.getAttribute("title")).toBe("claude-sonnet-4-20250514");
+    expect(badge.getAttribute("aria-label")).toBe("Provider: claude, model: claude-sonnet-4-20250514");
   });
 
   it("does not render provider badge when botProvider is not set", () => {

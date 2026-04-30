@@ -375,7 +375,11 @@ export function ChatPanel({ bot, botDescription, botProvider, botModel, messages
           <div className={styles.headerNameRow}>
             <div className={styles.headerName}>{bot}</div>
             {botProvider && (
-              <span className={styles.providerBadge} title={botModel || undefined}>
+              <span
+                className={styles.providerBadge}
+                title={botModel || undefined}
+                aria-label={botModel ? `Provider: ${botProvider}, model: ${botModel}` : `Provider: ${botProvider}`}
+              >
                 {botProvider.charAt(0).toUpperCase() + botProvider.slice(1)}
               </span>
             )}
