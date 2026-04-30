@@ -609,7 +609,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                  When a task spans multiple repos, dispatch separate workers for each.\n\
                  Each worker prompt must be self-contained — workers cannot see other repos.\n\n\
                  After a PR is merged, swarm auto-closes the worker and pulls main — no manual close or pull needed.\n"
-            );
+            ));
         }
 
         // Inject service credentials from .apiari/services.toml
@@ -644,6 +644,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          root = \"/path/to/project\"    # workspace root directory\n\
          name = \"my-workspace\"        # display name\n\
          description = \"...\"          # optional description\n\
+         default_agent = \"codex\"        # default agent for swarm workers: claude | codex | gemini (optional, default claude)\n\
          tts_voice = \"af_nova\"         # TTS voice (optional)\n\
          tts_speed = 1.2              # TTS speed multiplier (optional, default 1.2)\n\n\
          [[bots]]\n\
@@ -3089,6 +3090,24 @@ mod tests {
             workspace: Some(WorkspaceInfo_ {
                 root: Some(dir.path().to_string_lossy().to_string()),
                 name: Some("test".into()),
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main", "test").full;
+        assert!(!prompt.contains("--agent"));
+    }
+
+    #[test]
+    fn test_build_prompt_swarm_invalid_default_agent_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                default_agent: Some("bad agent; rm -rf /".into()),
                 ..Default::default()
             }),
             bots: None,
