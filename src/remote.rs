@@ -252,7 +252,7 @@ pub async fn request_with_fallback(
     match reqwest_request(client, method.clone(), url, body, content_type).await {
         Ok(response) => Ok(response),
         Err(reqwest_error) => {
-            tracing::warn!(
+            tracing::debug!(
                 "[remote] native HTTP failed for {method} {url}: {reqwest_error}; falling back to /usr/bin/curl"
             );
             curl_request(method.as_str(), url, body, content_type)
@@ -292,6 +292,10 @@ async fn event_bridge(remote: RemoteEntry, events: EventHub, client: reqwest::Cl
     let mut last_statuses: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
+    const BASE_INTERVAL_SECS: u64 = 3;
+    const MAX_INTERVAL_SECS: u64 = 300;
+    let mut interval_secs = BASE_INTERVAL_SECS;
+
     loop {
         // Get remote workspaces
         let ws_url = format!("{}/api/workspaces", remote.url);
@@ -299,6 +303,8 @@ async fn event_bridge(remote: RemoteEntry, events: EventHub, client: reqwest::Cl
             request_with_fallback(&client, reqwest::Method::GET, &ws_url, None, None).await
             && let Ok(workspaces) = serde_json::from_slice::<Vec<serde_json::Value>>(&body)
         {
+            // Remote is reachable — reset backoff
+            interval_secs = BASE_INTERVAL_SECS;
             for ws in &workspaces {
                 let ws_name = ws["name"].as_str().unwrap_or_default();
                 if ws_name.is_empty() {
@@ -372,9 +378,12 @@ async fn event_bridge(remote: RemoteEntry, events: EventHub, client: reqwest::Cl
                     }
                 }
             }
+        } else {
+            // Remote unreachable — apply exponential backoff
+            interval_secs = (interval_secs * 2).min(MAX_INTERVAL_SECS);
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
     }
 }
 
