@@ -147,10 +147,10 @@ pub(crate) async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
          ```\n\
          First write your report to /tmp/hive-report-{ws}-{bot_name}.md, then run the command above.\n\n\
          The report should be:\n\
-         - Clean markdown, no narration\n\
-         - Lead with the most important finding\n\
-         - Use tables for structured data\n\
-         - Short and scannable\n\n\
+         - Keep it brief — 2-3 short sentences max unless something important happened\n\
+         - Avoid tables — use short bullet points\n\
+         - No headers or section titles for simple updates\n\
+         - Tone: like a quick Slack message, not a formal report\n\n\
          After publishing, say DONE.",
         bot.name,
         bot.workspace,
@@ -198,7 +198,7 @@ pub(crate) async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
 
     match (report, response_text) {
         (Some(text), _) if !text.trim().is_empty() => {
-            let _ = db.add_message(&bot.workspace, &bot.name, "assistant", text.trim(), None);
+            // Report file exists — hive publish already stored it in the DB, so just log.
             info!(
                 "[watcher] {} report published ({} chars)",
                 bot.name,
