@@ -280,18 +280,8 @@ impl Watcher for SentryWatcher {
                 continue;
             }
 
-            // Update cursor to newest issue
-            if let Some(newest) = new_issues.first() {
-                let now = chrono::Utc::now().to_rfc3339();
-                if let Err(e) = self.db.set_sentry_cursor(
-                    &state.bot.workspace,
-                    &state.bot.name,
-                    &newest.id,
-                    &now,
-                ) {
-                    warn!("[sentry] failed to update cursor: {e}");
-                }
-            }
+            // Capture newest issue ID for cursor update (emitted after signals)
+            let newest_issue_id = new_issues.first().map(|i| i.id.clone());
 
             // Dispatch each new issue as a signal
             for issue in &new_issues {
@@ -347,6 +337,15 @@ impl Watcher for SentryWatcher {
                     signal_source: "sentry".to_string(),
                     signal_title: title,
                     signal_body: body,
+                });
+            }
+
+            // Update cursor AFTER signals so it's only persisted once signals are dispatched
+            if let Some(issue_id) = newest_issue_id {
+                actions.push(Action::UpdateSentryCursor {
+                    workspace: state.bot.workspace.clone(),
+                    bot: state.bot.name.clone(),
+                    issue_id,
                 });
             }
 

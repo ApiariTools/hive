@@ -41,6 +41,12 @@ pub enum Action {
         worker_id: String,
         message: String,
     },
+    /// Update the Sentry cursor after signals have been dispatched
+    UpdateSentryCursor {
+        workspace: String,
+        bot: String,
+        issue_id: String,
+    },
     /// Fire a due follow-up (inject action as user message to bot)
     FireFollowup {
         id: String,
@@ -207,6 +213,16 @@ fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
                 Err(e) => {
                     tracing::warn!("[followup] failed to mark {id} as fired: {e}");
                 }
+            }
+        }
+        Action::UpdateSentryCursor {
+            workspace,
+            bot,
+            issue_id,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = db.set_sentry_cursor(&workspace, &bot, &issue_id, &now) {
+                tracing::warn!("[sentry] failed to update cursor for {workspace}/{bot}: {e}");
             }
         }
         Action::SendToWorker {
