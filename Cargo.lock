@@ -115,22 +115,6 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "apiari-claude-sdk"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcc19084bb2861ba4976032ce8c0e4fc72f650699c98bf3560a479118ae082b5"
-dependencies = [
- "chrono",
- "libc",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "apiari-claude-sdk"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d994c17738dc2c1f089e4bbb142787b8cd9d2572ff955483cc26030913289bb"
@@ -171,20 +155,6 @@ dependencies = [
 
 [[package]]
 name = "apiari-gemini-sdk"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63489ff45634612cbf5bfa1b2e5271257c49cdbec0427c18479fe9fa2a470987"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "apiari-gemini-sdk"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c450bd3d0820ed59965058c505b323388bae850de05627cd511c51ec5c036f0"
@@ -199,11 +169,11 @@ dependencies = [
 
 [[package]]
 name = "apiari-hive"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
- "apiari-claude-sdk 0.2.0",
+ "apiari-claude-sdk",
  "apiari-codex-sdk",
- "apiari-gemini-sdk 0.2.0",
+ "apiari-gemini-sdk",
  "apiari-swarm",
  "async-stream",
  "async-trait",
@@ -233,16 +203,17 @@ dependencies = [
 
 [[package]]
 name = "apiari-swarm"
-version = "0.1.6"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b4debdba2b0640bbe58ae123722900e6205a902ab93e45e75b278fe7bc40ded"
+checksum = "076026fc6a4ab3c1deba388657d49a828bbba63f75e6a80dcd3590cee3d6177f"
 dependencies = [
  "a2a-types",
- "apiari-claude-sdk 0.1.0",
+ "apiari-claude-sdk",
  "apiari-codex-sdk",
  "apiari-common",
- "apiari-gemini-sdk 0.1.0",
+ "apiari-gemini-sdk",
  "async-trait",
+ "axum",
  "chrono",
  "clap",
  "color-eyre",
@@ -253,6 +224,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "toml",
  "tracing",
  "tracing-appender",
@@ -2513,6 +2485,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
