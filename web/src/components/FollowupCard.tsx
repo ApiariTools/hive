@@ -44,9 +44,11 @@ export function FollowupCard({ followup, workspace, onCancelled }: Props) {
   }, [followup.fires_at, status]);
 
   const handleCancel = useCallback(async () => {
-    await cancelFollowup(workspace, followup.id);
-    setStatus("cancelled");
-    onCancelled?.(followup.id);
+    const res = await cancelFollowup(workspace, followup.id);
+    if (res.ok) {
+      setStatus("cancelled");
+      onCancelled?.(followup.id);
+    }
   }, [workspace, followup.id, onCancelled]);
 
   const cardClass = [

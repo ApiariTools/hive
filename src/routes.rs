@@ -2767,7 +2767,7 @@ async fn cancel_followup(
     State(state): State<AppState>,
     Path((workspace, followup_id)): Path<(String, String)>,
 ) -> Json<serde_json::Value> {
-    match crate::followup::cancel(&state.db, &followup_id) {
+    match crate::followup::cancel(&state.db, &followup_id, &workspace) {
         Ok(true) => {
             // Look up the followup details for the event
             let followups = crate::followup::query_workspace(&state.db, &workspace);

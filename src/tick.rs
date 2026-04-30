@@ -46,6 +46,7 @@ pub enum Action {
         workspace: String,
         bot: String,
         action: String,
+        fires_at: String,
     },
 }
 
@@ -174,25 +175,36 @@ fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
             workspace,
             bot,
             action,
+            fires_at,
         } => {
             tracing::info!("[followup] firing {id} for {workspace}/{bot}");
-            let _ = crate::followup::mark_fired(db, &id);
-            let message = format!("[Scheduled follow-up] {action}");
-            let _ = db.add_message(&workspace, &bot, "user", &message, None);
-            if let Some(hub) = events {
-                hub.send(crate::events::HiveEvent::FollowupFired {
-                    id: id.clone(),
-                    workspace: workspace.clone(),
-                    bot: bot.clone(),
-                    action: action.clone(),
-                    fires_at: String::new(),
-                });
-                hub.send(crate::events::HiveEvent::Message {
-                    workspace: workspace.clone(),
-                    bot: bot.clone(),
-                    role: "user".to_string(),
-                    content: message,
-                });
+            // Atomically mark as fired only if still pending (handles cancel race)
+            match crate::followup::mark_fired_if_pending(db, &id) {
+                Ok(true) => {
+                    let message = format!("[Scheduled follow-up] {action}");
+                    let _ = db.add_message(&workspace, &bot, "user", &message, None);
+                    if let Some(hub) = events {
+                        hub.send(crate::events::HiveEvent::FollowupFired {
+                            id: id.clone(),
+                            workspace: workspace.clone(),
+                            bot: bot.clone(),
+                            action: action.clone(),
+                            fires_at,
+                        });
+                        hub.send(crate::events::HiveEvent::Message {
+                            workspace: workspace.clone(),
+                            bot: bot.clone(),
+                            role: "user".to_string(),
+                            content: message,
+                        });
+                    }
+                }
+                Ok(false) => {
+                    tracing::info!("[followup] {id} was cancelled before firing, skipping");
+                }
+                Err(e) => {
+                    tracing::warn!("[followup] failed to mark {id} as fired: {e}");
+                }
             }
         }
         Action::SendToWorker {
@@ -559,6 +571,7 @@ impl Watcher for FollowupWatcher {
                 workspace: f.workspace,
                 bot: f.bot,
                 action: f.action,
+                fires_at: f.fires_at,
             })
             .collect()
     }

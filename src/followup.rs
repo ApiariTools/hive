@@ -89,7 +89,7 @@ pub fn schedule(
     delay_secs: u64,
     action: &str,
 ) -> Result<Followup> {
-    let id = format!("fu_{}", &uuid_v4()[..12]);
+    let id = format!("fu_{}", &generate_id()[..12]);
     let now = chrono::Utc::now();
     let fires_at = now + chrono::Duration::seconds(delay_secs as i64);
     let created_at = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -167,13 +167,9 @@ pub fn query_workspace(db: &Db, workspace: &str) -> Vec<Followup> {
     .unwrap_or_default()
 }
 
-/// Mark a follow-up as fired.
-pub fn mark_fired(db: &Db, id: &str) -> Result<()> {
-    db.execute_sql("UPDATE followups SET status = 'fired' WHERE id = ?1", &[id])
-}
-
-/// Cancel a follow-up. Returns true if a pending follow-up was cancelled.
-pub fn cancel(db: &Db, id: &str) -> Result<bool> {
+/// Mark a follow-up as fired, but only if it's still pending.
+/// Returns true if the status was changed, false if it was already cancelled/fired.
+pub fn mark_fired_if_pending(db: &Db, id: &str) -> Result<bool> {
     // Check current status first
     let conn = db.reader()?;
     let status: Option<String> = conn
@@ -188,6 +184,32 @@ pub fn cancel(db: &Db, id: &str) -> Result<bool> {
     match status.as_deref() {
         Some("pending") => {
             db.execute_sql(
+                "UPDATE followups SET status = 'fired' WHERE id = ?1 AND status = 'pending'",
+                &[id],
+            )?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Cancel a follow-up. Validates that it belongs to the given workspace.
+/// Returns true if a pending follow-up was cancelled.
+pub fn cancel(db: &Db, id: &str, workspace: &str) -> Result<bool> {
+    // Check current status and workspace ownership
+    let conn = db.reader()?;
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT status, workspace FROM followups WHERE id = ?1",
+            rusqlite::params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+    drop(conn);
+
+    match row {
+        Some((status, ws)) if status == "pending" && ws == workspace => {
+            db.execute_sql(
                 "UPDATE followups SET status = 'cancelled' WHERE id = ?1 AND status = 'pending'",
                 &[id],
             )?;
@@ -197,8 +219,9 @@ pub fn cancel(db: &Db, id: &str) -> Result<bool> {
     }
 }
 
-/// Simple UUID v4 generator (no external crate).
-fn uuid_v4() -> String {
+/// Generate a short unique ID from timestamp + pid + counter.
+/// Not a true UUID — just needs to be unique within this process.
+fn generate_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -246,6 +269,8 @@ pub enum FollowupCommand {
     /// Cancel a pending follow-up
     Cancel {
         #[arg(long)]
+        workspace: String,
+        #[arg(long)]
         id: String,
     },
 }
@@ -281,8 +306,8 @@ pub fn run(args: FollowupArgs, db_path: &std::path::Path) -> Result<()> {
                 }
             }
         }
-        FollowupCommand::Cancel { id } => {
-            let cancelled = cancel(&db, &id)?;
+        FollowupCommand::Cancel { workspace, id } => {
+            let cancelled = cancel(&db, &id, &workspace)?;
             if cancelled {
                 println!("Cancelled follow-up {id}");
             } else {
@@ -364,14 +389,19 @@ mod tests {
 
         let followup = schedule(&db, "ws", "Bot", 300, "Check PR").unwrap();
 
-        let cancelled = cancel(&db, &followup.id).unwrap();
+        let cancelled = cancel(&db, &followup.id, "ws").unwrap();
         assert!(cancelled);
 
         let all = query_workspace(&db, "ws");
         assert_eq!(all[0].status, "cancelled");
 
         // Cancel again should return false
-        let cancelled = cancel(&db, &followup.id).unwrap();
+        let cancelled = cancel(&db, &followup.id, "ws").unwrap();
+        assert!(!cancelled);
+
+        // Cancel with wrong workspace should return false
+        let followup2 = schedule(&db, "ws", "Bot", 300, "Check PR 2").unwrap();
+        let cancelled = cancel(&db, &followup2.id, "other_ws").unwrap();
         assert!(!cancelled);
     }
 
@@ -416,10 +446,15 @@ mod tests {
             &["fu_test", "ws", "Bot", "Check PR", "2020-01-01T00:00:00Z"],
         ).unwrap();
 
-        mark_fired(&db, "fu_test").unwrap();
+        let fired = mark_fired_if_pending(&db, "fu_test").unwrap();
+        assert!(fired);
 
         let all = query_workspace(&db, "ws");
         assert_eq!(all[0].status, "fired");
+
+        // Already fired — should return false
+        let fired_again = mark_fired_if_pending(&db, "fu_test").unwrap();
+        assert!(!fired_again);
 
         // Should no longer appear as due
         let due = query_due(&db);
