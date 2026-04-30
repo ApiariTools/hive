@@ -335,6 +335,9 @@
 }
 
 .diffFileName {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-strong);
@@ -346,6 +349,27 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  box-shadow: 0 1px 0 var(--border);
+}
+
+.diffFileName:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.chevron {
+  font-size: 10px;
+  color: var(--text-faint);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+
+.chevronCollapsed {
+  transform: rotate(-90deg);
 }
 
 
