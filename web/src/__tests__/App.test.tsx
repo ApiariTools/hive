@@ -236,7 +236,7 @@ describe("Research command", () => {
 
     const textarea = screen.getByPlaceholderText(/Message Main/);
     await user.type(textarea, "/research test topic");
-    await user.keyboard("{Enter}");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
 
     await waitFor(() => {
       expect(api.startResearch).toHaveBeenCalledWith("apiari", "test topic", undefined);
@@ -252,7 +252,7 @@ describe("Research command", () => {
 
     const textarea = screen.getByPlaceholderText(/Message Main/);
     await user.type(textarea, "/research test topic");
-    await user.keyboard("{Enter}");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
 
     await waitFor(() => {
       expect(screen.getByText("Research started: test topic")).toBeInTheDocument();

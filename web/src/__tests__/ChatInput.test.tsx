@@ -18,39 +18,33 @@ describe("ChatInput", () => {
     expect(screen.queryByRole("button", { name: "Attach file" })).not.toBeInTheDocument();
   });
 
-  it("calls onSend with text on Enter", () => {
+  it("calls onSend with text on Cmd+Enter", () => {
     const onSend = vi.fn();
     render(<ChatInput placeholder="msg" onSend={onSend} />);
     const textarea = screen.getByPlaceholderText("msg");
     fireEvent.input(textarea, { target: { value: "hello" } });
     // Manually set value since fireEvent.input doesn't update uncontrolled textarea
     (textarea as HTMLTextAreaElement).value = "hello";
-    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
     expect(onSend).toHaveBeenCalledWith("hello", undefined);
   });
 
-  it("does not send on Shift+Enter", () => {
+  it("calls onSend with text on Ctrl+Enter", () => {
     const onSend = vi.fn();
     render(<ChatInput placeholder="msg" onSend={onSend} />);
     const textarea = screen.getByPlaceholderText("msg");
     (textarea as HTMLTextAreaElement).value = "hello";
-    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: true });
-    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    expect(onSend).toHaveBeenCalledWith("hello", undefined);
   });
 
-  it("does not send on Enter on touch devices", () => {
-    const original = navigator.maxTouchPoints;
-    Object.defineProperty(navigator, "maxTouchPoints", { value: 1, configurable: true });
-    try {
-      const onSend = vi.fn();
-      render(<ChatInput placeholder="msg" onSend={onSend} />);
-      const textarea = screen.getByPlaceholderText("msg");
-      (textarea as HTMLTextAreaElement).value = "hello";
-      fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
-      expect(onSend).not.toHaveBeenCalled();
-    } finally {
-      Object.defineProperty(navigator, "maxTouchPoints", { value: original, configurable: true });
-    }
+  it("does not send on bare Enter", () => {
+    const onSend = vi.fn();
+    render(<ChatInput placeholder="msg" onSend={onSend} />);
+    const textarea = screen.getByPlaceholderText("msg");
+    (textarea as HTMLTextAreaElement).value = "hello";
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it("sends even when disabled (queue handled by parent)", () => {
@@ -58,7 +52,7 @@ describe("ChatInput", () => {
     render(<ChatInput placeholder="msg" onSend={onSend} disabled />);
     const textarea = screen.getByPlaceholderText("msg");
     (textarea as HTMLTextAreaElement).value = "hello";
-    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
     expect(onSend).toHaveBeenCalledWith("hello", undefined);
   });
 

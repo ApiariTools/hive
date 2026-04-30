@@ -460,8 +460,7 @@ export function ChatInput({ placeholder, disabled, onSend, showAttachments = tru
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    const isTouchDevice = navigator.maxTouchPoints > 0;
-    if (e.key === "Enter" && !e.shiftKey && !isTouchDevice) { e.preventDefault(); send(); }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
   }
 
   function handleFiles(files: FileList | null) {
