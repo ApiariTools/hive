@@ -252,7 +252,7 @@ pub async fn request_with_fallback(
     match reqwest_request(client, method.clone(), url, body, content_type).await {
         Ok(response) => Ok(response),
         Err(reqwest_error) => {
-            tracing::warn!(
+            tracing::debug!(
                 "[remote] native HTTP failed for {method} {url}: {reqwest_error}; falling back to /usr/bin/curl"
             );
             curl_request(method.as_str(), url, body, content_type)
@@ -282,8 +282,18 @@ async fn discover_workspaces(
     Ok(workspaces.into_iter().map(|w| w.name).collect())
 }
 
+// ── Backoff helper ──
+
+const EVENT_BRIDGE_BASE_INTERVAL_SECS: u64 = 3;
+const EVENT_BRIDGE_MAX_INTERVAL_SECS: u64 = 300;
+
+fn next_backoff_interval(current: u64) -> u64 {
+    (current * 2).min(EVENT_BRIDGE_MAX_INTERVAL_SECS)
+}
+
 // ── Remote event bridge ──
-// Poll bot status for all remote workspaces every 3 seconds.
+// Poll bot status for all remote workspaces. Starts at 3s interval,
+// backs off exponentially (up to 5min) when remote is unreachable.
 
 async fn event_bridge(remote: RemoteEntry, events: EventHub, client: reqwest::Client) {
     // Wait for discovery to find workspaces first
@@ -292,6 +302,8 @@ async fn event_bridge(remote: RemoteEntry, events: EventHub, client: reqwest::Cl
     let mut last_statuses: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
+    let mut interval_secs = EVENT_BRIDGE_BASE_INTERVAL_SECS;
+
     loop {
         // Get remote workspaces
         let ws_url = format!("{}/api/workspaces", remote.url);
@@ -299,6 +311,8 @@ async fn event_bridge(remote: RemoteEntry, events: EventHub, client: reqwest::Cl
             request_with_fallback(&client, reqwest::Method::GET, &ws_url, None, None).await
             && let Ok(workspaces) = serde_json::from_slice::<Vec<serde_json::Value>>(&body)
         {
+            // Remote is reachable — reset backoff
+            interval_secs = EVENT_BRIDGE_BASE_INTERVAL_SECS;
             for ws in &workspaces {
                 let ws_name = ws["name"].as_str().unwrap_or_default();
                 if ws_name.is_empty() {
@@ -372,9 +386,14 @@ async fn event_bridge(remote: RemoteEntry, events: EventHub, client: reqwest::Cl
                     }
                 }
             }
+        } else {
+            // Remote unreachable — sleep current interval, then increase for next time
+            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+            interval_secs = next_backoff_interval(interval_secs);
+            continue;
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
     }
 }
 
@@ -511,5 +530,25 @@ url = "http://10.0.0.3:4200"
         assert_eq!(status, 200);
         assert_eq!(content_type, "application/json");
         assert_eq!(body, br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn test_event_bridge_backoff() {
+        // Starts at base interval
+        let mut interval = EVENT_BRIDGE_BASE_INTERVAL_SECS;
+        assert_eq!(interval, 3);
+
+        // Doubles on each failure
+        interval = next_backoff_interval(interval);
+        assert_eq!(interval, 6);
+        interval = next_backoff_interval(interval);
+        assert_eq!(interval, 12);
+        interval = next_backoff_interval(interval);
+        assert_eq!(interval, 24);
+
+        // Caps at max
+        interval = 192;
+        interval = next_backoff_interval(interval);
+        assert_eq!(interval, EVENT_BRIDGE_MAX_INTERVAL_SECS); // 300, not 384
     }
 }
