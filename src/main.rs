@@ -16,6 +16,7 @@ mod publish;
 mod remote;
 mod research;
 mod routes;
+mod sentry_watcher;
 mod setup;
 mod stt;
 mod swarm;
@@ -140,6 +141,14 @@ async fn main() -> Result<()> {
     if !watched_bots.is_empty() {
         info!("starting {} specialty bot watcher(s)", watched_bots.len());
         engine.add_watcher(Box::new(tick::SignalWatcher::new(watched_bots.clone())));
+
+        // Sentry watcher — polls Sentry API for new issues
+        sentry_watcher::ensure_schema(&db);
+        engine.add_watcher(Box::new(sentry_watcher::SentryWatcher::new(
+            watched_bots.clone(),
+            db.clone(),
+        )));
+
         engine.add_watcher(Box::new(tick::ScheduleWatcher::new(
             watched_bots,
             db.clone(),

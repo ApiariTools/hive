@@ -29,6 +29,7 @@ pub enum Action {
     /// Dispatch a signal to a bot (runs autonomously in background)
     DispatchSignal {
         bot: WatchedBot,
+        signal_source: String,
         signal_title: String,
         signal_body: String,
     },
@@ -150,13 +151,14 @@ fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
         }
         Action::DispatchSignal {
             bot,
+            signal_source,
             signal_title,
             signal_body,
         } => {
             let db = db.clone();
             tokio::spawn(async move {
                 let signal = crate::watcher::Signal {
-                    source: "github".to_string(),
+                    source: signal_source,
                     title: signal_title,
                     body: signal_body,
                 };
@@ -273,20 +275,16 @@ impl Watcher for SignalWatcher {
         let mut actions = Vec::new();
         for bot in &self.bots {
             for source in &bot.watch {
-                match source.as_str() {
-                    "github" => {
-                        if let Some(signal) = crate::watcher::poll_github(&bot.working_dir).await {
-                            actions.push(Action::DispatchSignal {
-                                bot: bot.clone(),
-                                signal_title: signal.title,
-                                signal_body: signal.body,
-                            });
-                        }
-                    }
-                    "sentry" => {
-                        // placeholder
-                    }
-                    _ => {}
+                // "sentry" is handled by SentryWatcher
+                if source.as_str() == "github"
+                    && let Some(signal) = crate::watcher::poll_github(&bot.working_dir).await
+                {
+                    actions.push(Action::DispatchSignal {
+                        bot: bot.clone(),
+                        signal_source: "github".to_string(),
+                        signal_title: signal.title,
+                        signal_body: signal.body,
+                    });
                 }
             }
         }

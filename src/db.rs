@@ -373,6 +373,37 @@ impl Db {
         Ok(rows)
     }
 
+    pub fn get_sentry_cursor(&self, workspace: &str, bot: &str) -> Result<Option<String>> {
+        let conn = self.reader()?;
+        let result = conn.query_row(
+            "SELECT last_issue_id FROM sentry_cursors WHERE workspace = ?1 AND bot = ?2",
+            params![workspace, bot],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn set_sentry_cursor(
+        &self,
+        workspace: &str,
+        bot: &str,
+        last_issue_id: &str,
+        last_poll_at: &str,
+    ) -> Result<()> {
+        let conn = self.writer.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sentry_cursors (workspace, bot, last_issue_id, last_poll_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(workspace, bot) DO UPDATE SET last_issue_id = ?3, last_poll_at = ?4",
+            params![workspace, bot, last_issue_id, last_poll_at],
+        )?;
+        Ok(())
+    }
+
     /// Execute a raw SQL batch (for schema migrations from other modules).
     pub fn execute_batch(&self, sql: &str) -> Result<()> {
         let conn = self.writer.lock().unwrap();
