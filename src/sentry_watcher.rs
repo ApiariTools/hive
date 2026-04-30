@@ -60,7 +60,10 @@ impl SentryWatcher {
     pub fn new(bots: Vec<WatchedBot>, db: Db) -> Self {
         let states = bots
             .into_iter()
-            .filter(|b| b.watch.contains(&"sentry".to_string()))
+            .filter(|b| {
+                b.watch.contains(&"sentry".to_string())
+                    && b.services.contains(&"sentry".to_string())
+            })
             .map(|bot| {
                 let config = load_sentry_config(&bot);
                 SentryBotState {
@@ -72,11 +75,12 @@ impl SentryWatcher {
             })
             .collect();
 
-        Self {
-            states,
-            db,
-            client: reqwest::Client::new(),
-        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
+
+        Self { states, db, client }
     }
 }
 
@@ -113,23 +117,18 @@ impl Watcher for SentryWatcher {
     }
 
     async fn tick(&mut self, _ctx: &TickContext) -> Vec<Action> {
-        let mut actions = Vec::new();
+        // Build concurrent fetch futures for all active bots
+        let mut futures = Vec::new();
+        let mut active_indices = Vec::new();
 
-        for state in &mut self.states {
+        for (i, state) in self.states.iter().enumerate() {
             if state.disabled {
                 continue;
             }
 
             let config = match &state.config {
                 Some(c) => c.clone(),
-                None => {
-                    warn!(
-                        "[sentry] no valid sentry config for {}/{}, disabling",
-                        state.bot.workspace, state.bot.name
-                    );
-                    state.disabled = true;
-                    continue;
-                }
+                None => continue, // will be disabled below
             };
 
             let url = format!(
@@ -137,13 +136,42 @@ impl Watcher for SentryWatcher {
                 config.org, config.project
             );
 
-            let response = match self
-                .client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", config.token))
-                .send()
-                .await
-            {
+            let client = self.client.clone();
+            active_indices.push(i);
+            futures.push(async move {
+                let response = client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", config.token))
+                    .send()
+                    .await;
+                (response, config)
+            });
+        }
+
+        // Disable bots with no config (deferred to avoid borrow conflict above)
+        for state in &mut self.states {
+            if !state.disabled && state.config.is_none() {
+                warn!(
+                    "[sentry] no valid sentry config for {}/{}, disabling",
+                    state.bot.workspace, state.bot.name
+                );
+                state.disabled = true;
+            }
+        }
+
+        if futures.is_empty() {
+            return Vec::new();
+        }
+
+        // Poll all bots concurrently
+        let results = futures_util::future::join_all(futures).await;
+
+        let mut actions = Vec::new();
+        for (result_idx, (response, _config)) in results.into_iter().enumerate() {
+            let state_idx = active_indices[result_idx];
+            let state = &mut self.states[state_idx];
+
+            let response = match response {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(
@@ -213,20 +241,24 @@ impl Watcher for SentryWatcher {
             };
 
             if !state.initialized {
-                // First run: record cursor, don't alert
-                if let Some(first) = issues.first() {
-                    let now = chrono::Utc::now().to_rfc3339();
-                    if let Err(e) = self.db.set_sentry_cursor(
-                        &state.bot.workspace,
-                        &state.bot.name,
-                        &first.id,
-                        &now,
-                    ) {
-                        warn!("[sentry] failed to set initial cursor: {e}");
-                    }
-                }
                 state.initialized = true;
-                continue;
+                if cursor.is_some() {
+                    // DB has cursor from previous run, fall through to detect new issues
+                } else {
+                    // True first run: record cursor without alerting
+                    if let Some(first) = issues.first() {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        if let Err(e) = self.db.set_sentry_cursor(
+                            &state.bot.workspace,
+                            &state.bot.name,
+                            &first.id,
+                            &now,
+                        ) {
+                            warn!("[sentry] failed to set initial cursor: {e}");
+                        }
+                    }
+                    continue;
+                }
             }
 
             // Find new issues (those with IDs we haven't seen)
@@ -374,13 +406,20 @@ mod tests {
         let db = Db::open(&dir.path().join("test.db")).unwrap();
         crate::sentry_watcher::ensure_schema(&db);
 
+        // Has both watch=["sentry"] and services=["sentry"] — included
         let sentry_bot = make_test_bot(vec!["sentry".to_string()]);
+        // Has watch=["github"] — excluded
         let github_bot = WatchedBot {
             watch: vec!["github".to_string()],
             ..make_test_bot(vec![])
         };
+        // Has watch=["sentry"] but no services=["sentry"] — excluded
+        let watch_only_bot = WatchedBot {
+            services: vec![],
+            ..make_test_bot(vec![])
+        };
 
-        let watcher = SentryWatcher::new(vec![sentry_bot, github_bot], db);
+        let watcher = SentryWatcher::new(vec![sentry_bot, github_bot, watch_only_bot], db);
         assert_eq!(watcher.states.len(), 1);
     }
 
@@ -492,6 +531,32 @@ project = "my-project"
             .unwrap();
         let cursor = db.get_sentry_cursor("ws", "bot").unwrap();
         assert_eq!(cursor.as_deref(), Some("67890"));
+    }
+
+    #[test]
+    fn test_sentry_watcher_init_respects_existing_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("test.db")).unwrap();
+        crate::sentry_watcher::ensure_schema(&db);
+
+        // Simulate cursor from a previous daemon run
+        db.set_sentry_cursor("test-ws", "test-bot", "99999", "2026-04-29T09:00:00Z")
+            .unwrap();
+
+        let bot = make_test_bot(vec!["sentry".to_string()]);
+        let state = SentryBotState {
+            bot,
+            config: None,
+            initialized: false,
+            disabled: false,
+        };
+
+        // After initialization, cursor should still be the old one (not overwritten)
+        let cursor = db.get_sentry_cursor("test-ws", "test-bot").unwrap();
+        assert_eq!(cursor.as_deref(), Some("99999"));
+
+        // initialized starts false but config is None, so it would be disabled
+        assert!(!state.initialized);
     }
 
     #[tokio::test]

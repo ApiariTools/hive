@@ -398,7 +398,9 @@ impl Db {
         conn.execute(
             "INSERT INTO sentry_cursors (workspace, bot, last_issue_id, last_poll_at)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(workspace, bot) DO UPDATE SET last_issue_id = ?3, last_poll_at = ?4",
+             ON CONFLICT(workspace, bot) DO UPDATE SET
+               last_issue_id = excluded.last_issue_id,
+               last_poll_at = excluded.last_poll_at",
             params![workspace, bot, last_issue_id, last_poll_at],
         )?;
         Ok(())
