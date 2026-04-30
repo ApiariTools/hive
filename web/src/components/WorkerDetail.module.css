@@ -327,17 +327,21 @@
 /* ── Diff view ── */
 .diffFileSection {
   margin-bottom: 16px;
-  overflow-x: auto;
 }
 
 .diffFileSection:last-child {
   margin-bottom: 0;
 }
 
+.diffContent {
+  overflow-x: auto;
+}
+
 .diffFileName {
   position: sticky;
   top: 0;
   z-index: 10;
+  width: 100%;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-strong);

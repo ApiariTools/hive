@@ -53,21 +53,24 @@ function FileDiffView({ fileName, content }: { fileName: string; content: string
 
   return (
     <div className={styles.diffFileSection}>
-      <div
+      <button
         className={styles.diffFileName}
         onClick={() => setCollapsed((c) => !c)}
+        aria-expanded={!collapsed}
       >
         <span className={`${styles.chevron} ${collapsed ? styles.chevronCollapsed : ""}`}>&#9660;</span>
         {fileName}
-      </div>
+      </button>
       {!collapsed && (
-        <GitDiffView
-          diffFile={diffFile}
-          diffViewMode={DiffModeEnum.Unified}
-          diffViewTheme="dark"
-          diffViewHighlight
-          diffViewFontSize={12}
-        />
+        <div className={styles.diffContent}>
+          <GitDiffView
+            diffFile={diffFile}
+            diffViewMode={DiffModeEnum.Unified}
+            diffViewTheme="dark"
+            diffViewHighlight
+            diffViewFontSize={12}
+          />
+        </div>
       )}
     </div>
   );
