@@ -128,7 +128,9 @@ pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
 
 /// Ensure the swarm daemon is running, starting it if necessary.
 async fn ensure_daemon_running(dir: &std::path::Path) -> Result<()> {
-    // Try a ping to see if the daemon is already reachable
+    // Try a ping to see if the daemon is already reachable.
+    // This is a blocking Unix socket call but completes in microseconds
+    // when the daemon is up, so we don't spawn_blocking for it.
     if send_daemon_request(dir, &DaemonRequest::Ping).is_ok() {
         return Ok(());
     }
@@ -136,15 +138,16 @@ async fn ensure_daemon_running(dir: &std::path::Path) -> Result<()> {
     info!("swarm daemon not reachable, attempting to start it");
 
     // Shell out to `swarm daemon start`
-    let dir_str = dir.display().to_string();
     let child = std::process::Command::new("swarm")
-        .args(["--dir", &dir_str, "daemon", "start"])
+        .arg("--dir")
+        .arg(dir)
+        .args(["daemon", "start"])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn();
 
     match child {
-        Ok(_) => {
+        Ok(child) => {
             // Wait for the socket to appear (up to 5 seconds)
             for _ in 0..50 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -153,12 +156,29 @@ async fn ensure_daemon_running(dir: &std::path::Path) -> Result<()> {
                     return Ok(());
                 }
             }
+            // Daemon didn't become reachable — try to capture stderr for diagnostics
+            let stderr_hint = child
+                .wait_with_output()
+                .ok()
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                })
+                .map(|s| format!("\nDaemon stderr: {s}"))
+                .unwrap_or_default();
             Err(color_eyre::eyre::eyre!(
-                "swarm daemon was started but did not become reachable within 5 seconds"
+                "swarm daemon was started but did not become reachable within 5 seconds{stderr_hint}"
             ))
         }
-        Err(_) => Err(color_eyre::eyre::eyre!(
-            "Swarm daemon is not running. Start it with: swarm --dir {} daemon start",
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(color_eyre::eyre::eyre!(
+            "Swarm daemon is not running and the `swarm` binary was not found on PATH.\n\
+             Install it with: cargo install apiari-swarm\n\
+             Then start with: swarm --dir {} daemon start",
+            dir.display()
+        )),
+        Err(e) => Err(color_eyre::eyre::eyre!(
+            "Swarm daemon is not running and failed to start it: {e}\n\
+             Start it manually with: swarm --dir {} daemon start",
             dir.display()
         )),
     }
