@@ -41,6 +41,12 @@ pub enum Action {
         worker_id: String,
         message: String,
     },
+    /// Update the Sentry cursor after signals have been dispatched
+    UpdateSentryCursor {
+        workspace: String,
+        bot: String,
+        issue_id: String,
+    },
     /// Fire a due follow-up (inject action as user message to bot)
     FireFollowup {
         id: String,
@@ -127,9 +133,19 @@ impl TickEngine {
                 }
             }
 
-            // Execute actions — spawn long-running ones as background tasks
+            // Execute actions — spawn long-running ones as background tasks.
+            // Collect JoinHandles so UpdateSentryCursor can await signal dispatch.
+            let mut signal_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
             for action in all_actions {
-                execute_action(action, &db, events.as_ref());
+                if matches!(action, Action::UpdateSentryCursor { .. }) {
+                    // Await all preceding signal dispatches before advancing cursor
+                    for handle in signal_handles.drain(..) {
+                        let _ = handle.await;
+                    }
+                }
+                if let Some(handle) = execute_action(action, &db, events.as_ref()) {
+                    signal_handles.push(handle);
+                }
             }
 
             // Wait for next tick (wall-clock aligned, not work-time + sleep)
@@ -139,8 +155,13 @@ impl TickEngine {
 }
 
 /// Execute an action. Long-running actions (signal dispatch, bot runs) are spawned
-/// as background tasks to avoid blocking the tick loop.
-fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
+/// as background tasks to avoid blocking the tick loop. Returns the JoinHandle for
+/// spawned tasks so callers can await them when ordering matters.
+fn execute_action(
+    action: Action,
+    db: &Db,
+    events: Option<&EventHub>,
+) -> Option<tokio::task::JoinHandle<()>> {
     match action {
         Action::LogBotMessage {
             workspace,
@@ -148,6 +169,7 @@ fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
             message,
         } => {
             let _ = db.add_message(&workspace, &bot, "system", &message, None);
+            None
         }
         Action::DispatchSignal {
             bot,
@@ -156,21 +178,21 @@ fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
             signal_body,
         } => {
             let db = db.clone();
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let signal = crate::watcher::Signal {
                     source: signal_source,
                     title: signal_title,
                     body: signal_body,
                 };
                 crate::watcher::dispatch_signal(&bot, &db, &signal).await;
-            });
+            }))
         }
         Action::RunBot { bot } => {
             let db = db.clone();
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let prompt = bot.proactive_prompt.as_deref().unwrap_or("");
                 crate::watcher::run_proactive(&bot, &db, prompt).await;
-            });
+            }))
         }
         Action::FireFollowup {
             id,
@@ -208,6 +230,18 @@ fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
                     tracing::warn!("[followup] failed to mark {id} as fired: {e}");
                 }
             }
+            None
+        }
+        Action::UpdateSentryCursor {
+            workspace,
+            bot,
+            issue_id,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = db.set_sentry_cursor(&workspace, &bot, &issue_id, &now) {
+                tracing::warn!("[sentry] failed to update cursor for {workspace}/{bot}: {e}");
+            }
+            None
         }
         Action::SendToWorker {
             workspace_root,
@@ -215,7 +249,7 @@ fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
             message,
         } => {
             let root = workspace_root.clone();
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let req = apiari_swarm::client::DaemonRequest::SendMessage {
                     worktree_id: worker_id.clone(),
                     message,
@@ -241,7 +275,7 @@ fn execute_action(action: Action, db: &Db, events: Option<&EventHub>) {
                         tracing::warn!("[pr-feedback] spawn_blocking failed: {e}");
                     }
                 }
-            });
+            }))
         }
     }
 }
@@ -862,5 +896,61 @@ mod tests {
             .unwrap();
         let last = db.get_schedule_last_run("ws", "bot").unwrap();
         assert_eq!(last.as_deref(), Some("2026-04-29T10:00:00+00:00"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_action_cursor_update_writes_after_signal_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(&dir.path().join("test.db")).unwrap();
+        crate::sentry_watcher::ensure_schema(&db);
+
+        // Verify UpdateSentryCursor is synchronous (returns None) and writes DB
+        let result = execute_action(
+            Action::UpdateSentryCursor {
+                workspace: "ws".to_string(),
+                bot: "bot".to_string(),
+                issue_id: "42".to_string(),
+            },
+            &db,
+            None,
+        );
+        assert!(result.is_none(), "UpdateSentryCursor should be synchronous");
+        let cursor = db.get_sentry_cursor("ws", "bot").unwrap();
+        assert_eq!(cursor.as_deref(), Some("42"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_action_dispatch_signal_returns_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(&dir.path().join("test.db")).unwrap();
+
+        let bot = WatchedBot {
+            workspace: "ws".to_string(),
+            name: "bot".to_string(),
+            provider: "claude".to_string(),
+            model: None,
+            role: "test".to_string(),
+            watch: vec![],
+            working_dir: None,
+            schedule: None,
+            schedule_hours: None,
+            proactive_prompt: None,
+            services: vec![],
+        };
+
+        let result = execute_action(
+            Action::DispatchSignal {
+                bot,
+                signal_source: "sentry".to_string(),
+                signal_title: "test".to_string(),
+                signal_body: "body".to_string(),
+            },
+            &db,
+            None,
+        );
+        assert!(
+            result.is_some(),
+            "DispatchSignal should return a JoinHandle"
+        );
     }
 }
