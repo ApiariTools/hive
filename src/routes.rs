@@ -4462,4 +4462,65 @@ role = "Chat"
         assert_eq!(last_user.content, user_msg);
         assert!(!last_user.content.contains("workflow-reminder"));
     }
+
+    // ── response_style ──
+
+    #[test]
+    fn test_response_style_bot_overrides_workspace() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: None,
+                response_style: Some("Workspace style".into()),
+                ..Default::default()
+            }),
+            bots: Some(vec![BotInfo {
+                name: "Custom".into(),
+                color: None,
+                role: None,
+                description: None,
+                provider: "claude".into(),
+                model: None,
+                prompt_file: None,
+                watch: vec![],
+                services: vec![],
+                response_style: Some("Bot style".into()),
+            }]),
+        };
+        let prompt = build_system_prompt(&config, "Custom", "test").full;
+        assert!(prompt.contains("## Response Style\nBot style"));
+        assert!(!prompt.contains("Workspace style"));
+    }
+
+    #[test]
+    fn test_response_style_inherits_from_workspace() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: None,
+                response_style: Some("Workspace style".into()),
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main", "test").full;
+        assert!(prompt.contains("## Response Style\nWorkspace style"));
+    }
+
+    #[test]
+    fn test_response_style_absent_when_not_set() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: None,
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main", "test").full;
+        assert!(!prompt.contains("## Response Style"));
+    }
 }
