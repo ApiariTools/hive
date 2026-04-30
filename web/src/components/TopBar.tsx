@@ -32,7 +32,7 @@ function dotTitle(p: { name: string; status: string; usage_percent: number | nul
 
 export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggle, onOpenPalette, usage }: Props) {
   const showDots = usage?.installed && usage.providers.length > 0;
-  const showInstallHint = usage && !usage.installed;
+
   const activeTabRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -79,14 +79,7 @@ export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggl
           ))}
         </div>
       )}
-      {showInstallHint && (
-        <span
-          className={styles.installHint}
-          title="cargo install --git https://github.com/Dicklesworthstone/coding_agent_usage_tracker"
-        >
-          Install caut for usage stats
-        </span>
-      )}
+
       <button
         className={styles.searchBtn}
         onClick={() => onOpenPalette?.()}
