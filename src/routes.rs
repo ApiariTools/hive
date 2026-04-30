@@ -2518,6 +2518,8 @@ struct WorkerDetail {
 struct WorkerMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
 }
 
 async fn get_worker_detail(
@@ -2579,6 +2581,7 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
 
     let mut messages = Vec::new();
     let mut current_text = String::new();
+    let mut current_text_ts: Option<String> = None;
 
     for line in content.lines() {
         let event: serde_json::Value = match serde_json::from_str(line) {
@@ -2587,10 +2590,17 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
         };
 
         let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let ts = event
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string());
 
         match event_type {
             "assistant_text" => {
                 if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
+                    if current_text.is_empty() {
+                        current_text_ts = ts;
+                    }
                     current_text.push_str(text);
                 }
             }
@@ -2600,12 +2610,14 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
                     messages.push(WorkerMessage {
                         role: "assistant".to_string(),
                         content: std::mem::take(&mut current_text),
+                        timestamp: current_text_ts.take(),
                     });
                 }
                 let tool = event.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
                 messages.push(WorkerMessage {
                     role: "tool".to_string(),
                     content: format!("*Using {tool}*"),
+                    timestamp: ts,
                 });
             }
             "user_message" => {
@@ -2614,12 +2626,14 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
                     messages.push(WorkerMessage {
                         role: "assistant".to_string(),
                         content: std::mem::take(&mut current_text),
+                        timestamp: current_text_ts.take(),
                     });
                 }
                 if let Some(text) = event.get("text").and_then(|t| t.as_str()) {
                     messages.push(WorkerMessage {
                         role: "user".to_string(),
                         content: text.to_string(),
+                        timestamp: ts,
                     });
                 }
             }
@@ -2632,6 +2646,7 @@ fn read_agent_events(root: &std::path::Path, worker_id: &str) -> Vec<WorkerMessa
         messages.push(WorkerMessage {
             role: "assistant".to_string(),
             content: current_text,
+            timestamp: current_text_ts,
         });
     }
 
@@ -3387,10 +3402,10 @@ mod tests {
         std::fs::create_dir_all(&events_dir).unwrap();
         std::fs::write(
             events_dir.join("events.jsonl"),
-            r#"{"type":"assistant_text","text":"Hello "}
-{"type":"assistant_text","text":"world"}
-{"type":"tool_use","tool":"Read"}
-{"type":"assistant_text","text":"Done"}
+            r#"{"type":"assistant_text","text":"Hello ","timestamp":"2025-01-15T13:42:00Z"}
+{"type":"assistant_text","text":"world","timestamp":"2025-01-15T13:42:01Z"}
+{"type":"tool_use","tool":"Read","timestamp":"2025-01-15T13:42:02Z"}
+{"type":"assistant_text","text":"Done","timestamp":"2025-01-15T13:42:03Z"}
 "#,
         )
         .unwrap();
@@ -3399,10 +3414,14 @@ mod tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "assistant");
         assert_eq!(msgs[0].content, "Hello world");
+        // Accumulated text uses the FIRST chunk's timestamp
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2025-01-15T13:42:00Z"));
         assert_eq!(msgs[1].role, "tool");
         assert_eq!(msgs[1].content, "*Using Read*");
+        assert_eq!(msgs[1].timestamp.as_deref(), Some("2025-01-15T13:42:02Z"));
         assert_eq!(msgs[2].role, "assistant");
         assert_eq!(msgs[2].content, "Done");
+        assert_eq!(msgs[2].timestamp.as_deref(), Some("2025-01-15T13:42:03Z"));
     }
 
     #[test]
@@ -3412,7 +3431,7 @@ mod tests {
         std::fs::create_dir_all(&events_dir).unwrap();
         std::fs::write(
             events_dir.join("events.jsonl"),
-            r#"{"type":"user_message","text":"fix the bug"}
+            r#"{"type":"user_message","text":"fix the bug","timestamp":"2025-01-15T14:00:00Z"}
 {"type":"assistant_text","text":"On it"}
 "#,
         )
@@ -3422,6 +3441,9 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[0].content, "fix the bug");
+        assert_eq!(msgs[0].timestamp.as_deref(), Some("2025-01-15T14:00:00Z"));
+        // assistant_text without timestamp field
+        assert!(msgs[1].timestamp.is_none());
     }
 
     // ── read_swarm_workers ──
