@@ -93,7 +93,7 @@ export function WorkerDetail({ worker, detail, workspace, remote, onBack }: Prop
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [detail?.conversation.length]);
+  }, [detail?.conversation.length, infoTab]);
 
   // Reset cached diff when worker changes
   useEffect(() => {
