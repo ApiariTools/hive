@@ -33,7 +33,7 @@ vi.mock("../soundCues", () => ({
 }));
 
 import { ChatPanel } from "../components/ChatPanel";
-import type { Message } from "../types";
+import type { Message, Followup } from "../types";
 
 const mockMessages: Message[] = [
   { id: 1, workspace: "test", bot: "Main", role: "user", content: "hello", attachments: null, created_at: new Date().toISOString() },
@@ -281,6 +281,39 @@ describe("ChatPanel", () => {
 
     expect(onSend).toHaveBeenCalledWith("voice msg", undefined);
     expect(screen.queryByText(/queued/)).not.toBeInTheDocument();
+  });
+
+  it("renders fired followups inline in message feed", () => {
+    const now = new Date();
+    const msgs: Message[] = [
+      { id: 1, workspace: "test", bot: "Main", role: "user", content: "check PR", attachments: null, created_at: new Date(now.getTime() - 5000).toISOString() },
+      { id: 2, workspace: "test", bot: "Main", role: "assistant", content: "I'll check it", attachments: null, created_at: new Date(now.getTime() - 3000).toISOString() },
+    ];
+    const followups: Followup[] = [
+      { id: "fu_1", workspace: "test", bot: "Main", action: "Check PR status", created_at: new Date(now.getTime() - 4000).toISOString(), fires_at: new Date(now.getTime() - 3500).toISOString(), status: "fired" },
+    ];
+    render(<ChatPanel {...defaultProps} messages={msgs} followups={followups} workspace="test" />);
+    // Fired followup should render inline with "Follow-up triggered" label
+    expect(screen.getByText("Follow-up triggered")).toBeInTheDocument();
+    expect(screen.getByText(/Check PR status/)).toBeInTheDocument();
+  });
+
+  it("does not render cancelled followups", () => {
+    const followups: Followup[] = [
+      { id: "fu_2", workspace: "test", bot: "Main", action: "Cancelled action", created_at: new Date().toISOString(), fires_at: new Date().toISOString(), status: "cancelled" },
+    ];
+    render(<ChatPanel {...defaultProps} followups={followups} workspace="test" />);
+    expect(screen.queryByText(/Cancelled action/)).not.toBeInTheDocument();
+  });
+
+  it("renders pending followups at bottom, not inline", () => {
+    const followups: Followup[] = [
+      { id: "fu_3", workspace: "test", bot: "Main", action: "Future check", created_at: new Date().toISOString(), fires_at: new Date(Date.now() + 60000).toISOString(), status: "pending" },
+    ];
+    render(<ChatPanel {...defaultProps} followups={followups} workspace="test" />);
+    expect(screen.getByText(/Follow-up in/)).toBeInTheDocument();
+    expect(screen.getByText(/Future check/)).toBeInTheDocument();
+    expect(screen.getByText("Cancel")).toBeInTheDocument();
   });
 
   it("does not play sound cues when voice mode is off", () => {

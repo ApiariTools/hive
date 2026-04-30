@@ -60,6 +60,16 @@ describe("FollowupCard", () => {
     expect(api.cancelFollowup).toHaveBeenCalledWith("ws", "fu_test123");
   });
 
+  it("renders inline variant without cancel button", () => {
+    const { container } = render(
+      <FollowupCard followup={makeFollowup({ status: "fired" })} workspace="ws" inline />
+    );
+    expect(screen.getByText("Follow-up triggered")).toBeInTheDocument();
+    expect(screen.queryByText("Cancel")).not.toBeInTheDocument();
+    // Should have inline class
+    expect(container.querySelector('[class*="inline"]')).not.toBeNull();
+  });
+
   it("updates countdown over time", async () => {
     vi.useFakeTimers();
     const followup = makeFollowup({

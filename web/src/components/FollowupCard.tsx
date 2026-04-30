@@ -18,9 +18,10 @@ interface Props {
   followup: Followup;
   workspace: string;
   onCancelled?: (id: string) => void;
+  inline?: boolean;
 }
 
-export function FollowupCard({ followup, workspace, onCancelled }: Props) {
+export function FollowupCard({ followup, workspace, onCancelled, inline }: Props) {
   const [remaining, setRemaining] = useState(() =>
     new Date(followup.fires_at).getTime() - Date.now()
   );
@@ -55,6 +56,7 @@ export function FollowupCard({ followup, workspace, onCancelled }: Props) {
     styles.card,
     status === "fired" ? styles.fired : "",
     status === "cancelled" ? styles.cancelled : "",
+    inline ? styles.inline : "",
   ]
     .filter(Boolean)
     .join(" ");

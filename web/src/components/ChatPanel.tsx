@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, Loader2, Square, Volume2, AudioLines } from "lucide-react";
@@ -362,6 +362,34 @@ export function ChatPanel({ bot, botDescription, botProvider, botModel, messages
     } catch { return null; }
   }
 
+  // ── Timeline: merge fired followups into message feed ──
+
+  type TimelineItem =
+    | { kind: "message"; msg: Message }
+    | { kind: "followup"; followup: Followup };
+
+  const { timeline, pendingFollowups } = useMemo(() => {
+    const now = Date.now();
+    // Treat pending followups whose fires_at has elapsed as effectively fired
+    const inlineFollowups = (followups ?? []).filter(
+      (f) => f.status === "fired" || (f.status === "pending" && new Date(f.fires_at).getTime() <= now),
+    );
+    const pending = (followups ?? []).filter(
+      (f) => f.status === "pending" && new Date(f.fires_at).getTime() > now,
+    );
+
+    const items: TimelineItem[] = [
+      ...messages.map((msg): TimelineItem => ({ kind: "message", msg })),
+      ...inlineFollowups.map((f): TimelineItem => ({ kind: "followup", followup: f })),
+    ].sort((a, b) => {
+      const timeA = new Date(a.kind === "message" ? a.msg.created_at : a.followup.fires_at).getTime();
+      const timeB = new Date(b.kind === "message" ? b.msg.created_at : b.followup.fires_at).getTime();
+      return timeA - timeB;
+    });
+
+    return { timeline: items, pendingFollowups: pending };
+  }, [messages, followups]);
+
   // ── Render ──
 
   return (
@@ -406,38 +434,47 @@ export function ChatPanel({ bot, botDescription, botProvider, botModel, messages
         {!messagesLoading && messages.length === 0 && !loading && (
           <div className={styles.empty}>Start a conversation with {bot}</div>
         )}
-        {messages.map((msg) => (
-          <div key={msg.id} className={`${styles.msg} ${msg.role === "user" ? styles.user : ""}`}>
-            <div className={styles.meta}>
-              <strong>{msg.role === "user" ? "You" : bot}</strong>
-              {" · "}
-              {formatTime(msg.created_at)}
-              {msg.role === "assistant" && (
-                <button
-                  className={`${styles.playBtn} ${playingId === msg.id ? styles.playBtnActive : ""}`}
-                  onClick={() => playMessage(msg)}
-                  aria-label={playingId === msg.id ? "Stop" : loadingTtsId === msg.id ? "Loading" : "Play"}
-                >
-                  {loadingTtsId === msg.id ? (
-                    <Loader2 size={12} className={styles.ttsSpinner} />
-                  ) : playingId === msg.id ? (
-                    <Square size={12} />
-                  ) : (
-                    <Volume2 size={12} />
-                  )}
-                </button>
-              )}
+        {timeline.map((item) =>
+          item.kind === "followup" ? (
+            <FollowupCard
+              key={`followup-${item.followup.id}`}
+              followup={item.followup}
+              workspace={workspace ?? ""}
+              inline
+            />
+          ) : (
+            <div key={item.msg.id} className={`${styles.msg} ${item.msg.role === "user" ? styles.user : ""}`}>
+              <div className={styles.meta}>
+                <strong>{item.msg.role === "user" ? "You" : bot}</strong>
+                {" · "}
+                {formatTime(item.msg.created_at)}
+                {item.msg.role === "assistant" && (
+                  <button
+                    className={`${styles.playBtn} ${playingId === item.msg.id ? styles.playBtnActive : ""}`}
+                    onClick={() => playMessage(item.msg)}
+                    aria-label={playingId === item.msg.id ? "Stop" : loadingTtsId === item.msg.id ? "Loading" : "Play"}
+                  >
+                    {loadingTtsId === item.msg.id ? (
+                      <Loader2 size={12} className={styles.ttsSpinner} />
+                    ) : playingId === item.msg.id ? (
+                      <Square size={12} />
+                    ) : (
+                      <Volume2 size={12} />
+                    )}
+                  </button>
+                )}
+              </div>
+              {renderAttachments(item.msg.attachments)}
+              <div className={styles.text}>
+                {item.msg.role === "assistant" ? (
+                  <Markdown remarkPlugins={[remarkGfm]}>{item.msg.content}</Markdown>
+                ) : (
+                  item.msg.content
+                )}
+              </div>
             </div>
-            {renderAttachments(msg.attachments)}
-            <div className={styles.text}>
-              {msg.role === "assistant" ? (
-                <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
-              ) : (
-                msg.content
-              )}
-            </div>
-          </div>
-        ))}
+          ),
+        )}
         {loading && (
           <div className={styles.msg}>
             <div className={styles.meta}>
@@ -462,7 +499,7 @@ export function ChatPanel({ bot, botDescription, botProvider, botModel, messages
             )}
           </div>
         )}
-        {followups && workspace && followups.map((f) => (
+        {workspace && pendingFollowups.map((f) => (
           <FollowupCard
             key={f.id}
             followup={f}
