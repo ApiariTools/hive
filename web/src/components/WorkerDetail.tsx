@@ -24,40 +24,31 @@ function branchName(branch: string): string {
 type InfoTab = "output" | "task" | "diff" | "chat";
 
 /** Split a multi-file unified diff into per-file sections */
-function splitDiffByFile(raw: string): { fileName: string; hunks: string[] }[] {
-  const files: { fileName: string; hunks: string[] }[] = [];
-  // Split on "diff --git" boundaries
+function splitDiffByFile(raw: string): { fileName: string; content: string }[] {
+  const files: { fileName: string; content: string }[] = [];
   const parts = raw.split(/^(?=diff --git )/m);
   for (const part of parts) {
     if (!part.trim()) continue;
-    // Extract filename from "diff --git a/path b/path"
     const headerMatch = part.match(/^diff --git a\/.+ b\/(.+)/);
     const fileName = headerMatch?.[1] ?? "unknown";
-    // Extract everything from the first @@ onward as hunk content
-    const hunkStart = part.indexOf("\n@@");
-    if (hunkStart === -1) {
-      files.push({ fileName, hunks: [] });
-      continue;
-    }
-    const hunkContent = part.slice(hunkStart + 1); // skip the \n before @@
-    files.push({ fileName, hunks: [hunkContent] });
+    files.push({ fileName, content: part });
   }
   return files;
 }
 
-function FileDiffView({ fileName, hunks }: { fileName: string; hunks: string[] }) {
+function FileDiffView({ fileName, content }: { fileName: string; content: string }) {
   const diffFile = useMemo(() => {
     const lang = getLang(fileName);
     const instance = DiffFile.createInstance({
       oldFile: { fileName, fileLang: lang },
       newFile: { fileName, fileLang: lang },
-      hunks,
+      hunks: [content],
     });
     instance.initTheme("dark");
     instance.init();
     instance.buildUnifiedDiffLines();
     return instance;
-  }, [fileName, hunks]);
+  }, [fileName, content]);
 
   return (
     <div className={styles.diffFileSection}>
@@ -79,7 +70,7 @@ function DiffViewer({ diff }: { diff: string }) {
   return (
     <div>
       {files.map((f, i) => (
-        <FileDiffView key={`${f.fileName}-${i}`} fileName={f.fileName} hunks={f.hunks} />
+        <FileDiffView key={`${f.fileName}-${i}`} fileName={f.fileName} content={f.content} />
       ))}
     </div>
   );
