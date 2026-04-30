@@ -55,6 +55,9 @@ export function ReposPanel({ repos, researchTasks, onSelectWorker, mobileOpen, o
                       }}
                     />
                     <span className={styles.workerId}>{w.id}</span>
+                    <span className={styles.agentBadge} data-agent={w.agent.split(/[- ]/)[0].toLowerCase()}>
+                      {w.agent}
+                    </span>
                     <span className={styles.workerBranch}>{branchName(w.branch)}</span>
                     {w.pr_url && <span className={styles.prBadge}>PR</span>}
                     {w.review_state && (

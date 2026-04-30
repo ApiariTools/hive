@@ -41,10 +41,35 @@
   min-width: 0;
 }
 
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .title {
   font-size: 16px;
   font-weight: 600;
   color: var(--text-strong);
+}
+
+.agentBadge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+  color: #7eb8f7;
+  background: rgba(126, 184, 247, 0.12);
+}
+
+.agentBadge[data-agent="codex"] {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.agentBadge[data-agent="gemini"] {
+  color: #5cc5c5;
+  background: rgba(92, 197, 197, 0.12);
 }
 
 .subtitle {

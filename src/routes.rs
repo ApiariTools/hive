@@ -294,6 +294,7 @@ struct WorkspaceInfo_ {
     root: Option<String>,
     name: Option<String>,
     description: Option<String>,
+    default_agent: Option<String>,
     tts_voice: Option<String>,
     tts_speed: Option<f32>,
 }
@@ -581,7 +582,13 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         // Swarm worker dispatch instructions
         let has_swarm = root_path.join(".swarm").exists();
         if has_swarm {
-            prompt.push_str(
+            let agent_flag = ws
+                .default_agent
+                .as_deref()
+                .filter(|a| matches!(*a, "claude" | "codex" | "gemini"))
+                .map(|a| format!(" --agent {a}"))
+                .unwrap_or_default();
+            prompt.push_str(&format!(
                 "\n## Swarm Workers\n\
                  You dispatch coding tasks to swarm workers. Workers run in their own git worktrees \
                  with an LLM agent that writes code, commits, and opens PRs.\n\n\
@@ -592,7 +599,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                  IMPORTANT: Always use `hive swarm` commands, never bare `swarm`. The hive wrapper ensures the correct workspace directory is used.\n\n\
                  Commands:\n\
                  - List workers: `hive swarm status`\n\
-                 - Spawn worker: `hive swarm create --repo <repo> --prompt-file /tmp/task.txt`\n\
+                 - Spawn worker: `hive swarm create --repo <repo>{agent_flag} --prompt-file /tmp/task.txt`\n\
                    (Write the task prompt to a file first, then pass --prompt-file. Never inline long prompts.)\n\
                  - Send message: `hive swarm send <worktree_id> \"message\"`\n\
                  - Close worker: `hive swarm close <worktree_id>` (only to cancel/abandon — not needed after merge)\n\n\
@@ -3053,6 +3060,41 @@ mod tests {
         let prompt = build_system_prompt(&config, "Main", "test").full;
         assert!(prompt.contains("Swarm Workers"));
         assert!(prompt.contains("swarm"));
+    }
+
+    #[test]
+    fn test_build_prompt_swarm_with_default_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                default_agent: Some("codex".into()),
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main", "test").full;
+        assert!(prompt.contains("--agent codex"));
+    }
+
+    #[test]
+    fn test_build_prompt_swarm_without_default_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".swarm")).unwrap();
+
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: Some(dir.path().to_string_lossy().to_string()),
+                name: Some("test".into()),
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main", "test").full;
+        assert!(!prompt.contains("--agent"));
     }
 
     #[test]
