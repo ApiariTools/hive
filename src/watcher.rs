@@ -229,13 +229,7 @@ pub(crate) async fn run_proactive(bot: &WatchedBot, db: &Db, prompt: &str) {
             );
         }
         _ => {
-            let _ = db.add_message(
-                &bot.workspace,
-                &bot.name,
-                "assistant",
-                "No notable findings this check.",
-                None,
-            );
+            info!("[watcher] {} proactive check: nothing to report", bot.name);
         }
     }
 }
