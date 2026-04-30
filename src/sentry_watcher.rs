@@ -261,18 +261,24 @@ impl Watcher for SentryWatcher {
                 }
             }
 
-            // Find new issues (those with IDs we haven't seen)
+            // Find new issues — Sentry IDs are monotonically increasing integers,
+            // so we filter to issues with id > cursor. This avoids depending on the
+            // cursor issue still being present in the `is:unresolved` results.
             let new_issues: Vec<&SentryIssue> = match &cursor {
                 Some(last_id) => {
-                    // Issues are sorted by date desc. Collect until we hit the last known ID.
+                    let cursor_num: u64 = last_id.parse().unwrap_or(0);
                     issues
                         .iter()
-                        .take_while(|issue| issue.id != *last_id)
+                        .filter(|issue| issue.id.parse::<u64>().unwrap_or(0) > cursor_num)
                         .collect()
                 }
                 None => {
-                    // No cursor but initialized — shouldn't happen, take first issue
-                    issues.iter().take(1).collect()
+                    // No cursor but initialized — shouldn't happen, take highest-ID issue
+                    issues
+                        .iter()
+                        .max_by_key(|i| i.id.parse::<u64>().unwrap_or(0))
+                        .into_iter()
+                        .collect()
                 }
             };
 
