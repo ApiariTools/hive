@@ -247,6 +247,8 @@ struct BotInfo {
     watch: Vec<String>,
     #[serde(default)]
     services: Vec<String>,
+    #[serde(default)]
+    response_style: Option<String>,
 }
 
 fn default_provider() -> String {
@@ -264,6 +266,7 @@ fn default_main_bot() -> BotInfo {
         prompt_file: None,
         watch: vec![],
         services: vec![],
+        response_style: None,
     }
 }
 
@@ -297,6 +300,7 @@ struct WorkspaceInfo_ {
     default_agent: Option<String>,
     tts_voice: Option<String>,
     tts_speed: Option<f32>,
+    response_style: Option<String>,
 }
 
 fn load_workspace_config(path: &std::path::Path) -> WorkspaceConfig {
@@ -494,6 +498,11 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         .as_ref()
         .and_then(|bots| bots.iter().find(|b| b.name == bot_name));
 
+    // Resolve response style: bot-level overrides workspace-level
+    let response_style = bot_config
+        .and_then(|b| b.response_style.as_deref())
+        .or(ws.response_style.as_deref());
+
     // Dynamic docs content — excluded from the session hash so that
     // creating/editing/deleting docs doesn't reset bot sessions.
     let mut docs_dynamic = String::new();
@@ -512,6 +521,10 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
             prompt.push_str(&format!("\nWorkspace: {ws_name} — {ws_desc}\n"));
             if let Some(ref root) = ws.root {
                 prompt.push_str(&format!("Working directory: {root}\n"));
+            }
+
+            if let Some(style) = response_style {
+                prompt.push_str(&format!("\n## Response Style\n{style}\n"));
             }
 
             // Inject service credentials even for custom prompt bots
@@ -554,6 +567,10 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          Your role: {bot_role}\n\n\
          If you're unsure, ask instead of guessing.\n"
     );
+
+    if let Some(style) = response_style {
+        prompt.push_str(&format!("\n## Response Style\n{style}\n"));
+    }
 
     if let Some(ref root) = ws.root {
         prompt.push_str(&format!("Working directory: {root}\n"));
@@ -646,7 +663,8 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          description = \"...\"          # optional description\n\
          default_agent = \"codex\"        # default agent for swarm workers: claude | codex | gemini (optional, default claude)\n\
          tts_voice = \"af_nova\"         # TTS voice (optional)\n\
-         tts_speed = 1.2              # TTS speed multiplier (optional, default 1.2)\n\n\
+         tts_speed = 1.2              # TTS speed multiplier (optional, default 1.2)\n\
+         response_style = \"Brief and friendly. 2-3 sentences for routine stuff.\"  # optional, injected into all bot prompts\n\n\
          [[bots]]\n\
          name = \"BotName\"             # bot display name\n\
          color = \"#f5c542\"            # hex color for UI\n\
@@ -659,7 +677,8 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          schedule = \"0 9 * * 1-5\"     # cron expression (min hour dom month dow)\n\
          schedule_hours = 24           # deprecated: interval in hours (fallback if no schedule)\n\
          proactive_prompt = \"...\"     # task for scheduled runs\n\
-         services = [\"sentry\"]        # inject service credentials from .apiari/services.toml\n\n\
+         services = [\"sentry\"]        # inject service credentials from .apiari/services.toml\n\
+         response_style = \"...\"        # override workspace response_style for this bot (optional)\n\n\
          Context files in workspace root:\n\
          - .apiari/context.md — project context (appended to all bot prompts)\n\
          - .apiari/soul.md — communication style (appended to all bot prompts)\n\
@@ -3038,6 +3057,7 @@ mod tests {
                 prompt_file: None,
                 watch: vec![],
                 services: vec![],
+                response_style: None,
             }]),
         };
         let prompt = build_system_prompt(&config, "Customer", "test").full;
@@ -3299,6 +3319,7 @@ mod tests {
             prompt_file: None,
             watch: vec![],
             services: vec![],
+            response_style: None,
         };
         let json = serde_json::to_string(&bot).unwrap();
         assert!(!json.contains("description"));
@@ -3605,6 +3626,7 @@ mod tests {
                 prompt_file: None,
                 watch: vec![],
                 services: vec!["sentry".to_string()],
+                response_style: None,
             }]),
         };
         let prompt = build_system_prompt(&config, "Monitor", "test").full;
@@ -3639,6 +3661,7 @@ mod tests {
                 prompt_file: None,
                 watch: vec![],
                 services: vec![],
+                response_style: None,
             }]),
         };
         let prompt = build_system_prompt(&config, "Plain", "test").full;
@@ -3701,6 +3724,7 @@ services = ["sentry", "grafana"]
                 prompt_file: Some("custom.md".to_string()),
                 watch: vec![],
                 services: vec!["sentry".to_string()],
+                response_style: None,
             }]),
         };
         let prompt = build_system_prompt(&config, "Custom", "test").full;
@@ -3849,6 +3873,7 @@ role = "Chat"
                 prompt_file: Some("custom.md".to_string()),
                 watch: vec![],
                 services: vec![],
+                response_style: None,
             }]),
         };
         let prompt = build_system_prompt(&config, "Custom", "test").full;
@@ -3971,6 +3996,7 @@ role = "Chat"
                 prompt_file: Some("custom.md".to_string()),
                 watch: vec![],
                 services: vec![],
+                response_style: None,
             }]),
         };
 
