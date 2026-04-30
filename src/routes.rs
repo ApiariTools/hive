@@ -498,7 +498,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         .as_ref()
         .and_then(|bots| bots.iter().find(|b| b.name == bot_name));
 
-    // Resolve response style: bot-level overrides workspace-level
+    // Resolve response_style: bot-level > workspace-level > None
     let response_style = bot_config
         .and_then(|b| b.response_style.as_deref())
         .or(ws.response_style.as_deref());
@@ -533,6 +533,11 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
                 if !services_prompt.is_empty() {
                     prompt.push_str(&services_prompt);
                 }
+            }
+
+            // Response style
+            if let Some(style) = response_style {
+                prompt.push_str(&format!("\n## Response Style\n{style}\n"));
             }
 
             // Follow-up scheduler
@@ -645,6 +650,11 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
         docs_dynamic.push_str(&build_docs_instructions(ws_id));
     }
 
+    // Response style
+    if let Some(style) = response_style {
+        prompt.push_str(&format!("\n## Response Style\n{style}\n"));
+    }
+
     // Follow-up scheduler
     prompt.push_str(&followup_prompt(ws_id));
 
@@ -662,6 +672,7 @@ fn build_system_prompt(ws_config: &WorkspaceConfig, bot_name: &str, ws_id: &str)
          name = \"my-workspace\"        # display name\n\
          description = \"...\"          # optional description\n\
          default_agent = \"codex\"        # default agent for swarm workers: claude | codex | gemini (optional, default claude)\n\
+         response_style = \"...\"        # default response style for all bots (optional, freeform)\n\
          tts_voice = \"af_nova\"         # TTS voice (optional)\n\
          tts_speed = 1.2              # TTS speed multiplier (optional, default 1.2)\n\
          response_style = \"Brief and friendly. 2-3 sentences for routine stuff.\"  # optional, injected into all bot prompts\n\n\
@@ -4450,5 +4461,66 @@ role = "Chat"
         let last_user = convos.iter().rev().find(|m| m.role == "user").unwrap();
         assert_eq!(last_user.content, user_msg);
         assert!(!last_user.content.contains("workflow-reminder"));
+    }
+
+    // ── response_style ──
+
+    #[test]
+    fn test_response_style_bot_overrides_workspace() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: None,
+                response_style: Some("Workspace style".into()),
+                ..Default::default()
+            }),
+            bots: Some(vec![BotInfo {
+                name: "Custom".into(),
+                color: None,
+                role: None,
+                description: None,
+                provider: "claude".into(),
+                model: None,
+                prompt_file: None,
+                watch: vec![],
+                services: vec![],
+                response_style: Some("Bot style".into()),
+            }]),
+        };
+        let prompt = build_system_prompt(&config, "Custom", "test").full;
+        assert!(prompt.contains("## Response Style\nBot style"));
+        assert!(!prompt.contains("Workspace style"));
+    }
+
+    #[test]
+    fn test_response_style_inherits_from_workspace() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: None,
+                response_style: Some("Workspace style".into()),
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main", "test").full;
+        assert!(prompt.contains("## Response Style\nWorkspace style"));
+    }
+
+    #[test]
+    fn test_response_style_absent_when_not_set() {
+        let config = WorkspaceConfig {
+            workspace: Some(WorkspaceInfo_ {
+                root: None,
+                name: Some("test".into()),
+                description: None,
+                ..Default::default()
+            }),
+            bots: None,
+        };
+        let prompt = build_system_prompt(&config, "Main", "test").full;
+        assert!(!prompt.contains("## Response Style"));
     }
 }
