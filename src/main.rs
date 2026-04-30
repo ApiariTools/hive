@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
                     Some(d) => d,
                     None => resolve_swarm_dir(&config_dir)?,
                 };
-                return swarm::run(work_dir, command);
+                return swarm::run(work_dir, command).await;
             }
         }
     }

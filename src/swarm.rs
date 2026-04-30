@@ -1,4 +1,5 @@
 use apiari_swarm::client::{DaemonRequest, DaemonResponse, send_daemon_request};
+use apiari_swarm::daemon::lifecycle;
 use clap::Subcommand;
 use color_eyre::Result;
 use std::path::PathBuf;
@@ -39,7 +40,9 @@ pub enum SwarmCommand {
     Status,
 }
 
-pub fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
+pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
+    lifecycle::ensure_daemon_running(&dir).await?;
+
     match cmd {
         SwarmCommand::Create {
             repo,
