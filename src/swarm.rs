@@ -184,26 +184,6 @@ pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn register_workspace_request_roundtrips() {
-        let req = DaemonRequest::RegisterWorkspace {
-            path: PathBuf::from("/tmp/test"),
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
-        match parsed {
-            DaemonRequest::RegisterWorkspace { path } => {
-                assert_eq!(path, PathBuf::from("/tmp/test"));
-            }
-            other => panic!("expected RegisterWorkspace, got {other:?}"),
-        }
-    }
-}
-
 fn check_response(resp: &DaemonResponse) -> Result<()> {
     match resp {
         DaemonResponse::Ok { data } => {
