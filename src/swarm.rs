@@ -43,6 +43,25 @@ pub enum SwarmCommand {
 pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
     lifecycle::ensure_daemon_running(&dir).await?;
 
+    // Register this workspace with the daemon before any worker operations.
+    let reg_dir = dir.clone();
+    let reg_resp = tokio::task::spawn_blocking(move || {
+        let req = DaemonRequest::RegisterWorkspace {
+            path: reg_dir.clone(),
+        };
+        send_daemon_request(&reg_dir, &req)
+    })
+    .await?;
+    match reg_resp {
+        Ok(DaemonResponse::Error { message }) => {
+            eprintln!("warning: failed to register workspace: {message}");
+        }
+        Err(e) => {
+            eprintln!("warning: failed to register workspace: {e}");
+        }
+        _ => {}
+    }
+
     match cmd {
         SwarmCommand::Create {
             repo,
@@ -124,6 +143,26 @@ pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_workspace_request_roundtrips() {
+        let req = DaemonRequest::RegisterWorkspace {
+            path: PathBuf::from("/tmp/test"),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DaemonRequest::RegisterWorkspace { path } => {
+                assert_eq!(path, PathBuf::from("/tmp/test"));
+            }
+            other => panic!("expected RegisterWorkspace, got {other:?}"),
+        }
+    }
 }
 
 fn check_response(resp: &DaemonResponse) -> Result<()> {
