@@ -1636,6 +1636,7 @@ async fn run_bot_codex(
                 apiari_codex_sdk::ExecOptions {
                     model: model.clone(),
                     full_auto: true,
+                    sandbox: Some(apiari_codex_sdk::SandboxMode::DangerFullAccess),
                     working_dir,
                     images: image_paths,
                     ..Default::default()
