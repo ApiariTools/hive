@@ -376,6 +376,52 @@ pub fn parse_review_config(config_path: &std::path::Path) -> ReviewConfig {
         .unwrap_or_default()
 }
 
+// ── Helpers ──
+
+fn validate_workspace_name(name: &str) -> Result<(), StatusCode> {
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+fn get_comment_by_id(db: &Db, comment_id: i64) -> Option<ReviewComment> {
+    let conn = db.reader().ok()?;
+    conn.query_row(
+        "SELECT id, reviewer, reviewer_type, file, line, body, status, round, created_at, resolved_at
+         FROM review_comments WHERE id = ?1",
+        params![comment_id],
+        |row| {
+            Ok(ReviewComment {
+                id: row.get(0)?,
+                reviewer: row.get(1)?,
+                reviewer_type: row.get(2)?,
+                file: row.get(3)?,
+                line: row.get(4)?,
+                body: row.get(5)?,
+                status: row.get(6)?,
+                round: row.get(7)?,
+                created_at: row.get(8)?,
+                resolved_at: row.get(9)?,
+            })
+        },
+    )
+    .ok()
+}
+
+fn comment_belongs_to_worker(db: &Db, comment_id: i64, workspace: &str, worker_id: &str) -> bool {
+    let conn = match db.reader() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    conn.query_row(
+        "SELECT 1 FROM review_comments WHERE id = ?1 AND workspace = ?2 AND worker_id = ?3",
+        params![comment_id, workspace, worker_id],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 // ── API route handlers ──
 
 use crate::routes::AppState;
@@ -407,7 +453,8 @@ pub fn review_routes() -> Router<AppState> {
 async fn get_review_status(
     State(state): State<AppState>,
     Path((workspace, worker_id)): Path<(String, String)>,
-) -> Json<ReviewStatus> {
+) -> Result<Json<ReviewStatus>, StatusCode> {
+    validate_workspace_name(&workspace)?;
     let review_state = get_review_state(&state.db, &workspace, &worker_id);
 
     let config_path = state
@@ -444,12 +491,12 @@ async fn get_review_status(
         })
         .collect();
 
-    Json(ReviewStatus {
+    Ok(Json(ReviewStatus {
         state: current_state,
         round,
         reviewers,
         config: Some(config),
-    })
+    }))
 }
 
 #[derive(Deserialize)]
@@ -494,11 +541,7 @@ async fn post_review_comment(
     )
     .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let comments = list_review_comments(&state.db, &workspace, &worker_id, Some(round), None);
-    let comment = comments
-        .into_iter()
-        .find(|c| c.id == id)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let comment = get_comment_by_id(&state.db, id).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(comment))
 }
@@ -510,12 +553,15 @@ struct PatchCommentRequest {
 
 async fn patch_comment(
     State(state): State<AppState>,
-    Path((_workspace, _worker_id, comment_id)): Path<(String, String, i64)>,
+    Path((workspace, worker_id, comment_id)): Path<(String, String, i64)>,
     Json(body): Json<PatchCommentRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let valid_statuses = ["resolved", "open", "wont_fix"];
     if !valid_statuses.contains(&body.status.as_str()) {
         return Err(StatusCode::BAD_REQUEST);
+    }
+    if !comment_belongs_to_worker(&state.db, comment_id, &workspace, &worker_id) {
+        return Err(StatusCode::NOT_FOUND);
     }
     update_comment_status(&state.db, comment_id, &body.status);
     Ok(Json(
@@ -527,6 +573,7 @@ async fn approve_review(
     State(state): State<AppState>,
     Path((workspace, worker_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    validate_workspace_name(&workspace)?;
     let review_state = get_review_state(&state.db, &workspace, &worker_id);
     let round = review_state.as_ref().map(|rs| rs.round).unwrap_or(1);
 
