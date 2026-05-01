@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import { Search } from "lucide-react";
+import { Search, Smartphone } from "lucide-react";
 import type { Workspace } from "../types";
 import type { UsageData } from "../api";
 import styles from "./TopBar.module.css";
@@ -11,6 +11,7 @@ interface Props {
   onSelect: (name: string, remote?: string) => void;
   onMenuToggle?: () => void;
   onOpenPalette?: () => void;
+  onToggleSimulator?: () => void;
   usage?: UsageData;
 }
 
@@ -30,7 +31,7 @@ function dotTitle(p: { name: string; status: string; usage_percent: number | nul
   return t;
 }
 
-export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggle, onOpenPalette, usage }: Props) {
+export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggle, onOpenPalette, onToggleSimulator, usage }: Props) {
   const showDots = usage?.installed && usage.providers.length > 0;
 
   const activeTabRef = useRef<HTMLButtonElement>(null);
@@ -80,6 +81,13 @@ export function TopBar({ workspaces, active, activeRemote, onSelect, onMenuToggl
         </div>
       )}
 
+      <button
+        className={styles.searchBtn}
+        onClick={() => onToggleSimulator?.()}
+        aria-label="Toggle simulator"
+      >
+        <Smartphone size={16} />
+      </button>
       <button
         className={styles.searchBtn}
         onClick={() => onOpenPalette?.()}

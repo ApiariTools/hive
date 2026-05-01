@@ -149,6 +149,11 @@ pub fn router_with_http_client(
             "/api/workspaces/{workspace}/research/{task_id}",
             get(get_research_task),
         )
+        .route(
+            "/api/simulator/status",
+            get(crate::simulator::simulator_status),
+        )
+        .route("/api/simulator/stream", get(crate::simulator::simulator_ws))
         .route("/api/remotes", get(list_remotes))
         .route(
             "/api/remotes/{remote}/workspaces/{workspace}/{*rest}",

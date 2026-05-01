@@ -17,6 +17,7 @@ mod remote;
 mod research;
 mod routes;
 mod sentry_watcher;
+mod simulator;
 mod setup;
 mod stt;
 mod swarm;

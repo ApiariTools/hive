@@ -12,6 +12,7 @@ pub mod remote;
 pub mod research;
 pub mod routes;
 pub mod sentry_watcher;
+pub mod simulator;
 pub mod stt;
 pub mod tick;
 pub mod tts;

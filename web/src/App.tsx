@@ -6,6 +6,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { ReposPanel } from "./components/ReposPanel";
 import { WorkerDetail } from "./components/WorkerDetail";
 import { DocsPanel } from "./components/DocsPanel";
+import { SimulatorPanel } from "./components/SimulatorPanel";
 import type { Workspace, Bot, Worker, Repo, Message, WorkerDetail as WorkerDetailData, CrossWorkspaceBot, ResearchTask, Followup } from "./types";
 import * as api from "./api";
 import { initWakeLock } from "./wakeLock";
@@ -64,6 +65,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [otherWorkspaceBots, setOtherWorkspaceBots] = useState<CrossWorkspaceBot[]>([]);
   const [docsOpen, setDocsOpen] = useState(false);
+  const [simulatorOpen, setSimulatorOpen] = useState(false);
   const [researchTasks, setResearchTasks] = useState<ResearchTask[]>([]);
   const [followups, setFollowups] = useState<Followup[]>([]);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
@@ -497,6 +499,7 @@ export default function App() {
         onSelect={handleSelectWorkspace}
         onMenuToggle={() => setMenuOpen((v) => !v)}
         onOpenPalette={() => setPaletteOpen(true)}
+        onToggleSimulator={() => setSimulatorOpen((v) => !v)}
         usage={usage}
       />
       <div style={{ flex: 1, display: "flex", overflow: "hidden", position: "relative" }}>
@@ -566,6 +569,7 @@ export default function App() {
           onClose={() => setWorkersOpen(false)}
         />
       </div>
+      <SimulatorPanel open={simulatorOpen} onClose={() => setSimulatorOpen(false)} />
       <CommandPalette
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
