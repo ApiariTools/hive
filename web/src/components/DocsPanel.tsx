@@ -35,6 +35,11 @@ export function DocsPanel({ workspace, remote }: Props) {
     setSavedContent("");
   }, [workspace, loadDocs]);
 
+  useEffect(() => {
+    const id = setInterval(loadDocs, 10_000);
+    return () => clearInterval(id);
+  }, [loadDocs]);
+
   // Clear debounce timer on unmount or doc switch
   useEffect(() => {
     return () => {
