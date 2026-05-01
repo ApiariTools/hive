@@ -43,6 +43,11 @@ pub enum SwarmCommand {
 pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
     lifecycle::ensure_daemon_running(&dir).await?;
 
+    // Register this workspace with the daemon before any worker operations.
+    // Ignore errors — if already registered, the daemon returns Ok.
+    let reg_req = DaemonRequest::RegisterWorkspace { path: dir.clone() };
+    let _ = send_daemon_request(&dir, &reg_req);
+
     match cmd {
         SwarmCommand::Create {
             repo,
@@ -124,6 +129,21 @@ pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_workspace_request_serializes() {
+        let req = DaemonRequest::RegisterWorkspace {
+            path: PathBuf::from("/tmp/test"),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("register_workspace"));
+        assert!(json.contains("/tmp/test"));
+    }
 }
 
 fn check_response(resp: &DaemonResponse) -> Result<()> {
