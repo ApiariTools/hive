@@ -253,7 +253,7 @@
   margin: 0.25em 0;
 }
 
-.preview li:has(> input[type="checkbox"]) {
+.preview :global(.task-list-item) {
   list-style: none;
 }
 
@@ -271,9 +271,14 @@
   cursor: default;
 }
 
+.preview input[type="checkbox"]:disabled {
+  opacity: 0.7;
+}
+
 .preview input[type="checkbox"]:checked {
   background: var(--accent);
   border-color: var(--accent);
+  opacity: 1;
 }
 
 .preview input[type="checkbox"]:checked::after {
@@ -289,7 +294,7 @@
 }
 
 .preview blockquote {
-  border-left: 3px solid var(--border);
+  border-left: 3px solid var(--text-faint);
   padding-left: 1em;
   color: var(--text-faint);
   margin: 0.5em 0;
