@@ -35,6 +35,16 @@ export function DocsPanel({ workspace, remote }: Props) {
     setSavedContent("");
   }, [workspace, loadDocs]);
 
+  useEffect(() => {
+    let inflight = false;
+    const id = setInterval(() => {
+      if (inflight) return;
+      inflight = true;
+      api.getDocs(workspace, remote).then(setDocs).catch(() => {}).finally(() => { inflight = false; });
+    }, 10_000);
+    return () => clearInterval(id);
+  }, [workspace, remote]);
+
   // Clear debounce timer on unmount or doc switch
   useEffect(() => {
     return () => {
