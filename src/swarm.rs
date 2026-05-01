@@ -129,7 +129,6 @@ fn format_status(workers: &[WorkerInfo]) -> String {
             .join("\n")
     }
 }
-
 pub async fn run(dir: PathBuf, cmd: SwarmCommand, config_dir: &std::path::Path) -> Result<()> {
     lifecycle::ensure_daemon_running(&dir).await?;
 

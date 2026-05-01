@@ -474,7 +474,10 @@ fn all_workspace_roots(config_dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// Find the `default_agent` setting from the workspace TOML whose root matches `work_dir`.
-fn find_default_agent(config_dir: &std::path::Path, work_dir: &std::path::Path) -> Option<String> {
+pub fn find_default_agent(
+    config_dir: &std::path::Path,
+    work_dir: &std::path::Path,
+) -> Option<String> {
     let workspaces_dir = config_dir.join("workspaces");
     let entries = std::fs::read_dir(&workspaces_dir).ok()?;
 
@@ -550,6 +553,11 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Escape backslashes in a path for embedding in TOML strings (Windows compat).
+    fn toml_escape_path(p: &std::path::Path) -> String {
+        p.display().to_string().replace('\\', "\\\\")
+    }
+
     #[test]
     fn test_find_default_agent_from_workspace_toml() {
         let tmp = tempfile::tempdir().unwrap();
@@ -562,7 +570,7 @@ mod tests {
 
         let toml_content = format!(
             "[workspace]\nroot = \"{}\"\ndefault_agent = \"codex\"\n",
-            work_dir.display()
+            toml_escape_path(&work_dir)
         );
         fs::write(ws_dir.join("test.toml"), toml_content).unwrap();
 
@@ -580,7 +588,7 @@ mod tests {
         let work_dir = tmp.path().join("myproject");
         fs::create_dir_all(&work_dir).unwrap();
 
-        let toml_content = format!("[workspace]\nroot = \"{}\"\n", work_dir.display());
+        let toml_content = format!("[workspace]\nroot = \"{}\"\n", toml_escape_path(&work_dir));
         fs::write(ws_dir.join("test.toml"), toml_content).unwrap();
 
         let result = find_default_agent(config_dir, &work_dir);
@@ -602,7 +610,7 @@ mod tests {
 
         let toml_content = format!(
             "[workspace]\nroot = \"{}\"\ndefault_agent = \"codex\"\n",
-            other_dir.display()
+            toml_escape_path(&other_dir)
         );
         fs::write(ws_dir.join("test.toml"), toml_content).unwrap();
 
