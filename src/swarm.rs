@@ -12,9 +12,9 @@ pub enum SwarmCommand {
         #[arg(long)]
         repo: Option<String>,
 
-        /// Agent to use (claude, codex, or gemini)
-        #[arg(long, default_value = "claude")]
-        agent: String,
+        /// Agent to use (claude, codex, or gemini); defaults to workspace config or "claude"
+        #[arg(long)]
+        agent: Option<String>,
 
         /// Task prompt text
         #[arg(long, conflicts_with = "prompt_file")]
@@ -38,6 +38,12 @@ pub enum SwarmCommand {
     },
     /// List current swarm workers
     Status,
+}
+
+/// Resolve the agent to use: explicit flag > workspace config > "claude" fallback.
+fn resolve_agent(flag: Option<String>, config_default: Option<String>) -> String {
+    flag.or(config_default)
+        .unwrap_or_else(|| "claude".to_string())
 }
 
 /// Resolve the prompt text from either --prompt or --prompt-file.
@@ -124,7 +130,7 @@ fn format_status(workers: &[WorkerInfo]) -> String {
     }
 }
 
-pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
+pub async fn run(dir: PathBuf, cmd: SwarmCommand, config_dir: &std::path::Path) -> Result<()> {
     lifecycle::ensure_daemon_running(&dir).await?;
 
     // Register this workspace with the daemon before any worker operations.
@@ -153,6 +159,9 @@ pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
             prompt,
             prompt_file,
         } => {
+            let config_default_agent = crate::find_default_agent(config_dir, &dir);
+            let agent = resolve_agent(agent, config_default_agent);
+
             let req = build_create_request(&dir, repo, agent, prompt, prompt_file)?;
             let resp =
                 tokio::task::spawn_blocking(move || send_daemon_request(&dir, &req)).await??;
@@ -244,6 +253,28 @@ mod tests {
             role: None,
             review_verdict: None,
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Agent resolution tests
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_agent_from_config() {
+        let result = resolve_agent(None, Some("codex".to_string()));
+        assert_eq!(result, "codex");
+    }
+
+    #[test]
+    fn test_agent_flag_overrides_config() {
+        let result = resolve_agent(Some("claude".to_string()), Some("codex".to_string()));
+        assert_eq!(result, "claude");
+    }
+
+    #[test]
+    fn test_agent_falls_back_to_claude() {
+        let result = resolve_agent(None, None);
+        assert_eq!(result, "claude");
     }
 
     // ═══════════════════════════════════════════════════════════

@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
                     Some(d) => d,
                     None => resolve_swarm_dir(&config_dir)?,
                 };
-                return swarm::run(work_dir, command).await;
+                return swarm::run(work_dir, command, &config_dir).await;
             }
         }
     }
@@ -473,6 +473,39 @@ fn all_workspace_roots(config_dir: &std::path::Path) -> Vec<PathBuf> {
     roots
 }
 
+/// Find the `default_agent` setting from the workspace TOML whose root matches `work_dir`.
+fn find_default_agent(config_dir: &std::path::Path, work_dir: &std::path::Path) -> Option<String> {
+    let workspaces_dir = config_dir.join("workspaces");
+    let entries = std::fs::read_dir(&workspaces_dir).ok()?;
+
+    let canonical_work_dir =
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "toml")
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(config) = toml::from_str::<toml::Value>(&content)
+            && let Some(root) = config
+                .get("workspace")
+                .and_then(|w| w.get("root"))
+                .and_then(|r| r.as_str())
+        {
+            let canonical_root =
+                std::fs::canonicalize(root).unwrap_or_else(|_| PathBuf::from(root));
+            if canonical_root == canonical_work_dir {
+                return config
+                    .get("workspace")
+                    .and_then(|w| w.get("default_agent"))
+                    .and_then(|a| a.as_str())
+                    .map(|s| s.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 /// Resolve the workspace root directory for `hive swarm` when `--dir` is not provided.
 /// Finds the most specific workspace root that is a parent of the cwd.
 /// Canonicalizes both paths to handle symlinks correctly.
@@ -509,5 +542,71 @@ fn dirs_home_dir() -> Option<std::path::PathBuf> {
 mod dirs {
     pub fn home_dir() -> Option<std::path::PathBuf> {
         super::dirs_home_dir()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_find_default_agent_from_workspace_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path();
+        let ws_dir = config_dir.join("workspaces");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        let work_dir = tmp.path().join("myproject");
+        fs::create_dir_all(&work_dir).unwrap();
+
+        let toml_content = format!(
+            "[workspace]\nroot = \"{}\"\ndefault_agent = \"codex\"\n",
+            work_dir.display()
+        );
+        fs::write(ws_dir.join("test.toml"), toml_content).unwrap();
+
+        let result = find_default_agent(config_dir, &work_dir);
+        assert_eq!(result, Some("codex".to_string()));
+    }
+
+    #[test]
+    fn test_find_default_agent_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path();
+        let ws_dir = config_dir.join("workspaces");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        let work_dir = tmp.path().join("myproject");
+        fs::create_dir_all(&work_dir).unwrap();
+
+        let toml_content = format!("[workspace]\nroot = \"{}\"\n", work_dir.display());
+        fs::write(ws_dir.join("test.toml"), toml_content).unwrap();
+
+        let result = find_default_agent(config_dir, &work_dir);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_default_agent_no_matching_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path();
+        let ws_dir = config_dir.join("workspaces");
+        fs::create_dir_all(&ws_dir).unwrap();
+
+        let work_dir = tmp.path().join("myproject");
+        fs::create_dir_all(&work_dir).unwrap();
+
+        let other_dir = tmp.path().join("other");
+        fs::create_dir_all(&other_dir).unwrap();
+
+        let toml_content = format!(
+            "[workspace]\nroot = \"{}\"\ndefault_agent = \"codex\"\n",
+            other_dir.display()
+        );
+        fs::write(ws_dir.join("test.toml"), toml_content).unwrap();
+
+        let result = find_default_agent(config_dir, &work_dir);
+        assert_eq!(result, None);
     }
 }
