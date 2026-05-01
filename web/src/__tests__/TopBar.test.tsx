@@ -50,6 +50,14 @@ describe("TopBar", () => {
     expect(screen.getByText("hive")).toBeInTheDocument();
   });
 
+  it("calls onToggleSimulator when simulator button clicked", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    render(<TopBar workspaces={workspaces} active="apiari" onSelect={vi.fn()} onToggleSimulator={onToggle} />);
+    await user.click(screen.getByRole("button", { name: "Toggle simulator" }));
+    expect(onToggle).toHaveBeenCalled();
+  });
+
   it("scrolls active tab into view on workspace change", () => {
     const scrollIntoView = vi.fn();
     Element.prototype.scrollIntoView = scrollIntoView;

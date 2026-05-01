@@ -18,6 +18,7 @@ mod research;
 mod routes;
 mod sentry_watcher;
 mod setup;
+mod simulator;
 mod stt;
 mod swarm;
 mod tick;
