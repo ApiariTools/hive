@@ -10,6 +10,7 @@ pub mod pr_review;
 pub mod publish;
 pub mod remote;
 pub mod research;
+pub mod review;
 pub mod routes;
 pub mod sentry_watcher;
 pub mod simulator;
