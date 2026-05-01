@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "apiari-hive"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "apiari-claude-sdk",
  "apiari-codex-sdk",
@@ -203,9 +203,9 @@ dependencies = [
 
 [[package]]
 name = "apiari-swarm"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "076026fc6a4ab3c1deba388657d49a828bbba63f75e6a80dcd3590cee3d6177f"
+checksum = "e371c0c70b449af2a9eefefc53b1c8c6039e9452245130227ea0308ca22f2e20"
 dependencies = [
  "a2a-types",
  "apiari-claude-sdk",

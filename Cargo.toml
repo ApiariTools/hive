@@ -1,6 +1,6 @@
 [package]
 name = "apiari-hive"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 description = "Workspace chat hub — multi-bot, multi-provider AI assistant with swarm integration"
 license = "MIT"
@@ -36,7 +36,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1", features = ["io-util"] }
 toml = "0.8"
-apiari-swarm = { version = "0.1.7", default-features = false, features = ["client", "server"] }
+apiari-swarm = { version = "0.1.8", default-features = false, features = ["client", "server"] }
 tempfile = "3"
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 tower-http = { version = "0.6", features = ["cors"] }
