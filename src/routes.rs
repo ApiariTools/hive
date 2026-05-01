@@ -162,6 +162,7 @@ pub fn router_with_http_client(
                 .put(proxy_remote_put)
                 .delete(proxy_remote_delete),
         )
+        .merge(crate::review::review_routes())
         .fallback(get(serve_frontend))
         .layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB for image attachments
         .layer(CorsLayer::permissive())

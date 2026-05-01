@@ -15,6 +15,7 @@ mod pr_review;
 mod publish;
 mod remote;
 mod research;
+mod review;
 mod routes;
 mod sentry_watcher;
 mod setup;
@@ -129,6 +130,7 @@ async fn main() -> Result<()> {
     let db_path = config_dir.join("hive.db");
     let db = db::Db::open(&db_path)?;
     research::ensure_schema(&db);
+    review::ensure_schema(&db);
 
     // Build unified tick engine
     let watched_bots = load_watched_bots(&config_dir);

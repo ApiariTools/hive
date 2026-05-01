@@ -420,6 +420,17 @@ impl Db {
         Ok(())
     }
 
+    /// Execute an INSERT and return last_insert_rowid.
+    pub fn insert_returning_id(
+        &self,
+        sql: &str,
+        params_slice: &[&dyn rusqlite::types::ToSql],
+    ) -> Result<i64> {
+        let conn = self.writer.lock().unwrap();
+        conn.execute(sql, params_slice)?;
+        Ok(conn.last_insert_rowid())
+    }
+
     /// Query research tasks for a workspace.
     pub fn query_research_tasks(
         &self,
