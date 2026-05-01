@@ -44,8 +44,9 @@ pub enum SwarmCommand {
 fn resolve_prompt(prompt: Option<String>, prompt_file: Option<PathBuf>) -> Result<String> {
     match (prompt, prompt_file) {
         (Some(text), _) => Ok(text),
-        (_, Some(path)) => std::fs::read_to_string(&path)
-            .map_err(|e| color_eyre::eyre::eyre!("failed to read prompt file: {e}")),
+        (_, Some(path)) => std::fs::read_to_string(&path).map_err(|e| {
+            color_eyre::eyre::eyre!("failed to read prompt file '{}': {e}", path.display())
+        }),
         (None, None) => Err(color_eyre::eyre::eyre!(
             "either --prompt or --prompt-file is required"
         )),
@@ -153,7 +154,8 @@ pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
             prompt_file,
         } => {
             let req = build_create_request(&dir, repo, agent, prompt, prompt_file)?;
-            let resp = send_daemon_request(&dir, &req)?;
+            let resp =
+                tokio::task::spawn_blocking(move || send_daemon_request(&dir, &req)).await??;
             check_response(&resp)?;
         }
         SwarmCommand::Send {
@@ -161,17 +163,20 @@ pub async fn run(dir: PathBuf, cmd: SwarmCommand) -> Result<()> {
             message,
         } => {
             let req = build_send_request(worktree_id, message);
-            let resp = send_daemon_request(&dir, &req)?;
+            let resp =
+                tokio::task::spawn_blocking(move || send_daemon_request(&dir, &req)).await??;
             check_response(&resp)?;
         }
         SwarmCommand::Close { worktree_id } => {
             let req = build_close_request(worktree_id);
-            let resp = send_daemon_request(&dir, &req)?;
+            let resp =
+                tokio::task::spawn_blocking(move || send_daemon_request(&dir, &req)).await??;
             check_response(&resp)?;
         }
         SwarmCommand::Status => {
             let req = build_list_request(&dir);
-            let resp = send_daemon_request(&dir, &req)?;
+            let resp =
+                tokio::task::spawn_blocking(move || send_daemon_request(&dir, &req)).await??;
             match &resp {
                 DaemonResponse::Workers { workers } => {
                     println!("{}", format_status(workers));
@@ -352,18 +357,23 @@ mod tests {
     #[test]
     fn test_create_worker_request_prompt_file_missing_errors() {
         let dir = PathBuf::from("/tmp/test-workspace");
+        let missing_path = "/tmp/nonexistent-prompt-file-12345.txt";
         let result = build_create_request(
             &dir,
             None,
             "claude".to_string(),
             None,
-            Some(PathBuf::from("/tmp/nonexistent-prompt-file-12345.txt")),
+            Some(PathBuf::from(missing_path)),
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("failed to read prompt file"),
             "error should mention prompt file: {err}"
+        );
+        assert!(
+            err.contains(missing_path),
+            "error should include the file path: {err}"
         );
     }
 
