@@ -72,8 +72,9 @@ export function SimulatorPanel({ open, onClose }: Props) {
         img.onload = () => {
           const canvas = canvasRef.current;
           if (canvas) {
-            canvas.width = img.width;
-            canvas.height = img.height;
+            // Only resize canvas when dimensions actually change to avoid costly reallocation
+            if (canvas.width !== img.width) canvas.width = img.width;
+            if (canvas.height !== img.height) canvas.height = img.height;
             const ctx = canvas.getContext("2d");
             ctx?.drawImage(img, 0, 0);
           }
@@ -107,9 +108,9 @@ export function SimulatorPanel({ open, onClose }: Props) {
   }, []);
 
   const addRipple = useCallback((clientX: number, clientY: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
+    const frame = frameRef.current;
+    if (!frame) return;
+    const rect = frame.getBoundingClientRect();
     const id = ++rippleId.current;
     setRipples((prev) => [
       ...prev,
@@ -250,7 +251,7 @@ export function SimulatorPanel({ open, onClose }: Props) {
             />
             {status?.device || "Simulator"}
           </div>
-          <button className={styles.closeBtn} onClick={onClose}>
+          <button className={styles.closeBtn} onClick={onClose} aria-label="Close simulator">
             <X size={16} />
           </button>
         </div>
@@ -281,7 +282,7 @@ export function SimulatorPanel({ open, onClose }: Props) {
                 <div
                   key={r.id}
                   className={styles.ripple}
-                  style={{ left: r.x, top: r.y + 12 }}
+                  style={{ left: r.x, top: r.y }}
                 />
               ))}
             </div>

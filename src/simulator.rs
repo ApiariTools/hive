@@ -3,6 +3,7 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::process::Command;
 use tracing::{error, warn};
 
@@ -10,7 +11,8 @@ use tracing::{error, warn};
 const SIM_WIDTH: f64 = 393.0;
 const SIM_HEIGHT: f64 = 852.0;
 
-const FRAME_PATH: &str = "/tmp/hive_sim_frame.jpg";
+/// Monotonic counter for unique temp file paths per WebSocket connection.
+static CONNECTION_ID: AtomicU64 = AtomicU64::new(0);
 
 // ── Status endpoint ──
 
@@ -110,12 +112,18 @@ async fn handle_simulator_ws(mut socket: axum::extract::ws::WebSocket) {
         return;
     }
 
+    // Each connection gets its own temp file to avoid races between concurrent clients
+    let conn_id = CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+    let frame_path = format!("/tmp/hive_sim_frame_{conn_id}.jpg");
+    let cleanup_path = frame_path.clone();
+
     let (mut sender, mut receiver) = {
         use futures_util::StreamExt;
         socket.split()
     };
 
     // Frame capture task
+    let capture_path = frame_path.clone();
     let frame_task = tokio::spawn(async move {
         use futures_util::SinkExt;
 
@@ -128,19 +136,22 @@ async fn handle_simulator_ws(mut socket: axum::extract::ws::WebSocket) {
                     "booted",
                     "screenshot",
                     "--type=jpeg",
-                    FRAME_PATH,
+                    &capture_path,
                 ])
                 .output()
                 .await;
 
             match result {
-                Ok(out) if out.status.success() => {
-                    if let Ok(bytes) = tokio::fs::read(FRAME_PATH).await
-                        && sender.send(Message::Binary(bytes.into())).await.is_err()
-                    {
-                        break;
+                Ok(out) if out.status.success() => match tokio::fs::read(&capture_path).await {
+                    Ok(bytes) => {
+                        if sender.send(Message::Binary(bytes.into())).await.is_err() {
+                            break;
+                        }
                     }
-                }
+                    Err(e) => {
+                        warn!("Failed to read screenshot frame: {e}");
+                    }
+                },
                 Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
                     warn!("simctl screenshot failed: {stderr}");
@@ -180,11 +191,21 @@ async fn handle_simulator_ws(mut socket: axum::extract::ws::WebSocket) {
         }
     });
 
-    // Wait for either task to finish, then abort the other
+    // Wait for either task to finish, then abort the other.
+    // Store abort handles before moving JoinHandles into select!
+    let frame_abort = frame_task.abort_handle();
+    let input_abort = input_task.abort_handle();
     tokio::select! {
-        _ = frame_task => {}
-        _ = input_task => {}
+        _ = frame_task => {
+            input_abort.abort();
+        }
+        _ = input_task => {
+            frame_abort.abort();
+        }
     }
+
+    // Clean up temp file
+    let _ = tokio::fs::remove_file(&cleanup_path).await;
 }
 
 async fn dispatch_input(event: InputEvent) -> Result<(), String> {
@@ -251,4 +272,83 @@ async fn run_cmd(program: &str, args: &[&str]) -> Result<(), String> {
         return Err(format!("{program} failed: {stderr}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_tap_event() {
+        let json = r#"{"type": "tap", "x": 0.5, "y": 0.3}"#;
+        let event: InputEvent = serde_json::from_str(json).unwrap();
+        match event {
+            InputEvent::Tap { x, y } => {
+                assert!((x - 0.5).abs() < f64::EPSILON);
+                assert!((y - 0.3).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected Tap"),
+        }
+    }
+
+    #[test]
+    fn test_parse_swipe_event() {
+        let json = r#"{"type": "swipe", "fromX": 0.1, "fromY": 0.8, "toX": 0.9, "toY": 0.2}"#;
+        let event: InputEvent = serde_json::from_str(json).unwrap();
+        match event {
+            InputEvent::Swipe {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            } => {
+                assert!((from_x - 0.1).abs() < f64::EPSILON);
+                assert!((from_y - 0.8).abs() < f64::EPSILON);
+                assert!((to_x - 0.9).abs() < f64::EPSILON);
+                assert!((to_y - 0.2).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected Swipe"),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_event() {
+        let json = r#"{"type": "type", "text": "hello"}"#;
+        let event: InputEvent = serde_json::from_str(json).unwrap();
+        match event {
+            InputEvent::Type { text } => assert_eq!(text, "hello"),
+            _ => panic!("Expected Type"),
+        }
+    }
+
+    #[test]
+    fn test_parse_key_event() {
+        let json = r#"{"type": "key", "key": "return"}"#;
+        let event: InputEvent = serde_json::from_str(json).unwrap();
+        match event {
+            InputEvent::Key { key } => assert_eq!(key, "return"),
+            _ => panic!("Expected Key"),
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_event() {
+        let json = r#"{"type": "unknown"}"#;
+        assert!(serde_json::from_str::<InputEvent>(json).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_simulator_status_returns_not_booted_without_xcrun() {
+        // On CI or machines without Xcode, xcrun will fail and we should get not-booted
+        let result = booted_device().await;
+        // We can't assert booted/not-booted portably, but it must not panic
+        let _ = result;
+    }
+
+    #[test]
+    fn test_connection_id_is_unique() {
+        let id1 = CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+        let id2 = CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+        assert_ne!(id1, id2);
+    }
 }
